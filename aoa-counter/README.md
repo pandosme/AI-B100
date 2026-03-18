@@ -1,4 +1,156 @@
-# AI-B100 AOA Counter — ACAP for Axis Cameras
+# AI-B100 AOA Counter
+
+An [ACAP](https://www.axis.com/developer-community/acap) for Axis cameras that reads **Axis Object Analytics (AOA)** CrosslineCounting events and publishes aggregated people and vehicle counts over LoRaWAN via an [AI-B100 bridge](../README.md).
+
+The camera performs all inference locally. Only numeric counts leave the device — no images, no video.
+
+---
+
+## Requirements
+
+- Axis camera with ACAP v4+ support
+- **Axis Object Analytics** installed and configured on the camera with at least one CrosslineCounting scenario
+- **AI-B100 LoRaWAN bridge** on the same LAN — see the [project README](../README.md) for hardware setup
+- A LoRaWAN network server (TTN, Chirpstack, or private LNS) with the AI-B100 registered
+
+---
+
+## Installation
+
+### 1. Configure Axis Object Analytics
+
+In the camera web UI, open **Axis Object Analytics** and create one or more **CrosslineCounting** scenarios with counting lines drawn in the scene. The ACAP automatically discovers all scenarios and tracks them independently.
+
+### 2. Install the ACAP
+
+Download the `.eap` file matching your camera's architecture:
+- `AI-B100_AOA_Counter_*_aarch64.eap` — ARTPEC-8 / CV25 cameras
+- `AI-B100_AOA_Counter_*_armv7hf.eap` — ARTPEC-6/7 cameras
+
+In the camera web UI: **Settings → Apps → Add app** — upload the `.eap` and start it.
+
+### 3. Configure the ACAP
+
+Open the ACAP from **Settings → Apps → AI-B100 AOA Counter → Open**:
+
+- Set the **AI-B100 IP address**
+- Verify the bridge is connected and joined — the nav bar shows a green **LoRa** dot when joined
+- Set the **transmission interval** (minimum 10 minutes recommended)
+- Enable/disable individual object classes (human, car, bike, bus, truck, other)
+- Click **Join Network** if the bridge has not yet joined the LoRaWAN network
+
+---
+
+## Configuration
+
+```json
+{
+  "b100": {
+    "ip": "10.13.8.47",
+    "port": 80,
+    "timeout": 30
+  },
+  "lorawan": {
+    "port": 10,
+    "confirmed": false,
+    "dataRate": 4,
+    "autoJoin": true
+  },
+  "transmission": {
+    "intervalMinutes": 15,
+    "enabled": true,
+    "classes": {
+      "human": true, "car": true, "bike": true,
+      "bus": true, "truck": true, "other": true
+    }
+  },
+  "polling": {
+    "downlinkIntervalSeconds": 30,
+    "healthCheckIntervalSeconds": 60
+  }
+}
+```
+
+---
+
+## Uplink Payload
+
+Counts are encoded as compact binary and sent over LoRaWAN. JavaScript payload decoders are provided:
+
+- [`ttn-decoder.js`](axis_AoA_and_AIEmb.js) — TTN Payload Formatter / Node-RED Function node
+
+The decoder is also downloadable directly from the ACAP web UI (**About** page → **Download payload decoder**).
+
+---
+
+## Downlink Commands
+
+The ACAP listens for downlink messages from the network server and acts on them. Commands are short binary payloads.
+
+### Port 10 — Actions
+
+| Byte | Action |
+|------|--------|
+| `0x01` | Restart the AI-B100 bridge |
+| `0x02` | Initiate a new LoRaWAN OTAA join |
+| `0x03` | Reset all counters to zero and publish immediately |
+
+### Port 11 — Configuration
+
+Two-byte commands: `[command byte, value byte]`
+
+| Byte 0 | Byte 1 | Action |
+|--------|--------|--------|
+| `0x01` | `5–60` | Set transmission interval (minutes) |
+| `0x02` | `0–5`  | Set fixed data rate (DR0 SF12 … DR5 SF7) |
+| `0x03` | `0/1`  | Disable / enable Adaptive Data Rate (ADR) |
+
+### Port 12 — Information Requests
+
+| Byte | Reply port | Response |
+|------|-----------|----------|
+| `0x01` | 5 | Camera info: `model,serial,firmware,uptime_days` |
+| `0x02` | 6 | Bridge info: `hw_version,sw_version[,DR,maxPayload]` |
+
+### Port 13 — Test
+
+| Byte | Action |
+|------|--------|
+| `0x01` | Send `Hello` test message on port 7 |
+
+---
+
+## Web UI Pages
+
+| Page | Description |
+|------|-------------|
+| **Counters** | Transmission settings, live counter cards, Publish Now button |
+| **AOA** | Active AOA scenarios |
+| **LoRA Bridge** | Bridge connection, hardware/software version, join, polling config |
+| **LoRA Downlink** | Live log of received downlinks; enable/disable commands |
+| **About** | App version, payload decoder download |
+
+---
+
+## Building from Source
+
+Requires Docker with the [Axis ACAP SDK](https://github.com/AxisCommunications/acap-native-sdk) image.
+
+```bash
+cd aoa-counter
+./build.sh
+```
+
+Output:
+- `AI-B100_AOA_Counter_<version>_aarch64.eap`
+- `AI-B100_AOA_Counter_<version>_armv7hf.eap`
+
+---
+
+## License
+
+MIT — see [app/LICENSE](app/LICENSE).
+
 
 > **This ACAP is useless without the AI-B100.**
 > It requires an [AI-B100 LoRaWAN bridge](https://www.ai-embedded.se) connected on the same LAN as the camera. The AI-B100 is the hardware that sends and receives LoRaWAN radio packets. Without it there is no LoRa connectivity.

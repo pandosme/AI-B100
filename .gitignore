@@ -1,12 +1,9 @@
 # Built ACAP packages
 *.eap
 
-# Docker build cache
-lorawan-counter/app/__pycache__/
-
 # Runtime / persisted state (not source)
-lorawan-counter/app/localdata/counters.json
-lorawan-counter/app/settings/state.json
+**/localdata/counters.json
+**/settings/state.json
 
 # Internal development files
 AGENTS.md
