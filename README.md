@@ -1,9 +1,5 @@
 # AI-B100 — Axis Camera ACAP Collection
 
-A collection of open-source [ACAP](https://www.axis.com/developer-community/acap) applications for Axis cameras that use the **AI-B100 LoRaWAN bridge** to transmit data over LoRaWAN.
-
----
-
 ## What Is the AI-B100?
 
 The **AI-B100** is an industrial LoRaWAN bridge by [AI Embedded Nordic AB](https://www.ai-embedded.se) that connects Ethernet-based devices — such as Axis cameras — to LoRaWAN networks. It sits on your local LAN and handles all LoRa radio communication, so the camera only needs to make simple HTTP calls over the local network.

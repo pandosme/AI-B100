@@ -1,5 +1,5 @@
 # Built ACAP packages
-*.eap
+
 
 # Runtime / persisted state (not source)
 **/localdata/counters.json
