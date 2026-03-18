@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html">Counters</a>
+			<a href="aoa.html">AOA</a>
+			<a href="bridge.html" class="active">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="about.html">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="row">
+			<div class="col-12 col-lg-6">
+				<div class="card mb-3">
+					<div class="card-header">
+						<h5 class="card-title mb-0">Bridge Status</h5>
+					</div>
+					<div class="card-body">
+						<div class="info-grid">						<div class="info-row" id="bridge-hw-row" style="display:none"><div class="info-label">Hardware:</div><div class="info-value"><span id="bridge-hw">-</span></div></div>
+						<div class="info-row" id="bridge-sw-row" style="display:none"><div class="info-label">Software:</div><div class="info-value"><span id="bridge-sw">-</span></div></div>							<div class="info-row"><div class="info-label">Connection:</div><div class="info-value"><span id="bridge-connection">Checking...</span></div></div>
+							<div class="info-row"><div class="info-label">Joined:</div><div class="info-value"><span id="bridge-joined">Unknown</span></div></div>
+							<div class="info-row"><div class="info-label">DevEUI:</div><div class="info-value"><span id="bridge-deveui">-</span></div></div>
+							<div class="info-row"><div class="info-label">Frame Up:</div><div class="info-value"><span id="bridge-fcntup">0</span></div></div>
+							<div class="info-row"><div class="info-label">Frame Down:</div><div class="info-value"><span id="bridge-fcntdown">0</span></div></div>
+							<div class="info-row"><div class="info-label">RSSI:</div><div class="info-value"><span id="bridge-rssi">-</span></div></div>
+							<div class="info-row"><div class="info-label">SNR:</div><div class="info-value"><span id="bridge-snr">-</span></div></div>						<div class="info-row"><div class="info-label">Data Rate:</div><div class="info-value"><span id="bridge-dr">-</span></div></div>
+						<div class="info-row"><div class="info-label">Max Payload:</div><div class="info-value"><span id="bridge-maxpayload">-</span></div></div>
+						<div class="info-row"><div class="info-label">Bridge Temp:</div><div class="info-value"><span id="bridge-temp">-</span></div></div>
+						<div class="info-row" id="bridge-info-row" style="display:none"><div class="info-label">Bridge Info:</div><div class="info-value"><span id="bridge-info">-</span></div></div>						</div>
+					</div>
+					<div class="card-footer">
+						<button id="btn-join" class="btn btn-primary">Join Network</button>
+						<button id="btn-test" class="btn btn-secondary">Send Test</button>
+						<button id="btn-restart" class="btn btn-warning">Restart Bridge</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-lg-6">
+				<div class="card mb-3">
+					<div class="card-header">
+						<h5 class="card-title mb-0">Configuration</h5>
+					</div>
+					<div class="card-body">
+						<h6>B100 Device</h6>
+						<div class="form-group row align-items-center mb-2">
+							<label for="b100-ip" class="col-6 col-form-label">IP Address</label>
+							<div class="col-6">
+								<input type="text" class="form-control" id="b100-ip" name="b100.ip">
+			</div>
+						</div>
+
+						<h6 class="mt-3">Polling Intervals (seconds)</h6>
+						<div class="form-group row align-items-center mb-2">
+							<label for="polling-health" class="col-6 col-form-label">Health Monitor</label>
+							<div class="col-6">
+								<input type="number" class="form-control" id="polling-health" name="polling.health_interval">
+							</div>
+						</div>
+						<div class="form-group row align-items-center mb-2">
+							<label for="polling-downlink" class="col-6 col-form-label">Downlink</label>
+							<div class="col-6">
+								<input type="number" class="form-control" id="polling-downlink" name="polling.downlink_interval">
+							</div>
+						</div>
+					</div>
+					<div class="card-footer">
+						<button id="save-settings" class="btn btn-primary btn-block">Save Settings</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<script>
+$(document).ready(function() {
+	let currentSettings = {};
+
+	// Load app info and initial status
+	$.ajax({
+		type: "GET",
+		url: 'app',
+		dataType: 'json',
+		cache: false,
+		success: function(data) {
+			document.title = data.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
+			currentSettings = data.settings;
+			loadSettings(data.settings);
+			loadBridgeStatus();
+		},
+		error: function(response) {
+			showToast("Failed to load device information: " + response.statusText, 'danger');
+		}
+	});
+
+	// Refresh bridge status every 10 seconds
+	setInterval(loadBridgeStatus, 10000);
+
+	function signalQuality(rssi, snr) {
+		const rssiLevels = [
+			{ min: -70,  label: 'Excellent' },
+			{ min: -85,  label: 'Good' },
+			{ min: -100, label: 'Sufficient' },
+			{ min: -115, label: 'Poor' },
+			{ min: -999, label: 'Bad' }
+		];
+		const snrLevels = [
+			{ min: 10,  label: 'Excellent' },
+			{ min: 5,   label: 'Good' },
+			{ min: 0,   label: 'Sufficient' },
+			{ min: -5,  label: 'Poor' },
+			{ min: -99, label: 'Bad' }
+		];
+		const rq = (rssiLevels.find(l => rssi >= l.min) || rssiLevels[4]).label;
+		const sq = (snrLevels.find(l => snr  >= l.min) || snrLevels[4]).label;
+		return { rssi: rq, snr: sq };
+	}
+
+	function loadBridgeStatus() {
+		$.ajax({
+			type: "GET",
+			url: 'status',
+			dataType: 'json',
+			cache: false,
+			success: function(data) {
+				updateNavDot(data);
+				const lorawan = data.lorawan;
+				if (lorawan && lorawan.connected) {
+					$('#bridge-connection').text('Connected').css('color', 'green');
+					if (lorawan.hardwareVersion) { $('#bridge-hw').text(lorawan.hardwareVersion); $('#bridge-hw-row').show(); }
+					if (lorawan.softwareVersion) { $('#bridge-sw').text(lorawan.softwareVersion); $('#bridge-sw-row').show(); }
+					$('#bridge-joined').text(lorawan.joined ? 'Yes' : 'No').css('color', lorawan.joined ? 'green' : 'red');
+					$('#bridge-deveui').text(lorawan.devAddr || '-');
+					$('#bridge-fcntup').text(lorawan.fcntUp || 0);
+					$('#bridge-fcntdown').text(lorawan.fcntDown || 0);
+					$('#bridge-rssi').text(lorawan.rssi ? lorawan.rssi + ' dBm — ' + signalQuality(lorawan.rssi, lorawan.snr).rssi : '-');
+					$('#bridge-snr').text(lorawan.snr ? lorawan.snr + ' dB — ' + signalQuality(lorawan.rssi, lorawan.snr).snr : '-');
+					const drLabels = ['DR0 (SF12)', 'DR1 (SF11)', 'DR2 (SF10)', 'DR3 (SF9)', 'DR4 (SF8)', 'DR5 (SF7)'];
+					$('#bridge-dr').text(lorawan.dataRate != null ? (drLabels[lorawan.dataRate] || 'DR' + lorawan.dataRate) : '-');
+					$('#bridge-maxpayload').text(lorawan.maxPayload ? lorawan.maxPayload + ' bytes' : '-');
+					$('#bridge-temp').text(lorawan.tempC ? lorawan.tempC.toFixed(1) + ' °C' : '-');
+					if (lorawan.bridgeInfo) {
+						$('#bridge-info').text(lorawan.bridgeInfo);
+						$('#bridge-info-row').show();
+					}
+					// Hide Join button if already joined
+					if (lorawan.joined) {
+						$('#btn-join').hide();
+					} else {
+						$('#btn-join').show();
+					}
+				} else {
+					$('#bridge-connection').text('Disconnected').css('color', 'red');
+					$('#bridge-joined').text('Unknown');
+					$('#btn-join').show();
+				}
+			},
+			error: function() {
+				updateNavDot(null);
+				$('#bridge-connection').text('Error').css('color', 'red');
+				$('#btn-join').show();
+			}
+		});
+	}
+
+	function updateNavDot(data) {
+		const dot = $('#lora-nav-dot');
+		const lw = data && data.lorawan;
+		dot.removeClass('lora-joined lora-connected lora-disconnected');
+		if (lw && lw.joined) {
+			dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+		} else if (lw && lw.connected) {
+			dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+		} else {
+			dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+		}
+	}
+
+	function loadSettings(settings) {
+		// B100 settings
+		$('#b100-ip').val(settings.b100?.ip || '');
+
+		// Polling settings
+		$('#polling-health').val(settings.polling?.healthCheckIntervalSeconds || 60);
+		$('#polling-downlink').val(settings.polling?.downlinkIntervalSeconds || 30);
+	}
+
+	function collectSettings() {
+		return {
+			b100: {
+				ip: $('#b100-ip').val()
+			},
+			polling: {
+				healthCheckIntervalSeconds: parseInt($('#polling-health').val()),
+				downlinkIntervalSeconds: parseInt($('#polling-downlink').val())
+			}
+		};
+	}
+
+	$('#save-settings').on('click', function() {
+		const newSettings = collectSettings();
+		$.ajax({
+			type: "POST",
+			url: "settings",
+			contentType: 'application/json',
+			data: JSON.stringify(newSettings),
+			success: function(response) {
+				currentSettings = newSettings;
+				showToast("Settings saved", 'success');
+			},
+			error: function(xhr, status, error) {
+				showToast("Failed to save settings: " + error, 'danger');
+			}
+		});
+	});
+
+	$('#btn-join').on('click', function() {
+		$(this).prop('disabled', true).text('Joining...');
+		$.ajax({
+			type: "POST",
+			url: "join",
+			success: function(response) {
+				showToast("Join request sent", 'success');
+				setTimeout(loadBridgeStatus, 2000);
+			},
+			error: function(xhr) {
+				showToast("Join failed: " + xhr.responseText, 'danger');
+			},
+			complete: function() {
+				$('#btn-join').prop('disabled', false).text('Join Network');
+			}
+		});
+	});
+
+	$('#btn-test').on('click', function() {
+		$(this).prop('disabled', true).text('Sending...');
+		$.ajax({
+			type: "POST",
+			url: "test",
+			success: function(response) {
+				showToast("Test message sent", 'success');
+			},
+			error: function(xhr) {
+				showToast("Test failed: " + xhr.responseText, 'danger');
+			},
+			complete: function() {
+				$('#btn-test').prop('disabled', false).text('Send Test');
+			}
+		});
+	});
+
+	$('#btn-restart').on('click', function() {
+		if (!confirm('Restart the LoRA Bridge device?')) return;
+		$(this).prop('disabled', true).text('Restarting...');
+		$.ajax({
+			type: "POST",
+			url: "restart",
+			success: function(response) {
+				showToast("Bridge restart initiated", 'success');
+				setTimeout(loadBridgeStatus, 5000);
+			},
+			error: function(xhr) {
+				showToast("Restart failed: " + xhr.responseText, 'danger');
+			},
+			complete: function() {
+				setTimeout(function() {
+					$('#btn-restart').prop('disabled', false).text('Restart Bridge');
+				}, 5000);
+			}
+		});
+	});
+});
+</script>
+</body>
+</html>

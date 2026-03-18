@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<script src="js/media-stream-player.min.js"></script>
+	<style>
+		.video-container { position: relative; background: #000; }
+		canvas { cursor: crosshair; }
+		.counter-stats { min-height: 120px; }
+		.btn-group-sm .btn { font-size: 0.875rem; }
+	</style>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html">Counters</a>
+			<a href="aoa.html" class="active">AOA</a>
+			<a href="bridge.html">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="about.html">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="mb-3">
+			<button id="btn-add-counter" class="btn btn-success">+ Add Counter</button>
+		</div>
+		
+		<div id="counters-container" class="row">
+			<!-- Counter cards will be dynamically added here -->
+		</div>
+	</div>
+
+<script>
+let aoaScenarios = [];
+let counterData = {};
+const VIDEO_WIDTH = 640;
+const VIDEO_HEIGHT = 360;
+
+$(document).ready(function() {
+	$.ajax({
+		type: "GET",
+		url: 'app',
+		dataType: 'json',
+		cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+			
+			loadAOAScenarios();
+		},
+		error: function(response) {
+			showToast("Failed to load application: " + response.statusText, 'danger');
+		}
+	});
+
+	function updateNavDot(data) {
+		const dot = $('#lora-nav-dot');
+		const lw = data && data.lorawan;
+		dot.removeClass('lora-joined lora-connected lora-disconnected');
+		if (lw && lw.joined)         dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+		else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+		else                         dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+	}
+	function pollLoraStatus() {
+		$.ajax({ type:'GET', url:'status', dataType:'json', cache:false,
+			success: function(d) { updateNavDot(d); } });
+	}
+	setInterval(pollLoraStatus, 10000);
+	pollLoraStatus();
+	
+	$('#btn-add-counter').on('click', addNewCounter);
+});
+
+// Load AOA scenarios and create cards
+function loadAOAScenarios() {
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "getConfiguration"
+		}),
+		success: function(response) {
+			if (response && response.data && response.data.scenarios) {
+				// Store COMPLETE configuration including devices array
+				window.aoaFullConfig = response.data;
+				
+				// Filter only crosslinecounting scenarios for display
+				aoaScenarios = response.data.scenarios.filter(s => s.type === "crosslinecounting");
+				console.log('Loaded AOA scenarios:', aoaScenarios);
+				
+				renderAllCounters();
+				pollAllCounters();
+				
+				// Sync backend counters with AOA scenarios
+				syncBackendCounters();
+			}
+		},
+		error: function(xhr, status, error) {
+			showToast('Failed to load AOA scenarios: ' + error, 'danger');
+		}
+	});
+}
+
+// Render all counter cards
+function renderAllCounters() {
+	const container = $('#counters-container');
+	container.empty();
+	
+	if (aoaScenarios.length === 0) {
+		container.html('<div class="col-12"><p class="text-muted">No counters configured. Click "Add Counter" to create one.</p></div>');
+		return;
+	}
+	
+	aoaScenarios.forEach(scenario => {
+		const card = createCounterCard(scenario);
+		container.append(card);
+	});
+	
+	// Initialize video players and canvases
+	setTimeout(() => {
+		aoaScenarios.forEach(scenario => {
+			initVideoPlayer(scenario.id);
+			startDrawingLoop(scenario.id);
+		});
+	}, 100);
+}
+
+// Create a counter card for a scenario
+function createCounterCard(scenario) {
+	const line = scenario.triggers && scenario.triggers[0] ? scenario.triggers[0] : null;
+	const vertices = line && line.vertices ? line.vertices : [[-0.5, -0.5], [0.5, 0.5]];
+	
+	return $(`
+		<div class="col-12 col-lg-6 mb-3" id="counter-card-${scenario.id}">
+			<div class="card">
+				<div class="card-header">
+					<div class="d-flex justify-content-between align-items-center mb-2">
+						<h5 class="card-title mb-0">${scenario.name || 'Counter ' + scenario.id}</h5>
+						<div>						<button class="btn btn-sm btn-secondary btn-change-direction" data-id="${scenario.id}" title="Change counting direction">⇄ Direction</button>							<button class="btn btn-sm btn-primary btn-edit-line" data-id="${scenario.id}">Edit Line</button>
+							<button class="btn btn-sm btn-danger btn-delete-counter" data-id="${scenario.id}">Delete</button>
+						</div>
+					</div>
+					<div class="input-group input-group-sm">
+						<span class="input-group-text">Name</span>
+						<input type="text" class="form-control counter-name" value="${scenario.name || ''}" data-id="${scenario.id}" placeholder="Enter counter name...">
+						<button class="btn btn-outline-success btn-save-name" data-id="${scenario.id}">Save Name</button>
+					</div>
+				</div>
+				<div class="card-body">
+					<div class="video-container" style="position: relative; width: ${VIDEO_WIDTH}px; height: ${VIDEO_HEIGHT}px; background: #000; margin: 0 auto;">
+						<div class="video-player" id="video-${scenario.id}" style="width: 100%; height: 100%;"></div>
+						<canvas id="canvas-${scenario.id}" width="${VIDEO_WIDTH}" height="${VIDEO_HEIGHT}" 
+							style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: all; z-index: 10; cursor: crosshair;"></canvas>
+					</div>
+					
+					<div class="counter-stats mt-3" id="stats-${scenario.id}">
+						<div class="text-center text-muted">Loading counter data...</div>
+					</div>
+					
+					<div class="line-config mt-3" id="config-${scenario.id}" style="display: none;">
+						<hr>
+						<h6>Line Configuration</h6>
+						<div class="form-group">
+							<label>Line Position <small class="text-muted">(drag vertices on video)</small></label>
+							<div class="row">
+								<div class="col-12">
+									<small id="start-pos-${scenario.id}">-</small>
+								</div>
+								<div class="col-12">
+									<small id="end-pos-${scenario.id}">-</small>
+								</div>
+							</div>
+						</div>
+						<div class="btn-group btn-group-sm w-100">
+							<button class="btn btn-success btn-save-line" data-id="${scenario.id}">Save Line Position</button>
+							<button class="btn btn-secondary btn-cancel-edit" data-id="${scenario.id}">Cancel</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	`);
+}
+
+// Initialize video player for a scenario
+function initVideoPlayer(scenarioId) {
+	const secureConnection = location.protocol === 'https:' ? ' secure=true' : '';
+	const player = '<media-stream-player hostname="' + window.location.hostname + '"' + secureConnection +
+	               ' format="RTP_H264" compression="40" audio="0"' +
+	               ' resolution="' + VIDEO_WIDTH + 'x' + VIDEO_HEIGHT + '"' +
+	               ' variant="basic" autoplay></media-stream-player>';
+	$('#video-' + scenarioId).html(player);
+}
+
+// Drawing loop for a canvas
+function startDrawingLoop(scenarioId) {
+	setInterval(() => drawCanvas(scenarioId), 100);
+}
+
+// Draw line on canvas
+function drawCanvas(scenarioId) {
+	const canvas = document.getElementById('canvas-' + scenarioId);
+	if (!canvas) return;
+	
+	const ctx = canvas.getContext('2d');
+	ctx.clearRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+	
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !scenario.triggers || !scenario.triggers[0]) return;
+	
+	const line = scenario.triggers[0];
+	const vertices = line.vertices || [[-0.5, -0.5], [0.5, 0.5]];
+	
+	// Convert AOA coordinates to canvas pixels
+	// AOA: X and Y range from -1 to +1, with (0,0) in center
+	// Y is inverted: -1 is top, +1 is bottom
+	function aoaToCanvas(aoaX, aoaY) {
+		const x = (aoaX + 1) / 2 * VIDEO_WIDTH;
+		const y = (-aoaY + 1) / 2 * VIDEO_HEIGHT;  // Y inverted
+		return {x, y};
+	}
+	
+	// Draw line segments
+	ctx.strokeStyle = '#00ff00';
+	ctx.lineWidth = 3;
+	ctx.beginPath();
+	
+	for (let i = 0; i < vertices.length; i++) {
+		const point = aoaToCanvas(vertices[i][0], vertices[i][1]);
+		if (i === 0) {
+			ctx.moveTo(point.x, point.y);
+		} else {
+			ctx.lineTo(point.x, point.y);
+		}
+	}
+	ctx.stroke();
+	
+	// Draw vertices as circles
+	ctx.fillStyle = '#00ff00';
+	vertices.forEach(v => {
+		const point = aoaToCanvas(v[0], v[1]);
+		ctx.beginPath();
+		ctx.arc(point.x, point.y, 6, 0, Math.PI * 2);
+		ctx.fill();
+	});
+	
+	// Draw direction arrow on EACH segment
+	const countingDirection = line.countingDirection || 'leftToRight';
+	for (let i = 0; i < vertices.length - 1; i++) {
+		const p1 = aoaToCanvas(vertices[i][0], vertices[i][1]);
+		const p2 = aoaToCanvas(vertices[i + 1][0], vertices[i + 1][1]);
+		const midX = (p1.x + p2.x) / 2;
+		const midY = (p1.y + p2.y) / 2;
+		
+		// Calculate line angle
+		const lineAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+		
+		// Arrow should point perpendicular to the line (to the right of line direction)
+		let arrowAngle = lineAngle + Math.PI / 2; // 90 degrees perpendicular (right side)
+		
+		if (countingDirection === 'rightToLeft') {
+			arrowAngle += Math.PI; // Flip to point to left side
+		}
+		
+		ctx.save();
+		ctx.translate(midX, midY);
+		ctx.rotate(arrowAngle);
+		ctx.fillStyle = '#ffff00';
+		ctx.strokeStyle = '#000000';
+		ctx.lineWidth = 2;
+		
+		// Draw arrow pointing RIGHT when rotation is 0 (along positive X-axis)
+		ctx.beginPath();
+		ctx.moveTo(15, 0);      // Arrow tip pointing right
+		ctx.lineTo(0, -8);      // Upper base
+		ctx.lineTo(0, 8);       // Lower base
+		ctx.closePath();
+		ctx.stroke();
+		ctx.fill();
+		ctx.restore();
+	}
+	
+	// Draw label on first segment
+	if (vertices.length >= 2) {
+		const p1 = aoaToCanvas(vertices[0][0], vertices[0][1]);
+		const p2 = aoaToCanvas(vertices[1][0], vertices[1][1]);
+		const midX = (p1.x + p2.x) / 2;
+		const midY = (p1.y + p2.y) / 2;
+		
+		ctx.fillStyle = '#ffffff';
+		ctx.strokeStyle = '#000000';
+		ctx.lineWidth = 3;
+		ctx.font = 'bold 14px Arial';
+		const label = scenario.name || 'Counter ' + scenarioId;
+		ctx.strokeText(label, midX + 15, midY - 5);
+		ctx.fillText(label, midX + 15, midY - 5);
+	}
+}
+
+// Poll counter data for all scenarios
+function pollAllCounters() {
+	aoaScenarios.forEach(scenario => {
+		$.ajax({
+			type: "POST",
+			url: "/local/objectanalytics/control.cgi",
+			contentType: 'application/json',
+			data: JSON.stringify({
+				apiVersion: "1.6",
+				context: "aib100",
+				method: "getAccumulatedCounts",
+				params: { scenario: scenario.id }
+			}),
+			success: function(response) {
+				if (response && response.data) {
+					counterData[scenario.id] = response.data;
+					updateCounterDisplay(scenario.id);
+				}
+			},
+			error: function(xhr, status, error) {
+				console.error('Failed to get counts for scenario ' + scenario.id + ':', error);
+			}
+		});
+	});
+	
+	setTimeout(pollAllCounters, 2000);
+}
+
+// Update counter display for a scenario
+function updateCounterDisplay(scenarioId) {
+	const data = counterData[scenarioId];
+	if (!data) return;
+	
+	const html = `
+		<div class="row text-center">
+			<div class="col-12 mb-2">
+				<h3 class="mb-0">${data.total.toLocaleString()}</h3>
+				<small class="text-muted">Total Objects</small>
+			</div>
+		</div>
+		<div class="row small">
+			<div class="col-6">👤 Humans: <strong>${data.totalHuman || 0}</strong></div>
+			<div class="col-6">🚗 Cars: <strong>${data.totalCar || 0}</strong></div>
+			<div class="col-6">🚲 Bikes: <strong>${data.totalBike || 0}</strong></div>
+			<div class="col-6">🚌 Buses: <strong>${data.totalBus || 0}</strong></div>
+			<div class="col-6">🚚 Trucks: <strong>${data.totalTruck || 0}</strong></div>
+			<div class="col-6">🚙 Other: <strong>${data.totalOtherVehicle || 0}</strong></div>
+		</div>
+		<div class="text-center mt-2">
+			<small class="text-muted">Updated: ${new Date(data.timestamp).toLocaleTimeString()}</small>
+		</div>
+	`;
+	
+	$('#stats-' + scenarioId).html(html);
+}
+
+// Event handlers
+$(document).on('click', '.btn-edit-line', function() {
+	const id = $(this).data('id');
+	$('#config-' + id).show();
+	updateLinePositionDisplay(id);
+});
+
+$(document).on('click', '.btn-cancel-edit', function() {
+	const id = $(this).data('id');
+	$('#config-' + id).hide();
+});
+
+$(document).on('click', '.btn-save-line', function() {
+	const id = $(this).data('id');
+	saveLineConfiguration(id);
+});
+
+$(document).on('click', '.btn-delete-counter', function() {
+	const id = $(this).data('id');
+	deleteCounter(id);
+});
+
+$(document).on('click', '.btn-save-name', function() {
+	const id = $(this).data('id');
+	saveCounterName(id);
+});
+
+$(document).on('click', '.btn-change-direction', function() {
+	const id = $(this).data('id');
+	changeCountingDirection(id);
+});
+
+// Canvas drag to adjust line
+$(document).on('mousedown', 'canvas[id^="canvas-"]', function(e) {
+	const scenarioId = parseInt($(this).attr('id').replace('canvas-', ''));
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !scenario.triggers || !scenario.triggers[0]) return;
+	
+	const rect = this.getBoundingClientRect();
+	const canvasX = (e.clientX - rect.left) / VIDEO_WIDTH;
+	const canvasY = (e.clientY - rect.top) / VIDEO_HEIGHT;
+	
+	// Convert to AOA coordinates (-1 to 1, Y inverted)
+	const aoaX = canvasX * 2 - 1;
+	const aoaY = -(canvasY * 2 - 1);  // Y inverted
+	
+	const vertices = scenario.triggers[0].vertices;
+	
+	// Check if clicking near any vertex
+	let nearestIndex = -1;
+	let minDist = 0.1;  // threshold
+	
+	vertices.forEach((v, i) => {
+		const dist = Math.sqrt((aoaX - v[0]) ** 2 + (aoaY - v[1]) ** 2);
+		if (dist < minDist) {
+			minDist = dist;
+			nearestIndex = i;
+		}
+	});
+	
+	if (nearestIndex >= 0) {
+		startDragging(scenarioId, nearestIndex, this);
+	}
+});
+
+let draggingScenario = null;
+let draggingVertex = null;
+let draggingCanvas = null;
+
+function startDragging(scenarioId, vertexIndex, canvas) {
+	draggingScenario = scenarioId;
+	draggingVertex = vertexIndex;
+	draggingCanvas = canvas;
+	
+	$(document).on('mousemove.drag', onDragMove);
+	$(document).on('mouseup.drag', onDragEnd);
+}
+
+function onDragMove(e) {
+	if (draggingScenario === null) return;
+	
+	const scenario = aoaScenarios.find(s => s.id === draggingScenario);
+	if (!scenario || !scenario.triggers || !scenario.triggers[0]) return;
+	
+	const rect = draggingCanvas.getBoundingClientRect();
+	const canvasX = (e.clientX - rect.left) / VIDEO_WIDTH;
+	const canvasY = (e.clientY - rect.top) / VIDEO_HEIGHT;
+	
+	// Convert to AOA coordinates (-1 to 1, Y inverted)
+	const aoaX = Math.max(-1, Math.min(1, canvasX * 2 - 1));
+	const aoaY = Math.max(-1, Math.min(1, -(canvasY * 2 - 1)));  // Y inverted
+	
+	scenario.triggers[0].vertices[draggingVertex] = [aoaX, aoaY];
+	updateLinePositionDisplay(draggingScenario);
+}
+
+function onDragEnd() {
+	draggingScenario = null;
+	draggingVertex = null;
+	draggingCanvas = null;
+	$(document).off('.drag');
+	showToast('Line adjusted. Click "Save Line Position" to apply changes.', 'info');
+}
+
+// Save counter name only
+function saveCounterName(scenarioId) {
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !window.aoaFullConfig) return;
+	
+	const newName = $('.counter-name[data-id="' + scenarioId + '"]').val().trim();
+	if (!newName) {
+		showToast('Please enter a name for the counter', 'warning');
+		return;
+	}
+	
+	// Update name in the scenario object
+	scenario.name = newName;
+	
+	// Update the scenario in the full config
+	const idx = window.aoaFullConfig.scenarios.findIndex(s => s.id === scenarioId);
+	if (idx >= 0) {
+		window.aoaFullConfig.scenarios[idx].name = newName;
+	}
+	
+	// Send updated configuration
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "setConfiguration",
+			params: window.aoaFullConfig
+		}),
+		success: function(response) {
+			showToast('Counter name saved: ' + newName, 'success');
+			// Update the card title
+			$('#counter-card-' + scenarioId + ' .card-title').text(newName);
+			// Reload scenarios to ensure sync
+			setTimeout(loadAOAScenarios, 500);
+		},
+		error: function(xhr, status, error) {
+			showToast('Failed to save name: ' + error, 'danger');
+		}
+	});
+}
+
+// Change counting direction
+function changeCountingDirection(scenarioId) {
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !scenario.triggers || !scenario.triggers[0]) {
+		showToast('Cannot change direction - invalid scenario', 'danger');
+		return;
+	}
+	
+	// Toggle direction
+	const currentDirection = scenario.triggers[0].countingDirection || 'leftToRight';
+	const newDirection = currentDirection === 'leftToRight' ? 'rightToLeft' : 'leftToRight';
+	
+	scenario.triggers[0].countingDirection = newDirection;
+	
+	// Update the scenario in the full config
+	const idx = window.aoaFullConfig.scenarios.findIndex(s => s.id === scenarioId);
+	if (idx >= 0) {
+		window.aoaFullConfig.scenarios[idx].triggers[0].countingDirection = newDirection;
+	}
+	
+	const directionText = newDirection === 'leftToRight' ? 'Left to Right' : 'Right to Left';
+	console.log('Changing direction for scenario', scenarioId, 'to', newDirection);
+	
+	// Send updated configuration
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "setConfiguration",
+			params: window.aoaFullConfig
+		}),
+		success: function(response) {
+			showToast('Direction changed to: ' + directionText, 'success');
+			// Reload scenarios to ensure sync
+			setTimeout(loadAOAScenarios, 500);
+		},
+		error: function(xhr, status, error) {
+			showToast('Failed to change direction: ' + error, 'danger');
+		}
+	});
+}
+
+function updateLinePositionDisplay(scenarioId) {
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !scenario.triggers || !scenario.triggers[0]) return;
+	
+	const vertices = scenario.triggers[0].vertices;
+	if (vertices.length === 2) {
+		// Simple two-point line
+		$('#start-pos-' + scenarioId).text(`(${vertices[0][0].toFixed(2)}, ${vertices[0][1].toFixed(2)})`);
+		$('#end-pos-' + scenarioId).text(`(${vertices[1][0].toFixed(2)}, ${vertices[1][1].toFixed(2)})`);
+	} else {
+		// Multi-segment line
+		const points = vertices.map((v, i) => `P${i+1}: (${v[0].toFixed(2)}, ${v[1].toFixed(2)})`).join(', ');
+		$('#start-pos-' + scenarioId).text(points.substring(0, 50));
+		$('#end-pos-' + scenarioId).text(vertices.length + ' points total');
+	}
+}
+
+// Save line configuration to AOA
+function saveLineConfiguration(scenarioId) {
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !window.aoaFullConfig) return;
+	
+	console.log('Saving line position:', scenarioId, 'vertices:', scenario.triggers[0].vertices);
+	
+	// Update the scenario in the full config (preserve ALL fields)
+	const idx = window.aoaFullConfig.scenarios.findIndex(s => s.id === scenarioId);
+	if (idx >= 0) {
+		// Only update the line vertices
+		window.aoaFullConfig.scenarios[idx].triggers[0].vertices = scenario.triggers[0].vertices;
+	}
+	
+	console.log('Sending full config to AOA');
+	
+	// Send updated configuration with ALL metadata preserved
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "setConfiguration",
+			params: window.aoaFullConfig
+		}),
+		success: function(response) {
+			console.log('AOA update response:', response);
+			showToast('Line position saved!', 'success');
+			$('#config-' + scenarioId).hide();
+			// Reload scenarios to ensure sync
+			setTimeout(loadAOAScenarios, 500);
+		},
+		error: function(xhr, status, error) {
+			console.error('AOA update error:', xhr.responseText);
+			showToast('Failed to save line position: ' + error, 'danger');
+		}
+	});
+}
+
+// Delete counter
+function deleteCounter(scenarioId) {
+	if (!confirm('Delete this counter? This will remove it from Axis Object Analytics.')) return;
+	
+	if (!window.aoaFullConfig) {
+		showToast('Configuration not loaded', 'danger');
+		return;
+	}
+	
+	// Remove the scenario from full config
+	window.aoaFullConfig.scenarios = window.aoaFullConfig.scenarios.filter(s => s.id !== scenarioId);
+	
+	// Find scenario name before deleting
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	const scenarioName = scenario ? scenario.name : null;
+	
+	console.log('Deleting scenario:', scenarioId, scenarioName);
+	
+	// Send updated configuration
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "setConfiguration",
+			params: window.aoaFullConfig
+		}),
+		success: function() {
+			showToast('Counter deleted!', 'success');
+			aoaScenarios = aoaScenarios.filter(s => s.id !== scenarioId);
+			$('#counter-card-' + scenarioId).remove();
+			if (aoaScenarios.length === 0) {
+				renderAllCounters();
+			}
+			
+			// Delete from backend if we have the scenario name
+			if (scenarioName) {
+				$.ajax({
+					type: "POST",
+					url: "delete_counter?scenario=" + encodeURIComponent(scenarioName),
+					success: function() {
+						console.log('Backend counter deleted:', scenarioName);
+					},
+					error: function(xhr, status, error) {
+						console.warn('Failed to delete backend counter:', error);
+					}
+				});
+			}
+		},
+		error: function(xhr, status, error) {
+			console.error('Failed to delete counter:', xhr.responseText);
+			showToast('Failed to delete counter: ' + error, 'danger');
+		}
+	});
+}
+
+// Add new counter
+function addNewCounter() {
+	if (!window.aoaFullConfig) {
+		showToast('Configuration not loaded', 'danger');
+		return;
+	}
+	
+	showToast('Creating new counter...', 'info');
+	
+	// Find highest scenario ID
+	const maxId = window.aoaFullConfig.scenarios.reduce((max, s) => Math.max(max, s.id || 0), 0);
+	const newId = maxId + 1;
+	
+	// Generate UUID similar to AOA format
+	function generateUUID() {
+		const hex = () => Math.floor(Math.random() * 16).toString(16);
+		const segment = (len) => Array.from({length: len}, hex).join('');
+		return `${segment(8)}-${segment(4)}-${segment(4)}-${segment(4)}-${segment(11)}00`;
+	}
+	
+	// Create new scenario with ALL required fields (matching AOA native UI structure)
+	const newScenario = {
+		id: newId,
+		name: "Counter " + newId,
+		type: "crosslinecounting",
+		uuid: generateUUID(),
+		devices: [{id: 1}],
+		filters: [],
+		metadataOverlay: null,
+		objectClassifications: [
+			{type: "human"},
+			{
+				type: "vehicle",
+				subTypes: [
+					{type: "motorcycle/bicycle"},
+					{type: "car"},
+					{type: "bus"},
+					{type: "truck"},
+					{type: "unknown"}
+				]
+			}
+		],
+		triggers: [{
+			type: "countingLine",
+			countingDirection: "leftToRight",
+			vertices: [[0, -0.5], [0, 0.5]]
+		}],
+		accumulatedCounts: {
+			timedResetEnabled: false
+		},
+		eventInterval: {
+			enabled: false
+		},
+		passthroughConfiguration: {
+			enabled: false,
+			period: 1
+		}
+	};
+	
+	window.aoaFullConfig.scenarios.push(newScenario);
+	
+	console.log('Creating new scenario:', newScenario);
+	
+	// Send updated configuration
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "setConfiguration",
+			params: window.aoaFullConfig
+		}),
+		success: function() {
+			showToast('Counter created!', 'success');
+			loadAOAScenarios();
+		},
+		error: function(xhr, status, error) {
+			console.error('Failed to create counter:', xhr.responseText);
+			showToast('Failed to create counter: ' + error, 'danger');
+		}
+	});
+}
+
+// Sync backend counters with AOA scenarios
+function syncBackendCounters() {
+	if (!aoaScenarios || aoaScenarios.length === 0) {
+		console.log('No AOA scenarios to sync');
+		return;
+	}
+	
+	// Build list of scenario names
+	const scenarioNames = aoaScenarios.map(s => s.name);
+	
+	console.log('Syncing backend counters with AOA:', scenarioNames);
+	
+	$.ajax({
+		type: "POST",
+		url: "sync_counters",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			scenarios: scenarioNames
+		}),
+		success: function(result) {
+			console.log('Backend counters synchronized:', result);
+			console.log('AOA has ' + scenarioNames.length + ' scenarios, backend has ' + result.remaining + ' counters');
+		},
+		error: function(xhr, status, error) {
+			console.warn('Failed to sync backend counters:', error);
+		}
+	});
+}
+
+</script>
+</body>
+</html>

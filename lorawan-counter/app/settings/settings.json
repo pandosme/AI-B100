@@ -1,0 +1,41 @@
+{
+  "b100": {
+    "ip": "10.13.8.47",
+    "port": 80,
+    "timeout": 30
+  },
+  "lorawan": {
+    "port": 10,
+    "confirmed": false,
+    "dataRate": 4,
+    "autoJoin": true
+  },
+  "transmission": {
+    "intervalMinutes": 15,
+    "enabled": true,
+    "classes": {
+      "human": true,
+      "car": true,
+      "bike": true,
+      "bus": true,
+      "truck": true,
+      "other": true
+    }
+  },
+  "polling": {
+    "downlinkIntervalSeconds": 30,
+    "healthCheckIntervalSeconds": 60
+  },
+  "lines": [],
+  "downlinkCommands": [
+    { "port": 10, "byte": 1, "enabled": true  },
+    { "port": 10, "byte": 2, "enabled": true  },
+    { "port": 10, "byte": 3, "enabled": true  },
+    { "port": 11, "byte": 1, "enabled": true  },
+    { "port": 11, "byte": 2, "enabled": true  },
+    { "port": 11, "byte": 3, "enabled": true  },
+    { "port": 12, "byte": 1, "enabled": true  },
+    { "port": 12, "byte": 2, "enabled": true  },
+    { "port": 13, "byte": 1, "enabled": false }
+  ]
+}

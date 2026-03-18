@@ -1,0 +1,36 @@
+{
+    "schemaVersion": "1.7.1",
+    "acapPackageConf": {
+        "setup": {
+            "friendlyName": "AI-B100 AOA Counter",
+            "appName": "aib100",
+            "vendor": "Fred Juhlin",
+            "embeddedSdkVersion": "3.0",
+            "vendorUrl": "https://pandosme.github.io",
+            "runMode": "respawn",
+            "version": "1.0.0"
+        },
+        "configuration": {
+			"settingPage": "index.html",
+			"httpConfig": [
+				{"name": "app","access": "admin","type": "fastCgi"},
+				{"name": "settings","access": "admin","type": "fastCgi"},
+				{"name": "status","access": "admin","type": "fastCgi"},
+				{"name": "join","access": "admin","type": "fastCgi"},
+				{"name": "test","access": "admin","type": "fastCgi"},
+				{"name": "restart","access": "admin","type": "fastCgi"},
+				{"name": "send","access": "admin","type": "fastCgi"},
+				{"name": "counters","access": "admin","type": "fastCgi"},
+				{"name": "publish","access": "admin","type": "fastCgi"},
+				{"name": "translator","access": "admin","type": "fastCgi"}
+			]
+		}
+    },
+	"resources": {
+		"dbus": {
+			"requiredMethods": [
+				"com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials"
+			]
+		}
+	}
+}
