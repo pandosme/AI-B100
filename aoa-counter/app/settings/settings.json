@@ -1,8 +1,10 @@
 {
   "b100": {
-    "ip": "10.13.8.47",
+    "ip": "192.168.1.102",
     "port": 80,
-    "timeout": 30
+    "timeout": 30,
+    "callbackIP": "",
+    "callbackPort": 80
   },
   "lorawan": {
     "port": 10,
@@ -23,7 +25,6 @@
     }
   },
   "polling": {
-    "downlinkIntervalSeconds": 30,
     "healthCheckIntervalSeconds": 60
   },
   "lines": [],

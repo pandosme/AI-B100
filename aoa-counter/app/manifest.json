@@ -8,21 +8,32 @@
             "embeddedSdkVersion": "3.0",
             "vendorUrl": "https://pandosme.github.io",
             "runMode": "respawn",
-            "version": "1.0.0"
+            "version": "1.0.1"
         },
         "configuration": {
 			"settingPage": "index.html",
 			"httpConfig": [
-				{"name": "app","access": "admin","type": "fastCgi"},
-				{"name": "settings","access": "admin","type": "fastCgi"},
-				{"name": "status","access": "admin","type": "fastCgi"},
-				{"name": "join","access": "admin","type": "fastCgi"},
-				{"name": "test","access": "admin","type": "fastCgi"},
-				{"name": "restart","access": "admin","type": "fastCgi"},
-				{"name": "send","access": "admin","type": "fastCgi"},
-				{"name": "counters","access": "admin","type": "fastCgi"},
-				{"name": "publish","access": "admin","type": "fastCgi"},
-				{"name": "translator","access": "admin","type": "fastCgi"}
+				{"name": "app","access": "viewer","type": "fastCgi"},
+				{"name": "settings","access": "viewer","type": "fastCgi"},
+				{"name": "status","access": "viewer","type": "fastCgi"},
+				{"name": "join","access": "viewer","type": "fastCgi"},
+				{"name": "test","access": "viewer","type": "fastCgi"},
+				{"name": "restart","access": "viewer","type": "fastCgi"},
+				{"name": "send","access": "viewer","type": "fastCgi"},
+				{"name": "counters","access": "viewer","type": "fastCgi"},
+				{"name": "publish","access": "viewer","type": "fastCgi"},
+				{"name": "translator","access": "viewer","type": "fastCgi"},
+				{"name": "delete_counter","access": "viewer","type": "fastCgi"},
+				{"name": "sync_counters","access": "viewer","type": "fastCgi"},
+				{"name": "receive","access": "viewer","type": "fastCgi"},
+				{"name": "b100_status","access": "viewer","type": "fastCgi"},
+				{"name": "b100_receive","access": "viewer","type": "fastCgi"},
+				{"name": "b100_gps","access": "viewer","type": "fastCgi"},
+				{"name": "b100_info","access": "viewer","type": "fastCgi"},
+				{"name": "b100_params","access": "viewer","type": "fastCgi"},
+				{"name": "b100_request_status","access": "viewer","type": "fastCgi"},
+				{"name": "gps","access": "viewer","type": "fastCgi"},
+				{"name": "linkcheck","access": "viewer","type": "fastCgi"}
 			]
 		}
     },

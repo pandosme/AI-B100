@@ -40,6 +40,7 @@
 			<a href="aoa.html">AOA</a>
 			<a href="bridge.html">LoRA Bridge</a>
 			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
 			<a href="about.html">About</a>
 			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
 		</nav>
@@ -51,23 +52,27 @@
 			<div class="col-12">
 				<div class="card">
 					<div class="card-header">
-						<h5 class="card-title mb-0">LoRa Transmission Settings</h5>
+						<h5 class="card-title mb-0">LoRa Uplink</h5>
 					</div>
 					<div class="card-body">
 						<div class="row">
 							<div class="col-md-6">
 								<div class="form-group mb-3">
-									<label>Transmission Enabled</label>
+									<label>Active</label>
 									<div class="form-check form-switch">
 										<input class="form-check-input" type="checkbox" id="publishEnabled">
 									</div>
 								</div>
 								
 								<div class="form-group mb-3">
-									<label for="publishInterval">Publish Interval: <strong id="intervalValue">15</strong> minutes</label>
+									<label for="publishInterval">Interval: <strong id="intervalValue">15</strong> m</label>
 									<input type="range" class="form-range" id="publishInterval" min="1" max="60" value="15">
 								</div>
-								
+								<div class="form-group mb-3">
+									<label for="lorawanPort" class="form-label">Port (1-223)</label>
+									<input type="number" class="form-control" id="lorawanPort" min="1" max="223" value="10">
+								</div>
+								<small class="text-muted">Uplinks are sent unconfirmed. A confirmed health-check is sent automatically every 10th message.</small>
 								<div class="form-group mb-3">
 									<label>Next Publish</label>
 									<div id="nextPublishTimer" class="text-muted">--</div>
@@ -102,12 +107,6 @@
 								</div>
 								
 								<hr class="my-3">
-								
-								<label>LoRaWAN Settings</label>
-								<div class="form-group mb-2">
-									<label for="lorawanPort" class="form-label">Port (1-223)</label>
-									<input type="number" class="form-control" id="lorawanPort" min="1" max="223" value="10">
-								</div>
 							<small class="text-muted">Uplinks are sent unconfirmed. A confirmed health-check is sent automatically every 10th message.</small>
 							</div>
 						</div>
@@ -345,6 +344,29 @@ function renderCounters(counters) {
 }
 
 function createCounterCard(counter) {
+	const classes = [
+		{ id: 'classHuman', key: 'human',  label: '👤 Humans' },
+		{ id: 'classCar',   key: 'car',    label: '🚗 Cars' },
+		{ id: 'classBike',  key: 'bike',   label: '🚲 Bikes' },
+		{ id: 'classBus',   key: 'bus',    label: '🚌 Buses' },
+		{ id: 'classTruck', key: 'truck',  label: '🚚 Trucks' },
+		{ id: 'classOther', key: 'other',  label: '🚙 Other Vehicles' },
+	];
+	const enabled = classes.filter(c => $('#' + c.id).is(':checked'));
+
+	let total = 0;
+	enabled.forEach(c => { total += (counter[c.key] || 0); });
+
+	let rows = '';
+	enabled.forEach(function(c, i) {
+		const style = i === enabled.length - 1 ? ' style="border-bottom:none;"' : '';
+		rows += `<div class="breakdown-item"${style}><span>${c.label}</span><span class="breakdown-value">${(counter[c.key] || 0).toLocaleString()}</span></div>`;
+	});
+
+	const breakdown = enabled.length > 1
+		? `<hr><div class="breakdown"><h6 class="mb-3">Breakdown by Object Type</h6>${rows}</div>`
+		: '';
+
 	return $(`
 		<div class="col-12 col-lg-6 counter-card">
 			<div class="card">
@@ -353,45 +375,10 @@ function createCounterCard(counter) {
 				</div>
 				<div class="card-body">
 					<div class="text-center mb-3">
-						<div class="counter-value">${counter.total.toLocaleString()}</div>
+						<div class="counter-value">${total.toLocaleString()}</div>
 						<div class="counter-label">Total Objects</div>
 					</div>
-					
-					<hr>
-					
-					<div class="breakdown">
-						<h6 class="mb-3">Breakdown by Object Type</h6>
-						
-						<div class="breakdown-item">
-							<span>👤 Humans</span>
-							<span class="breakdown-value">${counter.human.toLocaleString()}</span>
-						</div>
-						
-						<div class="breakdown-item">
-							<span>🚗 Cars</span>
-							<span class="breakdown-value">${counter.car.toLocaleString()}</span>
-						</div>
-						
-						<div class="breakdown-item">
-							<span>🚲 Bikes</span>
-							<span class="breakdown-value">${counter.bike.toLocaleString()}</span>
-						</div>
-						
-						<div class="breakdown-item">
-							<span>🚌 Buses</span>
-							<span class="breakdown-value">${counter.bus.toLocaleString()}</span>
-						</div>
-						
-						<div class="breakdown-item">
-							<span>🚚 Trucks</span>
-							<span class="breakdown-value">${counter.truck.toLocaleString()}</span>
-						</div>
-						
-						<div class="breakdown-item" style="border-bottom: none;">
-							<span>🚙 Other Vehicles</span>
-							<span class="breakdown-value">${counter.other.toLocaleString()}</span>
-						</div>
-					</div>
+					${breakdown}
 				</div>
 			</div>
 		</div>

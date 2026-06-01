@@ -2,12 +2,23 @@
  * B100.c - AI-B100 LoRaWAN Bridge HTTP Client Implementation
  * Copyright (c) 2026 Fred Juhlin
  * MIT License
+ *
+ * Uses the AI-B100 HTTP API with callback-driven architecture:
+ *   /info     (GET)  - Device info (always available)
+ *   /get      (GET)  - Read parameters (always available)
+ *   /set      (POST) - Write parameters (always available)
+ *   /restart  (GET)  - Hardware restart (always available)
+ *   /status   (GET)  - Trigger status callback (requires HTTP API + callbacks)
+ *   /join     (POST) - Join LoRaWAN (requires HTTP API + callbacks)
+ *   /send     (POST) - Send LoRaWAN message (requires HTTP API + callbacks)
+ *   /linkcheck(GET)  - LoRaWAN link check (requires HTTP API + callbacks)
  */
 
 #include "B100.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <curl/curl.h>
 #include <syslog.h>
 
@@ -28,22 +39,19 @@ static char g_last_error[256] = {0};
 // Callbacks
 static B100_Downlink_Callback g_downlink_callback = NULL;
 static B100_Status_Callback g_status_callback = NULL;
+static B100_GPS_Callback g_gps_callback = NULL;
 
-// Downlink deduplication — prevents both the health thread and the downlink poller
-// from dispatching the same downlink when both see status 8 on /status.
+// GPS state
+static B100_GPS g_gps = {0};
+
+// HTTP serialization — the AI-B100 bridge supports only one socket at a time.
 #include <pthread.h>
+static pthread_mutex_t g_http_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Downlink deduplication
 static pthread_mutex_t g_downlink_dedup_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int    g_downlink_dedup_init = 0;
 static unsigned int g_last_dispatched_fcntDown = 0;
-
-// Device info is fetched once from GET / on first connect, then on reconnect.
-static int g_device_info_fetched = 0;
-
-// HTTP serialization — the AI-B100 bridge supports only one socket at a time.
-// This mutex ensures the two background threads (health + downlink poller) never
-// make simultaneous HTTP requests to the bridge, and that response-triggered
-// uplinks (e.g. port-12 info replies) don't race with the next status poll.
-static pthread_mutex_t g_http_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // HTTP Response Buffer
 typedef struct {
@@ -51,20 +59,16 @@ typedef struct {
     size_t size;
 } HttpResponse;
 
-// Initialize HTTP response buffer
 static HttpResponse* http_response_new(void) {
     HttpResponse* resp = malloc(sizeof(HttpResponse));
     if (resp) {
         resp->data = malloc(1);
         resp->size = 0;
-        if (resp->data) {
-            resp->data[0] = '\0';
-        }
+        if (resp->data) resp->data[0] = '\0';
     }
     return resp;
 }
 
-// Free HTTP response buffer
 static void http_response_free(HttpResponse* resp) {
     if (resp) {
         if (resp->data) free(resp->data);
@@ -72,27 +76,22 @@ static void http_response_free(HttpResponse* resp) {
     }
 }
 
-// Callback for libcurl to write response data
 static size_t http_write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t realsize = size * nmemb;
     HttpResponse* resp = (HttpResponse*)userp;
-    
     char* ptr = realloc(resp->data, resp->size + realsize + 1);
-    if (!ptr) {
-        LOG_WARN("Out of memory\n");
-        return 0;
-    }
-    
+    if (!ptr) { LOG_WARN("Out of memory\n"); return 0; }
     resp->data = ptr;
     memcpy(&(resp->data[resp->size]), contents, realsize);
     resp->size += realsize;
     resp->data[resp->size] = '\0';
-    
     return realsize;
 }
 
-// Perform HTTP GET request
-static char* http_get(const char* endpoint) {
+// Perform HTTP GET request. Accepts 200 and 202 responses.
+// Returns response body (caller must free) or NULL on error.
+// *http_code_out receives the HTTP status code if non-NULL.
+static char* http_get_ex(const char* endpoint, long* http_code_out) {
     CURL* curl;
     CURLcode res;
     char url[256];
@@ -100,32 +99,33 @@ static char* http_get(const char* endpoint) {
     char* result = NULL;
 
     pthread_mutex_lock(&g_http_mutex);
-    
+
     snprintf(url, sizeof(url), "http://%s:%d%s", g_ip, g_port, endpoint);
     LOG_TRACE("HTTP GET: %s\n", url);
-    
+
     curl = curl_easy_init();
     if (!curl) {
         snprintf(g_last_error, sizeof(g_last_error), "Failed to initialize curl");
         LOG_WARN("%s\n", g_last_error);
+        pthread_mutex_unlock(&g_http_mutex);
         return NULL;
     }
-    
+
     response = http_response_new();
     if (!response) {
         curl_easy_cleanup(curl);
         pthread_mutex_unlock(&g_http_mutex);
         return NULL;
     }
-    
+
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_timeout);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    
+
     res = curl_easy_perform(curl);
-    
+
     if (res != CURLE_OK) {
         snprintf(g_last_error, sizeof(g_last_error), "HTTP GET failed: %s", curl_easy_strerror(res));
         LOG_WARN("%s\n", g_last_error);
@@ -134,63 +134,141 @@ static char* http_get(const char* endpoint) {
         pthread_mutex_unlock(&g_http_mutex);
         return NULL;
     }
-    
+
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    
-    if (http_code != 200) {
-        snprintf(g_last_error, sizeof(g_last_error), "HTTP error %ld", http_code);
+    if (http_code_out) *http_code_out = http_code;
+
+    if (http_code != 200 && http_code != 202) {
+        snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from %s", http_code, endpoint);
         LOG_WARN("%s\n", g_last_error);
         http_response_free(response);
         curl_easy_cleanup(curl);
         pthread_mutex_unlock(&g_http_mutex);
         return NULL;
     }
-    
-    // Copy result
+
     if (response->data && response->size > 0) {
         result = strdup(response->data);
         LOG_TRACE("HTTP Response (%zu bytes): %s\n", response->size, result);
     }
-    
+
     http_response_free(response);
     curl_easy_cleanup(curl);
     pthread_mutex_unlock(&g_http_mutex);
-    
     return result;
 }
 
-// Initialize B100 client
+// Convenience wrapper: GET expecting 200 with body
+static char* http_get(const char* endpoint) {
+    return http_get_ex(endpoint, NULL);
+}
+
+// Perform HTTP POST with JSON body.
+// Returns response body (caller must free) or NULL on error.
+// *http_code_out receives the HTTP status code if non-NULL.
+static char* http_post_json(const char* endpoint, const char* json_body, long* http_code_out) {
+    CURL* curl;
+    CURLcode res;
+    char url[256];
+    HttpResponse* response = NULL;
+    char* result = NULL;
+
+    pthread_mutex_lock(&g_http_mutex);
+
+    snprintf(url, sizeof(url), "http://%s:%d%s", g_ip, g_port, endpoint);
+    LOG_TRACE("HTTP POST: %s body=%s\n", url, json_body ? json_body : "(none)");
+
+    curl = curl_easy_init();
+    if (!curl) {
+        snprintf(g_last_error, sizeof(g_last_error), "Failed to initialize curl");
+        LOG_WARN("%s\n", g_last_error);
+        pthread_mutex_unlock(&g_http_mutex);
+        return NULL;
+    }
+
+    response = http_response_new();
+    if (!response) {
+        curl_easy_cleanup(curl);
+        pthread_mutex_unlock(&g_http_mutex);
+        return NULL;
+    }
+
+    struct curl_slist* headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    if (json_body) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json_body));
+    } else {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+    }
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_timeout);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    res = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+
+    if (res != CURLE_OK) {
+        snprintf(g_last_error, sizeof(g_last_error), "HTTP POST failed: %s", curl_easy_strerror(res));
+        LOG_WARN("%s\n", g_last_error);
+        http_response_free(response);
+        curl_easy_cleanup(curl);
+        pthread_mutex_unlock(&g_http_mutex);
+        return NULL;
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (http_code_out) *http_code_out = http_code;
+
+    if (response->data && response->size > 0) {
+        result = strdup(response->data);
+        LOG_TRACE("HTTP POST Response (%zu bytes): %s\n", response->size, result);
+    }
+
+    if (http_code != 200 && http_code != 202) {
+        snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from POST %s", http_code, endpoint);
+        LOG_WARN("%s\n", g_last_error);
+    }
+
+    http_response_free(response);
+    curl_easy_cleanup(curl);
+    pthread_mutex_unlock(&g_http_mutex);
+    return result;
+}
+
+// ==================================================================
+// Initialize / Cleanup
+// ==================================================================
+
 int B100_Init(const char* ip, int port, int timeout_seconds) {
     if (ip) {
         strncpy(g_ip, ip, sizeof(g_ip) - 1);
         g_ip[sizeof(g_ip) - 1] = '\0';
     }
-    
-    if (port > 0) {
-        g_port = port;
-    }
-    
-    if (timeout_seconds > 0) {
-        g_timeout = timeout_seconds;
-    }
-    
+    if (port > 0) g_port = port;
+    if (timeout_seconds > 0) g_timeout = timeout_seconds;
+
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    
+
     memset(&g_status, 0, sizeof(g_status));
     g_status.connected = B100_NOT_CONNECTED;
-    
+
     LOG("Initialized: %s:%d (timeout: %ds)\n", g_ip, g_port, g_timeout);
-    
     return 1;
 }
 
-// Cleanup
 void B100_Cleanup(void) {
     curl_global_cleanup();
 }
 
-// Set IP address
 int B100_Set_IP(const char* ip) {
     if (!ip) return 0;
     strncpy(g_ip, ip, sizeof(g_ip) - 1);
@@ -198,208 +276,427 @@ int B100_Set_IP(const char* ip) {
     return 1;
 }
 
-// Set port
 int B100_Set_Port(int port) {
     if (port <= 0 || port > 65535) return 0;
     g_port = port;
     return 1;
 }
 
-// Set timeout
 int B100_Set_Timeout(int timeout_seconds) {
     if (timeout_seconds <= 0) return 0;
     g_timeout = timeout_seconds;
     return 1;
 }
 
-// Extract a table cell value that follows a label cell in an HTML table.
-// Looks for: <td>label</td> ... <td>VALUE</td>
-static int extract_html_td_value(const char* html, const char* label, char* out, size_t outlen) {
-    char search[128];
-    snprintf(search, sizeof(search), "<td>%s</td>", label);
-    const char* p = strstr(html, search);
-    if (!p) return 0;
-    p += strlen(search);
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (strncmp(p, "<td>", 4) != 0) return 0;
-    p += 4;
-    const char* end = strstr(p, "</td>");
-    if (!end) return 0;
-    size_t len = (size_t)(end - p);
-    if (len >= outlen) len = outlen - 1;
-    strncpy(out, p, len);
-    out[len] = '\0';
+const char* B100_Get_IP(void) {
+    return g_ip;
+}
+
+// ==================================================================
+// /info endpoint — always available, returns device information JSON
+// ==================================================================
+
+static void parse_info_json(cJSON* json) {
+    cJSON* item;
+
+    if ((item = cJSON_GetObjectItem(json, "HW")) && item->valuestring)
+        strncpy(g_status.hardware, item->valuestring, sizeof(g_status.hardware) - 1);
+    if ((item = cJSON_GetObjectItem(json, "HW_ver")) && item->valuestring)
+        strncpy(g_status.hardwareVersion, item->valuestring, sizeof(g_status.hardwareVersion) - 1);
+    if ((item = cJSON_GetObjectItem(json, "FW_ver")) && item->valuestring)
+        strncpy(g_status.firmwareVersion, item->valuestring, sizeof(g_status.firmwareVersion) - 1);
+    if ((item = cJSON_GetObjectItem(json, "power")) && item->valuestring)
+        strncpy(g_status.powerSource, item->valuestring, sizeof(g_status.powerSource) - 1);
+    if ((item = cJSON_GetObjectItem(json, "dhcp_enable")))
+        g_status.dhcpEnabled = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "ip_addr")) && item->valuestring)
+        strncpy(g_status.ipAddr, item->valuestring, sizeof(g_status.ipAddr) - 1);
+    if ((item = cJSON_GetObjectItem(json, "dev_eui")) && item->valuestring)
+        strncpy(g_status.devEUI, item->valuestring, sizeof(g_status.devEUI) - 1);
+    if ((item = cJSON_GetObjectItem(json, "dev_addr"))) {
+        if (cJSON_IsString(item)) {
+            strncpy(g_status.devAddrStr, item->valuestring, sizeof(g_status.devAddrStr) - 1);
+            if (strcmp(item->valuestring, "0") != 0)
+                g_status.devAddr = (unsigned int)strtoul(item->valuestring, NULL, 16);
+            else
+                g_status.devAddr = 0;
+        }
+    }
+    if ((item = cJSON_GetObjectItem(json, "restart_counter")))
+        g_status.restartCounter = (unsigned int)item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "mqtt_enable")))
+        g_status.mqttEnabled = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "http_api_enable")))
+        g_status.httpApiEnabled = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "tUnix")))
+        g_status.tUnix = (unsigned long)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "TempC")))
+        g_status.tempC = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "tamper")))
+        g_status.tamper = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "gps_status")))
+        g_status.gpsStatus = item->valueint;
+}
+
+cJSON* B100_Get_Info(void) {
+    char* response = http_get("/info");
+    if (!response) return NULL;
+    cJSON* json = cJSON_Parse(response);
+    free(response);
+    return json;
+}
+
+int B100_Fetch_Device_Info(void) {
+    cJSON* info = B100_Get_Info();
+    if (!info) return 0;
+
+    parse_info_json(info);
+    g_status.connected = B100_CONNECTED;
+
+    // Determine join status from dev_addr ("0" = not joined)
+    g_status.joined = (g_status.devAddr != 0) ? 1 : 0;
+
+    LOG("Device info: %s v%s, FW %s, power=%s, dev_eui=%s, dev_addr=%s\n",
+        g_status.hardware, g_status.hardwareVersion,
+        g_status.firmwareVersion, g_status.powerSource,
+        g_status.devEUI, g_status.devAddrStr);
+
+    cJSON_Delete(info);
     return 1;
 }
 
-// Fetch hardware and software version strings by GETting the bridge root page.
-static void B100_Fetch_Device_Info(void) {
-    char* html = http_get("/");
-    if (!html) return;
-    extract_html_td_value(html, "Hardware:", g_status.hardwareVersion, sizeof(g_status.hardwareVersion));
-    extract_html_td_value(html, "Software:", g_status.softwareVersion, sizeof(g_status.softwareVersion));
-    free(html);
-    g_device_info_fetched = 1;
-    LOG("Device info: hw=\"%s\" sw=\"%s\"\n", g_status.hardwareVersion, g_status.softwareVersion);
+// ==================================================================
+// /gps endpoint — always available
+// ==================================================================
+
+cJSON* B100_Get_GPS(void) {
+    char* response = http_get("/gps");
+    if (!response) return NULL;
+    cJSON* json = cJSON_Parse(response);
+    free(response);
+    if (!json) return NULL;
+    // Also update internal GPS state and fire the registered callback
+    // so ACAP status stays current even when polled (not only via push callback).
+    B100_Process_GPS_Callback(json);
+    return json;
 }
 
-// Test connection
-int B100_Test_Connection(void) {
-    char* response = http_get("/");
-    
-    if (response) {
-        g_status.connected = B100_CONNECTED;
-        // Parse hardware/software version from the root page while we have it
-        extract_html_td_value(response, "Hardware:", g_status.hardwareVersion, sizeof(g_status.hardwareVersion));
-        extract_html_td_value(response, "Software:", g_status.softwareVersion, sizeof(g_status.softwareVersion));
-        g_device_info_fetched = 1;
-        LOG("Device info: hw=\"%s\" sw=\"%s\"\n", g_status.hardwareVersion, g_status.softwareVersion);
-        free(response);
+B100_GPS* B100_Get_GPS_Status(void) {
+    return &g_gps;
+}
+
+// Parse GPS JSON into g_gps and invoke the GPS callback.
+// Called from both the HTTP GPS callback endpoint and B100_Get_GPS() polling.
+int B100_Process_GPS_Callback(cJSON* json) {
+    if (!json) return 0;
+
+    cJSON* item;
+
+    if ((item = cJSON_GetObjectItem(json, "gps_status")))
+        g_gps.gps_status = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "ns")) && item->valuestring)
+        strncpy(g_gps.ns, item->valuestring, sizeof(g_gps.ns) - 1);
+    if ((item = cJSON_GetObjectItem(json, "lat")))
+        g_gps.lat = item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "ew")) && item->valuestring)
+        strncpy(g_gps.ew, item->valuestring, sizeof(g_gps.ew) - 1);
+    if ((item = cJSON_GetObjectItem(json, "lon")))
+        g_gps.lon = item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "alt")))
+        g_gps.alt = item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "nosv")))
+        g_gps.nosv = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "pdop")))
+        g_gps.pdop = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "hdop")))
+        g_gps.hdop = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "vdop")))
+        g_gps.vdop = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "utc")) && item->valuestring)
+        strncpy(g_gps.utc, item->valuestring, sizeof(g_gps.utc) - 1);
+    if ((item = cJSON_GetObjectItem(json, "date")) && item->valuestring)
+        strncpy(g_gps.date, item->valuestring, sizeof(g_gps.date) - 1);
+    if ((item = cJSON_GetObjectItem(json, "sog")))
+        g_gps.sog = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "cog")))
+        g_gps.cog = (float)item->valuedouble;
+
+    LOG_TRACE("GPS callback: status=%d lat=%.6f lon=%.6f nosv=%d\n",
+              g_gps.gps_status, g_gps.lat, g_gps.lon, g_gps.nosv);
+
+    if (g_gps_callback)
+        g_gps_callback(&g_gps);
+
+    return 1;
+}
+
+// Configure GPS callback URI and update interval on the B100.
+// gps_uri    — path the B100 will POST to (e.g. "/local/aib100/b100_gps")
+// interval   — seconds between GPS callbacks (0 = disabled)
+int B100_Configure_GPS_Callback(const char* gps_uri, int interval_seconds) {
+    if (!gps_uri) return 0;
+    cJSON* params = cJSON_CreateObject();
+    cJSON_AddStringToObject(params, "callback_gps_uri", gps_uri);
+    cJSON_AddNumberToObject(params, "gps_update_interval", interval_seconds);
+
+    int result = B100_Set_Params(params);
+    cJSON_Delete(params);
+
+    if (result) {
+        LOG("GPS callback configured: uri=%s interval=%ds\n", gps_uri, interval_seconds);
+    } else {
+        LOG_WARN("Failed to configure GPS callback\n");
+    }
+    return result;
+}
+
+void B100_Set_GPS_Callback(B100_GPS_Callback callback) {
+    g_gps_callback = callback;
+}
+
+// ==================================================================
+// /get and /set endpoints — always available
+// ==================================================================
+
+cJSON* B100_Get_Params(const char* param) {
+    char endpoint[128];
+    if (param && param[0])
+        snprintf(endpoint, sizeof(endpoint), "/get?%s", param);
+    else
+        snprintf(endpoint, sizeof(endpoint), "/get");
+
+    char* response = http_get(endpoint);
+    if (!response) return NULL;
+
+    cJSON* json = cJSON_Parse(response);
+    free(response);
+    return json;
+}
+
+int B100_Set_Params(cJSON* params) {
+    if (!params) return 0;
+
+    char* body = cJSON_PrintUnformatted(params);
+    if (!body) return 0;
+
+    long http_code = 0;
+    char* response = http_post_json("/set", body, &http_code);
+    free(body);
+
+    if (http_code == 200) {
+        if (response) {
+            cJSON* json = cJSON_Parse(response);
+            if (json) {
+                cJSON* restart = cJSON_GetObjectItem(json, "restart_required");
+                if (restart && restart->valueint)
+                    LOG("Parameter update requires device restart\n");
+                cJSON_Delete(json);
+            }
+            free(response);
+        }
         return 1;
     }
-    
+
+    if (response) {
+        cJSON* json = cJSON_Parse(response);
+        if (json) {
+            cJSON* failed = cJSON_GetObjectItem(json, "failed");
+            if (failed && failed->valuestring)
+                snprintf(g_last_error, sizeof(g_last_error), "Parameter error: %s", failed->valuestring);
+            cJSON_Delete(json);
+        }
+        free(response);
+    }
+    return 0;
+}
+
+// ==================================================================
+// Connection Test (via /info — always available)
+// ==================================================================
+
+int B100_Test_Connection(void) {
+    if (B100_Fetch_Device_Info()) {
+        g_status.connected = B100_CONNECTED;
+        return 1;
+    }
     g_status.connected = B100_NOT_CONNECTED;
     return 0;
 }
 
-// Check if connected
 int B100_Is_Connected(void) {
     return g_status.connected == B100_CONNECTED;
 }
 
-// Get status text from code
+// ==================================================================
+// Status
+// ==================================================================
+
 const char* B100_Status_Text(int statusCode) {
     switch (statusCode) {
-        case B100_STATUS_OK: return "OK";
-        case B100_STATUS_RESTARTED: return "Restarted - Ready to Join";
-        case B100_STATUS_NO_PAYLOAD: return "No Payload";
-        case B100_STATUS_PAYLOAD_TOO_LONG: return "Payload Too Long";
-        case B100_STATUS_JOIN_FAILED: return "Join Failed";
-        case B100_STATUS_TRYING_TO_JOIN: return "Trying to Join";
-        case B100_STATUS_UNKNOWN_ERROR: return "Unknown Error";
-        case B100_STATUS_JOINED: return "Joined";
-        case B100_STATUS_PAYLOAD_RECEIVED: return "Payload Received";
-        case B100_STATUS_PAYLOAD_SENT: return "Payload Sent";
-        case B100_STATUS_SENT_CONFIRMED: return "Sent and Confirmed";
-        case B100_STATUS_NOT_CONFIRMED: return "Not Confirmed";
+        case B100_STATUS_OK:              return "OK";
+        case B100_STATUS_RESTARTED:       return "Restarted - Ready to Join";
+        case B100_STATUS_NO_PAYLOAD:      return "No Payload";
+        case B100_STATUS_PAYLOAD_TOO_LONG:return "Payload Too Long";
+        case B100_STATUS_JOIN_FAILED:     return "Join Failed";
+        case B100_STATUS_AUTOJOIN_ENABLED:return "Restarted - Auto Join Enabled";
+        case B100_STATUS_UNKNOWN_ERROR:   return "Unknown Error";
+        case B100_STATUS_JOINED:          return "Joined";
+        case B100_STATUS_PAYLOAD_RECEIVED:return "Payload Received";
+        case B100_STATUS_PAYLOAD_SENT:    return "Payload Sent";
+        case B100_STATUS_SENT_CONFIRMED:  return "Payload Confirmed";
+        case B100_STATUS_NOT_CONFIRMED:   return "Payload Not Confirmed";
+        case B100_STATUS_MQTT_HEARTBEAT:  return "MQTT Heartbeat";
+        case B100_STATUS_DUTY_CYCLE:      return "Uplink Unavailable (Duty Cycle)";
         case B100_STATUS_LOST_CONNECTION: return "Lost Connection";
-        case B100_STATUS_INVALID_PORT: return "Invalid Port";
-        case B100_STATUS_UPLINK_FAILED: return "Uplink Failed";
+        case B100_STATUS_INVALID_PORT:    return "Invalid Port";
+        case B100_STATUS_UPLINK_FAILED:   return "Uplink Failed";
         case B100_STATUS_PARAMETER_ERROR: return "Parameter Error";
-        case B100_STATUS_NOT_JOINED: return "Not Joined";
-        case B100_STATUS_PARAMETER_UPDATED: return "Parameter Updated";
+        case B100_STATUS_NOT_JOINED:      return "Not Joined";
+        case B100_STATUS_PARAMETER_UPDATED:return "Parameter Updated";
         default: return "Unknown Status";
     }
 }
 
-// Update status from device
-int B100_Update_Status(void) {
-    LOG_TRACE("B100_Update_Status called\n");
-    char* response = http_get("/status");
-    
-    if (!response) {
-        g_status.connected = B100_NOT_CONNECTED;
-        g_device_info_fetched = 0;  // Refetch on next reconnect
-        LOG_TRACE("No response from B100 device\n");
+B100_Status* B100_Get_Status(void) {
+    return &g_status;
+}
+
+// Trigger a status request via GET /status.
+// The B100 returns 202 and delivers the actual status asynchronously
+// via POST to the configured callback_status_uri.
+int B100_Request_Status(void) {
+    long http_code = 0;
+    char* response = http_get_ex("/status", &http_code);
+    if (response) free(response);
+
+    if (http_code == 202) {
+        g_status.connected = B100_CONNECTED;
+        return 1;
+    }
+    if (http_code == 412) {
+        snprintf(g_last_error, sizeof(g_last_error), "Callbacks not configured");
+        LOG_WARN("Status request failed: callbacks not configured (412)\n");
+        g_status.connected = B100_CONNECTED;  // device is reachable
         return 0;
     }
-    
-    g_status.connected = B100_CONNECTED;
-    // Fetch hardware/software version from root page on first connect (or reconnect)
-    if (!g_device_info_fetched) B100_Fetch_Device_Info();
-    LOG_TRACE("B100 connected, parsing status JSON\n");
-    
-    cJSON* json = cJSON_Parse(response);
-    free(response);
-    
-    if (!json) {
-        snprintf(g_last_error, sizeof(g_last_error), "Failed to parse status JSON");
-        LOG_TRACE("JSON parse failed\n");
-        return 0;
-    }
-    
-    // Check for error
-    cJSON* error = cJSON_GetObjectItem(json, "error");
-    if (error && error->valuestring) {
-        strncpy(g_status.statusText, error->valuestring, sizeof(g_status.statusText) - 1);
-        cJSON_Delete(json);
-        return 0;
-    }
-    
-    // Parse status fields
+    g_status.connected = B100_NOT_CONNECTED;
+    return 0;
+}
+
+// ==================================================================
+// Callback processing — called from ACAP HTTP endpoint handlers
+// when the B100 POSTs status or downlink data
+// ==================================================================
+
+// Process a status callback POST from the B100.
+// Fields: status, dev_addr, confirmed, fcntUp, data_rate, maxUp, tUnix, next_upload_ms
+int B100_Process_Status_Callback(cJSON* json) {
+    if (!json) return 0;
+
     cJSON* item;
-    
+
+    g_status.connected = B100_CONNECTED;
+
     if ((item = cJSON_GetObjectItem(json, "status"))) {
         g_status.statusCode = item->valueint;
-        strncpy(g_status.statusText, B100_Status_Text(g_status.statusCode), sizeof(g_status.statusText) - 1);
-        LOG_TRACE("Status code: %d (%s)\n", g_status.statusCode, g_status.statusText);
-        g_status.joined = (g_status.statusCode == B100_STATUS_JOINED || 
+        strncpy(g_status.statusText, B100_Status_Text(g_status.statusCode),
+                sizeof(g_status.statusText) - 1);
+
+        g_status.joined = (g_status.statusCode == B100_STATUS_JOINED ||
                           g_status.statusCode == B100_STATUS_OK ||
                           g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
                           g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
-                          g_status.statusCode == B100_STATUS_SENT_CONFIRMED);
-        LOG_TRACE("Joined status: %s (statusCode=%d)\n", g_status.joined ? "YES" : "NO", g_status.statusCode);
+                          g_status.statusCode == B100_STATUS_SENT_CONFIRMED ||
+                          g_status.statusCode == B100_STATUS_NOT_CONFIRMED);
+        LOG_TRACE("Status callback: code=%d (%s) joined=%d\n",
+                  g_status.statusCode, g_status.statusText, g_status.joined);
     }
-    
+
+    if ((item = cJSON_GetObjectItem(json, "dev_addr"))) {
+        if (cJSON_IsString(item)) {
+            strncpy(g_status.devAddrStr, item->valuestring, sizeof(g_status.devAddrStr) - 1);
+            if (strcmp(item->valuestring, "0") != 0)
+                g_status.devAddr = (unsigned int)strtoul(item->valuestring, NULL, 16);
+            else
+                g_status.devAddr = 0;
+        }
+    }
+
     if ((item = cJSON_GetObjectItem(json, "confirmed")))
         g_status.confirmed = item->valueint;
-
-    // drUp, maxUp, fcntUp, devAddr return 0 in status-8/9 responses — only trust
-    // them from a status-7 (joined/idle) response to avoid clobbering cached values.
-    if (g_status.statusCode == B100_STATUS_JOINED || g_status.statusCode == B100_STATUS_OK) {
-        if ((item = cJSON_GetObjectItem(json, "drUp")))
-            g_status.dataRateUp = item->valueint;
-        if ((item = cJSON_GetObjectItem(json, "maxUp")))
-            g_status.maxPayload = item->valueint;
-        if ((item = cJSON_GetObjectItem(json, "fcntUp"))) {
-            g_status.fcntUp = (unsigned int)item->valueint;
-            LOG_TRACE("fcntUp: %u\n", g_status.fcntUp);
-        }
-        if ((item = cJSON_GetObjectItem(json, "devAddr"))) {
-            g_status.devAddr = (unsigned int)item->valueint;
-            LOG_TRACE("devAddr: 0x%08X\n", g_status.devAddr);
-        }
-    }
-
-    if ((item = cJSON_GetObjectItem(json, "drDown")))
-        g_status.dataRateDown = item->valueint;
-
-    if ((item = cJSON_GetObjectItem(json, "fcntDown"))) {
-        g_status.fcntDown = (unsigned int)item->valueint;
-        LOG_TRACE("fcntDown: %u\n", g_status.fcntDown);
-    }
-
-    if ((item = cJSON_GetObjectItem(json, "rssi"))) {
-        g_status.rssi = (float)item->valuedouble;
-        LOG_TRACE("RSSI: %.1f\n", g_status.rssi);
-    }
-
-    if ((item = cJSON_GetObjectItem(json, "snr"))) {
-        g_status.snr = (float)item->valuedouble;
-        LOG_TRACE("SNR: %.1f\n", g_status.snr);
-    }
-
-    if ((item = cJSON_GetObjectItem(json, "TempC")))
-        g_status.tempC = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "fcntUp")))
+        g_status.fcntUp = (unsigned int)item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "data_rate")))
+        g_status.dataRate = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "maxUp")))
+        g_status.maxPayload = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "tUnix")))
+        g_status.tUnix = (unsigned long)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "next_upload_ms")))
+        g_status.nextUploadMs = (unsigned long)item->valuedouble;
 
     g_status.timestamp = time(NULL);
 
-    LOG_TRACE("=== Status Summary: Connected=%d, Joined=%d, StatusCode=%d ===\n",
-              g_status.connected, g_status.joined, g_status.statusCode);
+    if (g_status_callback)
+        g_status_callback(&g_status);
 
-    // Downlink dispatch: when status 8 is seen here (health-monitor thread), extract
-    // the payload and fire the downlink callback directly — same outcome as the
-    // downlink-poller thread calling B100_Receive().  Deduplication by fcntDown
-    // ensures each downlink is processed exactly once regardless of which thread
-    // wins the race.
-    if (g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED && g_downlink_callback) {
+    return 1;
+}
+
+// Process a receive callback POST from the B100.
+// Fields: confirmed, fcntDown, rssi, snr, tUnix, margin, gwCount,
+//         next_upload_ms, port, length, payload
+int B100_Process_Receive_Callback(cJSON* json) {
+    if (!json) return 0;
+
+    cJSON* item;
+
+    g_status.connected = B100_CONNECTED;
+
+    // Update signal quality and timing
+    if ((item = cJSON_GetObjectItem(json, "confirmed")))
+        g_status.confirmed = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "fcntDown")))
+        g_status.fcntDown = (unsigned int)item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "rssi")))
+        g_status.rssi = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "snr")))
+        g_status.snr = (float)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "tUnix")))
+        g_status.tUnix = (unsigned long)item->valuedouble;
+    if ((item = cJSON_GetObjectItem(json, "next_upload_ms")))
+        g_status.nextUploadMs = (unsigned long)item->valuedouble;
+
+    // Linkcheck fields (only present in linkcheck responses)
+    if ((item = cJSON_GetObjectItem(json, "margin")))
+        g_status.margin = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "gwCount")))
+        g_status.gwCount = item->valueint;
+
+    LOG("Receive callback: fcntDown=%u rssi=%.1f snr=%.1f\n",
+        g_status.fcntDown, g_status.rssi, g_status.snr);
+
+    g_status.timestamp = time(NULL);
+
+    // Check for downlink payload
+    cJSON* length_item = cJSON_GetObjectItem(json, "length");
+    int payload_length = length_item ? length_item->valueint : 0;
+
+    if (payload_length == 0) {
+        LOG("Receive callback: no payload (ACK or linkcheck), fcntDown=%u\n", g_status.fcntDown);
+    }
+
+    if (payload_length > 0 && g_downlink_callback) {
         cJSON* payload_item = cJSON_GetObjectItem(json, "payload");
-        if (payload_item && payload_item->valuestring) {
-            cJSON* fc_item = cJSON_GetObjectItem(json, "fcntDown");
-            unsigned int this_fcnt = fc_item ? (unsigned int)fc_item->valueint : 0;
+        if (!payload_item)
+            LOG_WARN("Receive callback: length=%d but no 'payload' field in JSON\n", payload_length);
+        if (payload_item) {
+            unsigned int this_fcnt = g_status.fcntDown;
 
+            // Deduplication by fcntDown
             pthread_mutex_lock(&g_downlink_dedup_mutex);
-            int already_done = g_downlink_dedup_init && (g_last_dispatched_fcntDown == this_fcnt);
+            int already_done = g_downlink_dedup_init &&
+                               (g_last_dispatched_fcntDown == this_fcnt);
             if (!already_done) {
                 g_last_dispatched_fcntDown = this_fcnt;
                 g_downlink_dedup_init = 1;
@@ -410,376 +707,261 @@ int B100_Update_Status(void) {
                 B100_Downlink* dl = malloc(sizeof(B100_Downlink));
                 if (dl) {
                     memset(dl, 0, sizeof(B100_Downlink));
-                    strncpy(dl->payload, payload_item->valuestring, sizeof(dl->payload) - 1);
-                    cJSON* pt = cJSON_GetObjectItem(json, "payload_type");
-                    if (pt && pt->valuestring)
-                        strncpy(dl->payload_type, pt->valuestring, sizeof(dl->payload_type) - 1);
-                    else
+
+                    // Payload can be string (ASCII), array [1,2,255], or Buffer object
+                    if (cJSON_IsString(payload_item)) {
+                        strncpy(dl->payload, payload_item->valuestring,
+                                sizeof(dl->payload) - 1);
+                        strncpy(dl->payload_type, "ASCII", sizeof(dl->payload_type) - 1);
+                    } else if (cJSON_IsArray(payload_item)) {
+                        // Byte array → hex string for backward compat
+                        int n = cJSON_GetArraySize(payload_item);
+                        int pos = 0;
+                        for (int i = 0; i < n && pos < (int)sizeof(dl->payload) - 2; i++) {
+                            cJSON* b = cJSON_GetArrayItem(payload_item, i);
+                            pos += snprintf(dl->payload + pos, sizeof(dl->payload) - pos,
+                                            "%02X", b ? (b->valueint & 0xFF) : 0);
+                        }
                         strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
-                    cJSON* len_item = cJSON_GetObjectItem(json, "length");
-                    dl->length = len_item ? len_item->valueint : (int)strlen(dl->payload);
+                    } else if (cJSON_IsObject(payload_item)) {
+                        // Node.js Buffer: {"type":"Buffer","data":[1,2,255]}
+                        cJSON* bdata = cJSON_GetObjectItem(payload_item, "data");
+                        if (bdata && cJSON_IsArray(bdata)) {
+                            int n = cJSON_GetArraySize(bdata);
+                            int pos = 0;
+                            for (int i = 0; i < n && pos < (int)sizeof(dl->payload) - 2; i++) {
+                                cJSON* b = cJSON_GetArrayItem(bdata, i);
+                                pos += snprintf(dl->payload + pos, sizeof(dl->payload) - pos,
+                                                "%02X", b ? (b->valueint & 0xFF) : 0);
+                            }
+                        }
+                        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
+                    } else {
+                        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
+                    }
+
+                    dl->length = payload_length;
                     cJSON* port_item = cJSON_GetObjectItem(json, "port");
                     if (port_item) dl->port = port_item->valueint;
-                    cJSON* rssi_item = cJSON_GetObjectItem(json, "rssi");
-                    if (rssi_item) dl->rssi = (float)rssi_item->valuedouble;
-                    cJSON* snr_item = cJSON_GetObjectItem(json, "snr");
-                    if (snr_item) dl->snr = (float)snr_item->valuedouble;
+                    dl->rssi = g_status.rssi;
+                    dl->snr = g_status.snr;
                     dl->fcntDown = (int)this_fcnt;
-                    cJSON* conf_item = cJSON_GetObjectItem(json, "confirming");
-                    if (conf_item) dl->confirming = conf_item->valueint;
-                    LOG("Dispatching downlink (health thread) fcntDown=%u port=%d\n", this_fcnt, dl->port);
+                    dl->confirming = g_status.confirmed;
+
+                    LOG("Downlink callback: port=%d, %d bytes, fcntDown=%u\n",
+                        dl->port, dl->length, this_fcnt);
                     g_downlink_callback(dl);
                     free(dl);
                 }
             } else {
-                LOG("Downlink fcntDown=%u already dispatched, skipping duplicate\n", this_fcnt);
+                LOG_TRACE("Downlink fcntDown=%u already dispatched\n", this_fcnt);
             }
         }
     }
 
-    cJSON_Delete(json);
+    g_status.receiveTUnix = (unsigned long)time(NULL);
 
-    // Trigger status callback if set
-    if (g_status_callback) {
-        LOG_TRACE("Calling status callback\n");
+    if (g_status_callback)
         g_status_callback(&g_status);
-    }
 
     return 1;
 }
 
-// Get current status
-B100_Status* B100_Get_Status(void) {
-    return &g_status;
-}
+// ==================================================================
+// /join endpoint — POST with JSON body
+// ==================================================================
 
-// Join LoRaWAN network
 int B100_Join(int drJoin, int adr, int drUp) {
-    char endpoint[128];
-    snprintf(endpoint, sizeof(endpoint), "/join?drjoin=%d&adr=%d&drUp=%d", drJoin, adr, drUp);
-    
-    char* response = http_get(endpoint);
-    if (!response) {
-        return 0;
+    cJSON* body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "data_rate_join", drJoin);
+    cJSON_AddNumberToObject(body, "adr_enable", adr ? 1 : 0);
+    cJSON_AddNumberToObject(body, "data_rate", drUp);
+
+    char* json_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json_str) return 0;
+
+    long http_code = 0;
+    char* response = http_post_json("/join", json_str, &http_code);
+    free(json_str);
+    if (response) free(response);
+
+    if (http_code == 202) {
+        LOG("Join request accepted (DR join=%d, ADR=%d, DR=%d)\n", drJoin, adr, drUp);
+        return 1;
     }
-    
-    cJSON* json = cJSON_Parse(response);
-    free(response);
-    
-    if (!json) {
-        return 0;
+    if (http_code == 412) {
+        snprintf(g_last_error, sizeof(g_last_error), "Callbacks not configured");
+        LOG_WARN("Join failed: callbacks not configured (412)\n");
+    } else if (http_code == 400) {
+        snprintf(g_last_error, sizeof(g_last_error), "Invalid join parameters");
+        LOG_WARN("Join failed: bad request (400)\n");
+    } else {
+        LOG_WARN("Join failed: HTTP %ld\n", http_code);
     }
-    
-    // Check for error
-    cJSON* error = cJSON_GetObjectItem(json, "error");
-    if (error && error->valuestring) {
-        strncpy(g_last_error, error->valuestring, sizeof(g_last_error) - 1);
-        cJSON_Delete(json);
-        return 0;
-    }
-    
-    // Parse response
-    cJSON* status = cJSON_GetObjectItem(json, "status");
-    if (status) {
-        g_status.statusCode = status->valueint;
-        if (g_status.statusCode == B100_STATUS_JOINED) {
-            g_status.joined = 1;
-            LOG("Successfully joined LoRaWAN network\n");
-        }
-    }
-    
-    cJSON* devAddr = cJSON_GetObjectItem(json, "devAddr");
-    if (devAddr) {
-        g_status.devAddr = (unsigned int)devAddr->valueint;
-    }
-    
-    cJSON_Delete(json);
-    return 1;
+    return 0;
 }
 
-// Join with auto settings
 int B100_Join_Auto(void) {
     return B100_Join(0, 1, 4);  // DR0 for join, ADR enabled, DR4 for uplink
 }
 
-// Restart device
+// ==================================================================
+// /restart endpoint — always available
+// ==================================================================
+
 int B100_Restart(void) {
-    char* response = http_get("/set.html?reset");
-    if (response) {
-        free(response);
+    long http_code = 0;
+    char* response = http_get_ex("/restart", &http_code);
+    if (response) free(response);
+
+    if (http_code == 202) {
         g_status.joined = 0;
         g_status.statusCode = B100_STATUS_RESTARTED;
+        strncpy(g_status.statusText, "Restarted", sizeof(g_status.statusText) - 1);
         LOG("Device restart initiated\n");
         return 1;
     }
+    LOG_WARN("Restart failed: HTTP %ld\n", http_code);
     return 0;
 }
 
-// Set data rate
-int B100_Set_DataRate(int dr) {
-    if (dr < 0 || dr > 5) {
-        snprintf(g_last_error, sizeof(g_last_error), "Invalid data rate: %d (must be 0-5)", dr);
-        return 0;
-    }
-    
-    char endpoint[64];
-    snprintf(endpoint, sizeof(endpoint), "/set.html?data_rate=%d", dr);
-    
-    char* response = http_get(endpoint);
-    if (response) {
-        free(response);
-        return 1;
-    }
-    return 0;
-}
+// ==================================================================
+// /send endpoint — POST with JSON body
+// Supports ASCII string payload or byte-array payload
+// ==================================================================
 
-// Set ADR
-int B100_Set_ADR(int enabled) {
-    char endpoint[64];
-    snprintf(endpoint, sizeof(endpoint), "/set.html?adr=%s", enabled ? "yes" : "no");
-    
-    char* response = http_get(endpoint);
-    if (response) {
-        free(response);
-        g_status.adr = enabled;
-        return 1;
-    }
-    return 0;
-}
-
-// Sanitise a payload string for safe use as a URL query value.
-// Spaces become '_'; characters outside [A-Za-z0-9._,-] are dropped.
-static void sanitize_payload(const char* src, char* dst, size_t dstlen) {
-    size_t j = 0;
-    for (size_t i = 0; src[i] && j < dstlen - 1; i++) {
-        unsigned char c = (unsigned char)src[i];
-        if (c == ' ') {
-            dst[j++] = '_';
-        } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                   (c >= '0' && c <= '9') ||
-                   c == '-' || c == '_' || c == '.' || c == ',') {
-            dst[j++] = c;
-        }
-        // all other characters (spaces already handled, <, >, =, etc.) are dropped
-    }
-    dst[j] = '\0';
-}
-
-// Send message
 int B100_Send(const char* payload, int port, int confirmed) {
     if (!payload || port < 1 || port > 223) {
         snprintf(g_last_error, sizeof(g_last_error), "Invalid parameters");
         return 0;
     }
 
-    char safe_payload[960];  // endpoint prefix is ~40 bytes; 960 + 64 fits in 1024
-    sanitize_payload(payload, safe_payload, sizeof(safe_payload));
+    cJSON* body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "port", port);
+    cJSON_AddNumberToObject(body, "confirm", confirmed ? 1 : 0);
+    cJSON_AddStringToObject(body, "payload", payload);
 
-    char endpoint[1024];
-    snprintf(endpoint, sizeof(endpoint), "/send?port=%d&confirm=%d&payload=%s",
-             port, confirmed ? 1 : 0, safe_payload);
+    char* json_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json_str) return 0;
 
-    char* response = http_get(endpoint);
-    if (!response) {
-        return 0;
+    long http_code = 0;
+    char* response = http_post_json("/send", json_str, &http_code);
+    free(json_str);
+    if (response) free(response);
+
+    if (http_code == 202) {
+        LOG("Send accepted: port=%d, confirm=%d\n", port, confirmed);
+        return 1;
     }
-    
-    cJSON* json = cJSON_Parse(response);
-    free(response);
-    
-    if (!json) {
-        return 0;
+    if (http_code == 409) {
+        snprintf(g_last_error, sizeof(g_last_error), "Not joined");
+    } else if (http_code == 412) {
+        snprintf(g_last_error, sizeof(g_last_error), "Callbacks not configured");
+    } else if (http_code == 413) {
+        snprintf(g_last_error, sizeof(g_last_error), "Payload too large");
+    } else if (http_code == 400) {
+        snprintf(g_last_error, sizeof(g_last_error), "Invalid send parameters");
     }
-    
-    // Check for error
-    cJSON* error = cJSON_GetObjectItem(json, "error");
-    if (error && error->valuestring) {
-        strncpy(g_last_error, error->valuestring, sizeof(g_last_error) - 1);
-        cJSON_Delete(json);
-        return 0;
-    }
-    
-    // Check for downlink in response
-    cJSON* payload_item = cJSON_GetObjectItem(json, "payload");
-    if (payload_item && payload_item->valuestring && g_downlink_callback) {
-        B100_Downlink* downlink = malloc(sizeof(B100_Downlink));
-        if (downlink) {
-            memset(downlink, 0, sizeof(B100_Downlink));
-            
-            cJSON* port_item = cJSON_GetObjectItem(json, "port");
-            if (port_item) downlink->port = port_item->valueint;
-            
-            strncpy(downlink->payload, payload_item->valuestring, sizeof(downlink->payload) - 1);
-            downlink->length = strlen(downlink->payload);
-            
-            cJSON* rssi_item = cJSON_GetObjectItem(json, "rssi");
-            if (rssi_item) downlink->rssi = (float)rssi_item->valuedouble;
-            
-            cJSON* snr_item = cJSON_GetObjectItem(json, "snr");
-            if (snr_item) downlink->snr = (float)snr_item->valuedouble;
-            
-            g_downlink_callback(downlink);
-            free(downlink);
-        }
-    }
-    
-    cJSON_Delete(json);
-    return 1;
+    LOG_WARN("Send failed: HTTP %ld\n", http_code);
+    return 0;
 }
 
-// Send JSON message
-int B100_Send_JSON(cJSON* json, int port, int confirmed) {
-    if (!json) return 0;
-    
-    char* payload = cJSON_PrintUnformatted(json);
-    if (!payload) return 0;
-    
-    int result = B100_Send(payload, port, confirmed);
-    free(payload);
-    
+// Send raw byte array via POST /send using JSON array payload: [1, 2, 255]
+// This sends the bytes directly as LoRaWAN payload, no base64 encoding needed.
+int B100_Send_Bytes(const unsigned char* data, int length, int port, int confirmed) {
+    if (!data || length <= 0 || port < 1 || port > 223) {
+        snprintf(g_last_error, sizeof(g_last_error), "Invalid parameters");
+        return 0;
+    }
+
+    cJSON* body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "port", port);
+    cJSON_AddNumberToObject(body, "confirm", confirmed ? 1 : 0);
+
+    cJSON* arr = cJSON_CreateArray();
+    for (int i = 0; i < length; i++)
+        cJSON_AddItemToArray(arr, cJSON_CreateNumber(data[i]));
+    cJSON_AddItemToObject(body, "payload", arr);
+
+    char* json_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json_str) return 0;
+
+    long http_code = 0;
+    char* response = http_post_json("/send", json_str, &http_code);
+    free(json_str);
+    if (response) free(response);
+
+    if (http_code == 202) {
+        LOG("Send bytes accepted: port=%d, confirm=%d, %d bytes\n", port, confirmed, length);
+        return 1;
+    }
+    if (http_code == 409)
+        snprintf(g_last_error, sizeof(g_last_error), "Not joined");
+    else if (http_code == 412)
+        snprintf(g_last_error, sizeof(g_last_error), "Callbacks not configured");
+    else if (http_code == 413)
+        snprintf(g_last_error, sizeof(g_last_error), "Payload too large");
+    LOG_WARN("Send bytes failed: HTTP %ld\n", http_code);
+    return 0;
+}
+
+// ==================================================================
+// /linkcheck endpoint
+// ==================================================================
+
+int B100_Link_Check(void) {
+    long http_code = 0;
+    char* response = http_get_ex("/linkcheck", &http_code);
+    if (response) free(response);
+
+    if (http_code == 202) {
+        LOG("Linkcheck request accepted\n");
+        return 1;
+    }
+    if (http_code == 409) {
+        snprintf(g_last_error, sizeof(g_last_error), "Not joined");
+        LOG_WARN("Linkcheck failed: not joined (409)\n");
+    } else if (http_code == 412) {
+        snprintf(g_last_error, sizeof(g_last_error), "Callbacks not configured");
+        LOG_WARN("Linkcheck failed: callbacks not configured (412)\n");
+    }
+    return 0;
+}
+
+// ==================================================================
+// Callback Configuration via /set
+// ==================================================================
+
+int B100_Configure_Callbacks(const char* callback_ip, int callback_port,
+                             const char* status_uri, const char* receive_uri) {
+    cJSON* params = cJSON_CreateObject();
+    cJSON_AddNumberToObject(params, "http_api_enable", 1);
+    if (callback_ip && callback_ip[0])
+        cJSON_AddStringToObject(params, "callback_addr", callback_ip);
+    if (callback_port > 0)
+        cJSON_AddNumberToObject(params, "callback_port", callback_port);
+    cJSON_AddStringToObject(params, "callback_status_uri", status_uri);
+    cJSON_AddStringToObject(params, "callback_receive_uri", receive_uri);
+
+    int result = B100_Set_Params(params);
+    cJSON_Delete(params);
+
+    if (result) {
+        LOG("Callbacks configured: addr=%s:%d status=%s receive=%s\n",
+            callback_ip ? callback_ip : "(unchanged)", callback_port, status_uri, receive_uri);
+    } else {
+        LOG_WARN("Failed to configure callbacks\n");
+    }
     return result;
 }
 
-// Receive/poll for downlink
-// Polls /status; returns a downlink struct only when status == 8 (payload received).
-// Also updates g_status and triggers the status callback as a side effect.
-B100_Downlink* B100_Receive(void) {
-    syslog(LOG_INFO, "B100: Polling /status for downlink...\n");
-    char* response = http_get("/status");
-    if (!response) {
-        syslog(LOG_INFO, "B100: /status returned NULL (HTTP error)\n");
-        g_status.connected = B100_NOT_CONNECTED;
-        return NULL;
-    }
+// ==================================================================
+// Callbacks
+// ==================================================================
 
-    syslog(LOG_INFO, "B100: /status response: %s\n", response);
-
-    cJSON* json = cJSON_Parse(response);
-    free(response);
-
-    if (!json) {
-        syslog(LOG_WARNING, "B100: Failed to parse JSON from /status\n");
-        return NULL;
-    }
-
-    g_status.connected = B100_CONNECTED;
-
-    // Update status fields (mirrors B100_Update_Status logic)
-    cJSON* item;
-
-    if ((item = cJSON_GetObjectItem(json, "status"))) {
-        g_status.statusCode = item->valueint;
-        strncpy(g_status.statusText, B100_Status_Text(g_status.statusCode), sizeof(g_status.statusText) - 1);
-        g_status.joined = (g_status.statusCode == B100_STATUS_JOINED ||
-                           g_status.statusCode == B100_STATUS_OK ||
-                           g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
-                           g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
-                           g_status.statusCode == B100_STATUS_SENT_CONFIRMED);
-    }
-
-    // Only update fields that are reliably present in all /status responses.
-    // fcntUp, drUp, maxUp, devAddr are absent or zero in downlink-phase responses
-    // (status 8/9) - leave those to B100_Update_Status() to avoid clobbering
-    // valid cached values with stale zeros.
-    if ((item = cJSON_GetObjectItem(json, "fcntDown")))
-        g_status.fcntDown = (unsigned int)item->valueint;
-    if ((item = cJSON_GetObjectItem(json, "rssi")))
-        g_status.rssi = (float)item->valuedouble;
-    if ((item = cJSON_GetObjectItem(json, "snr")))
-        g_status.snr = (float)item->valuedouble;
-
-    g_status.timestamp = time(NULL);
-
-    if (g_status_callback)
-        g_status_callback(&g_status);
-
-    // A downlink is present only when status == 8 (B100_STATUS_PAYLOAD_RECEIVED)
-    if (g_status.statusCode != B100_STATUS_PAYLOAD_RECEIVED) {
-        syslog(LOG_INFO, "B100: No downlink (status=%d)\n", g_status.statusCode);
-        cJSON_Delete(json);
-        return NULL;
-    }
-
-    cJSON* payload_item = cJSON_GetObjectItem(json, "payload");
-    if (!payload_item || !payload_item->valuestring) {
-        syslog(LOG_INFO, "B100: Status=8 but no payload field in response\n");
-        cJSON_Delete(json);
-        return NULL;
-    }
-
-    B100_Downlink* downlink = malloc(sizeof(B100_Downlink));
-    if (!downlink) {
-        cJSON_Delete(json);
-        return NULL;
-    }
-
-    memset(downlink, 0, sizeof(B100_Downlink));
-
-    strncpy(downlink->payload, payload_item->valuestring, sizeof(downlink->payload) - 1);
-
-    // Use the length field from the response (byte count), fall back to string length
-    if ((item = cJSON_GetObjectItem(json, "length")))
-        downlink->length = item->valueint;
-    else
-        downlink->length = (int)strlen(downlink->payload);
-
-    cJSON* payload_type_item = cJSON_GetObjectItem(json, "payload_type");
-    if (payload_type_item && payload_type_item->valuestring)
-        strncpy(downlink->payload_type, payload_type_item->valuestring, sizeof(downlink->payload_type) - 1);
-    else
-        strncpy(downlink->payload_type, "HEX", sizeof(downlink->payload_type) - 1);
-
-    if ((item = cJSON_GetObjectItem(json, "port")))
-        downlink->port = item->valueint;
-    if ((item = cJSON_GetObjectItem(json, "rssi")))
-        downlink->rssi = (float)item->valuedouble;
-    if ((item = cJSON_GetObjectItem(json, "snr")))
-        downlink->snr = (float)item->valuedouble;
-    if ((item = cJSON_GetObjectItem(json, "fcntDown")))
-        downlink->fcntDown = item->valueint;
-    if ((item = cJSON_GetObjectItem(json, "confirming")))
-        downlink->confirming = item->valueint;
-
-    syslog(LOG_INFO, "B100: Downlink on port %d, %d bytes (%s): %s\n",
-           downlink->port, downlink->length, downlink->payload_type, downlink->payload);
-
-    // Register this fcntDown as dispatched to prevent the health-monitor thread
-    // from double-dispatching the same downlink if it also sees status 8.
-    pthread_mutex_lock(&g_downlink_dedup_mutex);
-    g_last_dispatched_fcntDown = (unsigned int)downlink->fcntDown;
-    g_downlink_dedup_init = 1;
-    pthread_mutex_unlock(&g_downlink_dedup_mutex);
-
-    cJSON_Delete(json);
-    return downlink;
-}
-
-// Free downlink
-void B100_Free_Downlink(B100_Downlink* downlink) {
-    if (downlink) {
-        free(downlink);
-    }
-}
-
-// Link test
-int B100_Link_Test(void) {
-    char* response = http_get("/linktest");
-    if (response) {
-        free(response);
-        return 1;
-    }
-    return 0;
-}
-
-// Read LoRaWAN configuration from device (HTML scraping - simplified)
-int B100_Read_LoRaWAN_Config(char* devEUI, char* joinEUI, char* appKey) {
-    // This would require parsing HTML - for now return not implemented
-    // In production, you'd parse the /lora.html page
-    snprintf(g_last_error, sizeof(g_last_error), "Config reading not yet implemented");
-    return 0;
-}
-
-// Set callbacks
 void B100_Set_Downlink_Callback(B100_Downlink_Callback callback) {
     g_downlink_callback = callback;
 }
@@ -788,12 +970,10 @@ void B100_Set_Status_Callback(B100_Status_Callback callback) {
     g_status_callback = callback;
 }
 
-// Get last error
 const char* B100_Get_Last_Error(void) {
     return g_last_error;
 }
 
-// Clear error
 void B100_Clear_Error(void) {
     g_last_error[0] = '\0';
 }

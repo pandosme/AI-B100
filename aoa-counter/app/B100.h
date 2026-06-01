@@ -18,19 +18,21 @@ extern "C" {
 #define B100_CONNECTED      1
 #define B100_ERROR         -1
 
-// LoRaWAN Status Codes (from AI-B100 documentation)
+// LoRaWAN Status Codes (from AI-B100 HTTP API documentation)
 #define B100_STATUS_OK                  0
 #define B100_STATUS_RESTARTED           1
 #define B100_STATUS_NO_PAYLOAD          2
 #define B100_STATUS_PAYLOAD_TOO_LONG    3
 #define B100_STATUS_JOIN_FAILED         4
-#define B100_STATUS_TRYING_TO_JOIN      5
+#define B100_STATUS_AUTOJOIN_ENABLED    5
 #define B100_STATUS_UNKNOWN_ERROR       6
 #define B100_STATUS_JOINED              7
 #define B100_STATUS_PAYLOAD_RECEIVED    8
 #define B100_STATUS_PAYLOAD_SENT        9
 #define B100_STATUS_SENT_CONFIRMED      10
 #define B100_STATUS_NOT_CONFIRMED       11
+#define B100_STATUS_MQTT_HEARTBEAT      12
+#define B100_STATUS_DUTY_CYCLE          13
 #define B100_STATUS_LOST_CONNECTION     14
 #define B100_STATUS_INVALID_PORT        15
 #define B100_STATUS_UPLINK_FAILED       16
@@ -48,14 +50,14 @@ typedef struct {
     int statusCode;             // Status code (see B100_STATUS_* defines)
     char statusText[128];       // Human-readable status
     
-    // Device Identity
+    // Device Identity (from /info)
     char devEUI[17];            // Device EUI (16 hex chars)
     char joinEUI[17];           // Join EUI / App EUI (16 hex chars)
     unsigned int devAddr;       // Device Address (when joined)
+    char devAddrStr[16];        // Device Address as hex string
     
     // LoRaWAN Parameters
-    int dataRateUp;             // Upload data rate (0-5)
-    int dataRateDown;           // Download data rate (0-5)
+    int dataRate;               // Current uplink data rate (0-5)
     int maxPayload;             // Maximum payload size in bytes
     int adr;                    // Adaptive Data Rate enabled (1) or not (0)
     
@@ -67,15 +69,49 @@ typedef struct {
     float rssi;                 // RSSI in dBm
     float snr;                  // SNR in dB
     
-    // Other
+    // Timing
     int confirmed;              // Last message was confirmed
+    unsigned long tUnix;        // Network UTC time (0 if not synced)
+    unsigned long nextUploadMs; // ms until next upload allowed (duty cycle)
+    unsigned long receiveTUnix; // Wall-clock time of last receive callback
+    
+    // Device Info (from /info endpoint)
+    char hardware[32];          // e.g. "AI-B100"
+    char hardwareVersion[32];   // e.g. "1.3"
+    char firmwareVersion[32];   // e.g. "1.9.0"
+    char powerSource[16];       // "poe", "usb", "external", "unknown"
     float tempC;                // Device temperature in Celsius
-    unsigned long timestamp;    // Last update timestamp
+    unsigned int restartCounter;// Number of hardware restarts
+    int httpApiEnabled;         // HTTP API enabled
+    int mqttEnabled;            // MQTT enabled
+    int dhcpEnabled;            // DHCP enabled
+    char ipAddr[20];            // B100 IP address
+    unsigned long timestamp;    // Last update timestamp (local)
+    int tamper;                 // Tamper status: 0=normal, 1=tampered
+    int gpsStatus;              // GPS fix: 0=no antenna, 1=no fix, 2=2D, 3=3D
 
-    // Device Information (parsed once from GET / on first connect)
-    char hardwareVersion[64];   // e.g. "AI-B100 Version <= 1.2"
-    char softwareVersion[64];   // e.g. "1.8.1"
+    // Linkcheck results (from receive callback)
+    int margin;                 // Link margin from linkcheck
+    int gwCount;                // Gateway count from linkcheck
 } B100_Status;
+
+// GPS position structure (from /gps endpoint and GPS callback)
+typedef struct {
+    int    gps_status;  // 0=no antenna, 1=no fix, 2=2D fix, 3=3D fix
+    char   ns[2];       // "N" or "S"
+    double lat;         // decimal degrees (positive = North)
+    char   ew[2];       // "E" or "W"
+    double lon;         // decimal degrees (positive = East)
+    double alt;         // meters above mean sea level
+    int    nosv;        // number of satellites used
+    float  pdop;
+    float  hdop;
+    float  vdop;
+    char   utc[16];     // "HHMMSS.ss"
+    char   date[8];     // "DDMMYY"
+    float  sog;         // speed over ground in knots
+    float  cog;         // course over ground in degrees
+} B100_GPS;
 
 // Downlink message structure
 typedef struct {
@@ -92,6 +128,7 @@ typedef struct {
 // Callback function types
 typedef void (*B100_Downlink_Callback)(B100_Downlink* downlink);
 typedef void (*B100_Status_Callback)(B100_Status* status);
+typedef void (*B100_GPS_Callback)(B100_GPS* gps);
 
 // Initialization and Configuration
 int B100_Init(const char* ip, int port, int timeout_seconds);
@@ -104,37 +141,53 @@ int B100_Set_Timeout(int timeout_seconds);
 int B100_Test_Connection(void);
 int B100_Is_Connected(void);
 
-// Status Retrieval
+// Device Info (via /info endpoint - always available)
+cJSON* B100_Get_Info(void);
+int B100_Fetch_Device_Info(void);
+
+// GPS (via /gps endpoint - always available)
+cJSON* B100_Get_GPS(void);
+B100_GPS* B100_Get_GPS_Status(void);
+
+// Parameters (via /get and /set - always available)
+cJSON* B100_Get_Params(const char* param);
+int B100_Set_Params(cJSON* params);
+
+// Status
 B100_Status* B100_Get_Status(void);
-int B100_Update_Status(void);
+int B100_Request_Status(void);
 const char* B100_Status_Text(int statusCode);
 
 // LoRaWAN Control
 int B100_Join(int drJoin, int adr, int drUp);
-int B100_Join_Auto(void);                        // Use default settings
+int B100_Join_Auto(void);
 int B100_Restart(void);
-int B100_Set_DataRate(int dr);
-int B100_Set_ADR(int enabled);
 
 // Messaging
 int B100_Send(const char* payload, int port, int confirmed);
-int B100_Send_JSON(cJSON* json, int port, int confirmed);
-B100_Downlink* B100_Receive(void);              // Poll for downlink
-void B100_Free_Downlink(B100_Downlink* downlink);
+int B100_Send_Bytes(const unsigned char* data, int length, int port, int confirmed);
 
-// Link Test
-int B100_Link_Test(void);
+// Callback Configuration
+int B100_Configure_Callbacks(const char* callback_ip, int callback_port, const char* status_uri, const char* receive_uri);
+int B100_Configure_GPS_Callback(const char* gps_uri, int interval_seconds);
 
-// Configuration Reading (from AI-B100 HTML pages)
-int B100_Read_LoRaWAN_Config(char* devEUI, char* joinEUI, char* appKey);
+// Callback Processing (called from ACAP HTTP handlers)
+int B100_Process_Status_Callback(cJSON* json);
+int B100_Process_Receive_Callback(cJSON* json);
+int B100_Process_GPS_Callback(cJSON* json);
+
+// Link Check
+int B100_Link_Check(void);
 
 // Callbacks
 void B100_Set_Downlink_Callback(B100_Downlink_Callback callback);
 void B100_Set_Status_Callback(B100_Status_Callback callback);
+void B100_Set_GPS_Callback(B100_GPS_Callback callback);
 
 // Utility Functions
 const char* B100_Get_Last_Error(void);
 void B100_Clear_Error(void);
+const char* B100_Get_IP(void);
 
 #ifdef __cplusplus
 }

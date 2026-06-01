@@ -9,12 +9,16 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "ACAP.h"
 #include "cJSON.h"
 #include "B100.h"
 
 #define APP_PACKAGE	"aib100"
+#define DOWNLINK_LOG_MAX 10
 
 #define LOG(fmt, args...)    { syslog(LOG_INFO, fmt, ## args); printf(fmt, ## args);}
 #define LOG_WARN(fmt, args...)    { syslog(LOG_WARNING, fmt, ## args); printf(fmt, ## args);}
@@ -23,10 +27,11 @@
 // Global state
 static GMainLoop *main_loop = NULL;
 static pthread_t health_thread;
-static pthread_t downlink_thread;
 static pthread_t publish_thread;
 static int running = 1;
 static cJSON* eventSubscriptions = NULL;
+static int g_callbacks_configured = 0;
+static cJSON* g_downlink_log = NULL;
 
 // Transmission settings
 static int g_publish_interval_minutes = 15;
@@ -68,8 +73,9 @@ static pthread_mutex_t g_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Settings cache
 static char g_b100_ip[64] = "10.13.8.47";
 static int g_b100_port = 80;
+static char g_callback_ip[64] = "";
+static int g_callback_port = 80;
 static int g_lorawan_port = 10;
-static int g_downlink_interval = 30;
 static int g_health_check_interval = 60;
 
 // App start time for uptime calculation
@@ -300,6 +306,7 @@ void Sync_Counters_With_AOA_List(cJSON* scenario_array) {
 
 void
 AOA_Event_Callback(cJSON *event, void* userdata) {
+
 	// Only process CrosslineCounting events
 	cJSON* scenarioType = cJSON_GetObjectItem(event, "scenarioType");
 	if (!scenarioType || !scenarioType->valuestring || 
@@ -431,6 +438,9 @@ AOA_Event_Callback(cJSON *event, void* userdata) {
 
 void
 Settings_Updated_Callback( const char* service, cJSON* data) {
+	char* _dbg = cJSON_PrintUnformatted(data);
+	if (_dbg) { LOG_TRACE("Settings_Updated_Callback [%s]: %s\n", service, _dbg); free(_dbg); }
+
 	// The ACAP framework calls this with the individual group name as service
 	// (e.g. "b100", "lorawan", "transmission", "polling") and data is the
 	// group object directly — NOT the top-level settings wrapper.
@@ -450,6 +460,17 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 		if (timeout) {
 			B100_Set_Timeout(timeout->valueint);
 		}
+		cJSON* cbip = cJSON_GetObjectItem(data, "callbackIP");
+		if (cbip && cbip->valuestring) {
+			strncpy(g_callback_ip, cbip->valuestring, sizeof(g_callback_ip) - 1);
+			g_callback_ip[sizeof(g_callback_ip) - 1] = '\0';
+		}
+		cJSON* cbport = cJSON_GetObjectItem(data, "callbackPort");
+		if (cbport && cbport->valueint > 0)
+			g_callback_port = cbport->valueint;
+		// Force callback re-configuration on next health cycle so the
+		// new B100 IP / callback address takes effect immediately.
+		g_callbacks_configured = 0;
 	}
 
 	if (strcmp(service, "lorawan") == 0) {
@@ -497,10 +518,6 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 	}
 
 	if (strcmp(service, "polling") == 0) {
-		cJSON* downlink_interval = cJSON_GetObjectItem(data, "downlinkIntervalSeconds");
-		if (downlink_interval) {
-			g_downlink_interval = downlink_interval->valueint;
-		}
 		cJSON* health_interval = cJSON_GetObjectItem(data, "healthCheckIntervalSeconds");
 		if (health_interval) {
 			g_health_check_interval = health_interval->valueint;
@@ -520,7 +537,10 @@ void
 B100_Downlink_Handler(B100_Downlink* downlink) {
 	if (!downlink) return;
 
-	LOG("Downlink received on port %d, %d bytes (%s): %s (RSSI: %.1f, SNR: %.1f, fcntDown: %d)\n",
+	syslog(LOG_WARNING, "LoRa Downlink: port=%d len=%d type=%s payload=%s RSSI=%.1f SNR=%.1f fcntDown=%d",
+	    downlink->port, downlink->length, downlink->payload_type,
+	    downlink->payload, downlink->rssi, downlink->snr, downlink->fcntDown);
+	LOG("LoRa Downlink: port=%d len=%d type=%s payload=%s RSSI=%.1f SNR=%.1f fcntDown=%d\n",
 	    downlink->port, downlink->length, downlink->payload_type,
 	    downlink->payload, downlink->rssi, downlink->snr, downlink->fcntDown);
 
@@ -532,6 +552,27 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 	ACAP_STATUS_SetNumber("lorawan", "lastDownlinkRSSI", downlink->rssi);
 	ACAP_STATUS_SetNumber("lorawan", "lastDownlinkSNR", downlink->snr);
 	ACAP_STATUS_SetNumber("lorawan", "lastDownlinkFcnt", downlink->fcntDown);
+
+	// Maintain server-side ring buffer of last DOWNLINK_LOG_MAX downlinks
+	{
+		cJSON* entry = cJSON_CreateObject();
+		if (entry) {
+			cJSON_AddStringToObject(entry, "time",         ACAP_DEVICE_Local_Time());
+			cJSON_AddNumberToObject(entry, "port",         downlink->port);
+			cJSON_AddNumberToObject(entry, "length",       downlink->length);
+			cJSON_AddStringToObject(entry, "payload",      downlink->payload);
+			cJSON_AddStringToObject(entry, "payload_type", downlink->payload_type);
+			cJSON_AddNumberToObject(entry, "rssi",         downlink->rssi);
+			cJSON_AddNumberToObject(entry, "snr",          downlink->snr);
+			cJSON_AddNumberToObject(entry, "fcntDown",     downlink->fcntDown);
+			if (!g_downlink_log)
+				g_downlink_log = cJSON_CreateArray();
+			cJSON_AddItemToArray(g_downlink_log, entry);
+			while (cJSON_GetArraySize(g_downlink_log) > DOWNLINK_LOG_MAX)
+				cJSON_DeleteItemFromArray(g_downlink_log, 0);
+			ACAP_STATUS_SetObject("lorawan", "downlinks", g_downlink_log);
+		}
+	}
 
 	// -----------------------------------------------------------
 	// Parse payload into a byte array for command dispatch
@@ -651,7 +692,10 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 					int dr = value;
 					if (dr >= 0 && dr <= 5) {
 						LOG("Downlink: Set Data Rate DR%d\n", dr);
-						B100_Set_DataRate(dr);
+						cJSON* p = cJSON_CreateObject();
+						cJSON_AddNumberToObject(p, "data_rate", dr);
+						B100_Set_Params(p);
+						cJSON_Delete(p);
 					} else {
 						LOG_WARN("Downlink: Set Data Rate bad value %d\n", dr);
 					}
@@ -660,7 +704,10 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				case 0x03: {
 					int adr = value ? 1 : 0;
 					LOG("Downlink: Set ADR %s\n", adr ? "on" : "off");
-					B100_Set_ADR(adr);
+					cJSON* p = cJSON_CreateObject();
+					cJSON_AddNumberToObject(p, "adr_enable", adr);
+					B100_Set_Params(p);
+					cJSON_Delete(p);
 					break;
 				}
 				default:
@@ -689,21 +736,15 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				break;
 			}
 			case 0x02: {
-				// Reply with bridge info on port 6:
-				// hw,sw[,DR<n>,<max>B]  — DR and maxPayload only included when joined (non-zero)
+				// Reply with bridge info on port 6
 				B100_Status* s = B100_Get_Status();
 				char info[192] = {0};
-				if (s->dataRateUp > 0 || s->maxPayload > 0) {
-					snprintf(info, sizeof(info), "%s,%s,DR%d,%dB",
-					         s->hardwareVersion[0] ? s->hardwareVersion : "?",
-					         s->softwareVersion[0] ? s->softwareVersion : "?",
-					         s->dataRateUp,
-					         s->maxPayload);
-				} else {
-					snprintf(info, sizeof(info), "%s,%s",
-					         s->hardwareVersion[0] ? s->hardwareVersion : "?",
-					         s->softwareVersion[0] ? s->softwareVersion : "?");
-				}
+				snprintf(info, sizeof(info), "%s v%s,FW %s,DR%d,%dB",
+				         s->hardware[0]        ? s->hardware        : "?",
+				         s->hardwareVersion[0] ? s->hardwareVersion : "?",
+				         s->firmwareVersion[0] ? s->firmwareVersion : "?",
+				         s->dataRate,
+				         s->maxPayload);
 				LOG("Downlink: Bridge Info, sending: %s\n", info);
 				if (!B100_Send(info, 6, 0))
 					LOG_WARN("Downlink: Bridge Info send failed: %s\n", B100_Get_Last_Error());
@@ -731,35 +772,82 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 	}
 }
 
-void
-B100_Status_Handler(B100_Status* status) {
+// Push bridge device-level info to the "bridge" ACAP_STATUS group.
+// Called after a successful /info fetch and on every status callback.
+static void
+Update_Bridge_ACAP_Status(B100_Status* status) {
 	if (!status) return;
-	
-// B100 status updated
-	
-	// Update ACAP status with B100 status
+	ACAP_STATUS_SetBool("bridge", "connected", status->connected == B100_CONNECTED);
+	if (status->hardware[0])
+		ACAP_STATUS_SetString("bridge", "hardware", status->hardware);
+	if (status->hardwareVersion[0])
+		ACAP_STATUS_SetString("bridge", "hardwareVersion", status->hardwareVersion);
+	if (status->firmwareVersion[0])
+		ACAP_STATUS_SetString("bridge", "firmwareVersion", status->firmwareVersion);
+	if (status->powerSource[0])
+		ACAP_STATUS_SetString("bridge", "powerSource", status->powerSource);
+	if (status->ipAddr[0])
+		ACAP_STATUS_SetString("bridge", "ipAddr", status->ipAddr);
+	ACAP_STATUS_SetBool("bridge", "dhcpEnabled", status->dhcpEnabled);
+	ACAP_STATUS_SetBool("bridge", "mqttEnabled", status->mqttEnabled);
+	ACAP_STATUS_SetBool("bridge", "httpApiEnabled", status->httpApiEnabled);
+	if (status->devEUI[0])
+		ACAP_STATUS_SetString("bridge", "devEUI", status->devEUI);
+	if (status->devAddr != 0) {
+		char addr_str[16];
+		snprintf(addr_str, sizeof(addr_str), "%08X", status->devAddr);
+		ACAP_STATUS_SetString("bridge", "devAddr", addr_str);
+	} else if (status->devAddrStr[0]) {
+		ACAP_STATUS_SetString("bridge", "devAddr", status->devAddrStr);
+	}
+	ACAP_STATUS_SetNumber("bridge", "restartCounter", status->restartCounter);
+	if (status->tempC != 0)
+		ACAP_STATUS_SetNumber("bridge", "tempC", status->tempC);
+	if (status->tUnix > 0)
+		ACAP_STATUS_SetNumber("bridge", "tUnix", (double)status->tUnix);
+	ACAP_STATUS_SetNumber("bridge", "tamper", status->tamper);
+	ACAP_STATUS_SetNumber("bridge", "gpsStatus", status->gpsStatus);
+}
+
+static void
+Update_Lorawan_ACAP_Status(B100_Status* status) {
+	if (!status) return;
 	ACAP_STATUS_SetBool("lorawan", "connected", status->connected == B100_CONNECTED);
 	ACAP_STATUS_SetBool("lorawan", "joined", status->joined);
 	ACAP_STATUS_SetNumber("lorawan", "statusCode", status->statusCode);
-	ACAP_STATUS_SetString("lorawan", "statusText", status->statusText);
+	if (status->statusText[0])
+		ACAP_STATUS_SetString("lorawan", "statusText", status->statusText);
 	ACAP_STATUS_SetNumber("lorawan", "fcntUp", status->fcntUp);
 	ACAP_STATUS_SetNumber("lorawan", "fcntDown", status->fcntDown);
 	ACAP_STATUS_SetNumber("lorawan", "rssi", status->rssi);
 	ACAP_STATUS_SetNumber("lorawan", "snr", status->snr);
-	ACAP_STATUS_SetNumber("lorawan", "dataRate", status->dataRateUp);
+	ACAP_STATUS_SetNumber("lorawan", "dataRate", status->dataRate);
 	ACAP_STATUS_SetNumber("lorawan", "maxPayload", status->maxPayload);
-	ACAP_STATUS_SetNumber("lorawan", "tempC", status->tempC);
-
-	if (status->hardwareVersion[0])
-		ACAP_STATUS_SetString("lorawan", "hardwareVersion", status->hardwareVersion);
-	if (status->softwareVersion[0])
-		ACAP_STATUS_SetString("lorawan", "softwareVersion", status->softwareVersion);
-
+	if (status->tUnix > 0)
+		ACAP_STATUS_SetNumber("lorawan", "tUnix", (double)status->tUnix);
+	ACAP_STATUS_SetNumber("lorawan", "nextUploadMs", (double)status->nextUploadMs);
+	if (status->receiveTUnix > 0)
+		ACAP_STATUS_SetNumber("lorawan", "downlinkTUnix", (double)status->receiveTUnix);
+	ACAP_STATUS_SetNumber("lorawan", "margin", status->margin);
+	ACAP_STATUS_SetNumber("lorawan", "gwCount", status->gwCount);
 	if (status->devAddr != 0) {
 		char addr_str[16];
-		snprintf(addr_str, sizeof(addr_str), "0x%08X", status->devAddr);
+		snprintf(addr_str, sizeof(addr_str), "%08X", status->devAddr);
 		ACAP_STATUS_SetString("lorawan", "devAddr", addr_str);
+	} else if (status->devAddrStr[0]) {
+		ACAP_STATUS_SetString("lorawan", "devAddr", status->devAddrStr);
 	}
+}
+
+void
+B100_Status_Handler(B100_Status* status) {
+	if (!status) return;
+
+	Update_Lorawan_ACAP_Status(status);
+
+	// Bridge device info (from /info) — separate group
+	Update_Bridge_ACAP_Status(status);
+	ACAP_STATUS_SetBool("bridge", "callbacksActive", g_callbacks_configured);
 }
 
 // ==================================================================
@@ -771,79 +859,126 @@ Health_Monitor_Thread(void* arg) {
 	LOG("Health monitor thread started (interval: %ds)\n", g_health_check_interval);
 
 	while (running) {
-		if (B100_Update_Status()) {
-			B100_Status* status = B100_Get_Status();
+		// Refresh device info periodically via /info (always available)
+		B100_Fetch_Device_Info();
+		B100_Status* status = B100_Get_Status();
 
-			// Device restart detected → trigger immediate rejoin
-			if (status->statusCode == B100_STATUS_RESTARTED) {
-				LOG("Device restart detected (status 1), triggering auto-join...\n");
-				ACAP_STATUS_SetString("lorawan", "statusText", "Device restarted - rejoining");
-				B100_Join_Auto();
-				pthread_mutex_lock(&g_health_mutex);
-				g_unconf_count = 0;
+		if (status->connected != B100_CONNECTED) {
+			LOG_WARN("Health check: B100 not reachable\n");
+			ACAP_STATUS_SetBool("bridge", "connected", 0);
+			ACAP_STATUS_SetBool("lorawan", "connected", 0);
+			ACAP_STATUS_SetString("app", "status", "B100 connection error");
+			goto sleep_and_continue;
+		}
+
+		// Push device info to bridge status group, and all available lorawan stats
+		Update_Bridge_ACAP_Status(status);
+		Update_Lorawan_ACAP_Status(status);
+		ACAP_STATUS_SetBool("bridge", "callbacksActive", g_callbacks_configured);
+		ACAP_STATUS_SetBool("lorawan", "connected", 1);
+
+		// If callbacks are not yet configured, or if B100 reports http_api_enable=0
+		// (e.g. after a B100 restart or external reconfiguration), reapply.
+		if (!g_callbacks_configured || !status->httpApiEnabled) {
+			if (g_callbacks_configured && !status->httpApiEnabled)
+				LOG_WARN("B100 http_api_enable is 0 — reapplying callback configuration\n");
+			g_callbacks_configured = 0;
+			const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
+			char status_uri[64], receive_uri[64];
+			snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
+			snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+			if (B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri)) {
+				g_callbacks_configured = 1;
+				// Also re-apply GPS callback so GPS push stays active
+				char gps_uri[64];
+				snprintf(gps_uri, sizeof(gps_uri), "/local/%s/b100_gps", APP_PACKAGE);
+				B100_Configure_GPS_Callback(gps_uri, 60);
+				ACAP_STATUS_SetString("app", "status", "Running");
+			} else {
+				LOG_WARN("Failed to configure B100 callbacks\n");
+			}
+		}
+
+		// Poll current GPS data and update ACAP status (also fires the GPS handler)
+		{
+			cJSON* gps_json = B100_Get_GPS();
+			if (gps_json) cJSON_Delete(gps_json);
+		}
+
+		// Trigger async status request (response comes via callback)
+		if (g_callbacks_configured) {
+			if (!B100_Request_Status()) {
+				LOG_WARN("Health check: status request failed\n");
+			}
+		}
+
+		// Device restart detected → trigger immediate rejoin
+		if (status->statusCode == B100_STATUS_RESTARTED ||
+		    status->statusCode == B100_STATUS_AUTOJOIN_ENABLED) {
+			LOG("Device restart detected (status %d), triggering auto-join...\n", status->statusCode);
+			ACAP_STATUS_SetString("lorawan", "statusText", "Device restarted - rejoining");
+			B100_Join_Auto();
+			pthread_mutex_lock(&g_health_mutex);
+			g_unconf_count = 0;
+			g_awaiting_confirm = 0;
+			g_conf_trial_count = 0;
+			pthread_mutex_unlock(&g_health_mutex);
+			goto sleep_and_continue;
+		}
+
+		// Confirmed delivery (status 10) → clear health-check state
+		if (status->statusCode == B100_STATUS_SENT_CONFIRMED) {
+			pthread_mutex_lock(&g_health_mutex);
+			if (g_awaiting_confirm) {
+				LOG("LoRa: Confirmed delivery received, link healthy\n");
 				g_awaiting_confirm = 0;
 				g_conf_trial_count = 0;
-				pthread_mutex_unlock(&g_health_mutex);
-				goto sleep_and_continue;
 			}
+			pthread_mutex_unlock(&g_health_mutex);
+		}
 
-			// Confirmed delivery (status 10) → clear health-check state
-			if (status->statusCode == B100_STATUS_SENT_CONFIRMED) {
-				pthread_mutex_lock(&g_health_mutex);
-				if (g_awaiting_confirm) {
-					LOG("LoRa: Confirmed delivery received, link healthy\n");
-					g_awaiting_confirm = 0;
-					g_conf_trial_count = 0;
-				}
-				pthread_mutex_unlock(&g_health_mutex);
-			}
-
-			// Auto-join if not on network
-			if (!status->joined) {
-				cJSON* settings = ACAP_Get_Config("settings");
-				if (settings) {
-					cJSON* lorawan = cJSON_GetObjectItem(settings, "lorawan");
-					if (lorawan) {
-						cJSON* autoJoin = cJSON_GetObjectItem(lorawan, "autoJoin");
-						if (autoJoin && cJSON_IsTrue(autoJoin)) {
-							LOG("Auto-join: Device not joined, attempting join...\n");
-							B100_Join_Auto();
-						}
+		// Auto-join if not on network
+		if (!status->joined) {
+			cJSON* settings = ACAP_Get_Config("settings");
+			if (settings) {
+				cJSON* lorawan = cJSON_GetObjectItem(settings, "lorawan");
+				if (lorawan) {
+					cJSON* autoJoin = cJSON_GetObjectItem(lorawan, "autoJoin");
+					if (autoJoin && cJSON_IsTrue(autoJoin)) {
+						LOG("Auto-join: Device not joined, attempting join...\n");
+						B100_Join_Auto();
 					}
 				}
-				goto sleep_and_continue;
 			}
+			goto sleep_and_continue;
+		}
 
-			// Confirmation timeout: if a confirmed uplink got no ACK within 4 minutes,
-			// probe with "Hello" on port 7 (up to 3 retries), then force a rejoin.
-			pthread_mutex_lock(&g_health_mutex);
-			int waiting = g_awaiting_confirm;
-			int trials  = g_conf_trial_count;
-			time_t sent = g_conf_sent_time;
-			pthread_mutex_unlock(&g_health_mutex);
+		// Confirmation timeout: if a confirmed uplink got no ACK within 4 minutes,
+		// probe with "Hello" on port 7 (up to 3 retries), then force a rejoin.
+		pthread_mutex_lock(&g_health_mutex);
+		int waiting = g_awaiting_confirm;
+		int trials  = g_conf_trial_count;
+		time_t sent = g_conf_sent_time;
+		pthread_mutex_unlock(&g_health_mutex);
 
-			if (waiting && (time(NULL) - sent) > 240) {
-				if (trials < 3) {
-					LOG("Confirmation timeout - sending Hello probe %d/3 on port 7\n", trials + 1);
-					B100_Send("Hello", 7, 1);
-					pthread_mutex_lock(&g_health_mutex);
-					g_conf_trial_count++;
-					g_conf_sent_time = time(NULL);
-					pthread_mutex_unlock(&g_health_mutex);
-				} else {
-					LOG("3 confirmation failures - forcing rejoin\n");
-					ACAP_STATUS_SetString("lorawan", "statusText", "Link lost - rejoining");
-					B100_Join_Auto();
-					pthread_mutex_lock(&g_health_mutex);
-					g_awaiting_confirm = 0;
-					g_conf_trial_count = 0;
-					g_unconf_count = 0;
-					pthread_mutex_unlock(&g_health_mutex);
-				}
+		if (waiting && (time(NULL) - sent) > 240) {
+			if (trials < 3) {
+				LOG("Confirmation timeout - sending Hello probe %d/3 on port 7\n", trials + 1);
+				B100_Send("Hello", 7, 1);
+				pthread_mutex_lock(&g_health_mutex);
+				g_conf_trial_count++;
+				g_conf_sent_time = time(NULL);
+				pthread_mutex_unlock(&g_health_mutex);
+			} else {
+				LOG("3 confirmation failures - forcing rejoin\n");
+				ACAP_STATUS_SetString("lorawan", "statusText", "Link lost - rejoining");
+				B100_Join_Auto();
+				pthread_mutex_lock(&g_health_mutex);
+				g_awaiting_confirm = 0;
+				g_conf_trial_count = 0;
+				g_unconf_count = 0;
+				pthread_mutex_unlock(&g_health_mutex);
 			}
-		} else {
-			LOG_WARN("Health check: Failed to update B100 status\n");
-			ACAP_STATUS_SetString("app", "status", "B100 connection error");
 		}
 
 	sleep_and_continue:
@@ -856,37 +991,7 @@ Health_Monitor_Thread(void* arg) {
 	return NULL;
 }
 
-void*
-Downlink_Poller_Thread(void* arg) {
-	LOG("Downlink poller thread started (interval: %ds)\n", g_downlink_interval);
-	
-	while (running) {
-		B100_Status* status = B100_Get_Status();
-		
-		// Only poll if connected and joined
-		if (status->connected == B100_CONNECTED && status->joined) {
-			LOG("Polling for downlink messages...\n");
-			B100_Downlink* downlink = B100_Receive();
-			if (downlink) {
-				LOG("Downlink received! Calling handler...\n");
-				B100_Downlink_Handler(downlink);
-				B100_Free_Downlink(downlink);
-			} else {
-				LOG("No downlink available\n");
-			}
-		} else {
-			LOG("Skipping downlink poll (not connected or not joined)\n");
-		}
-		
-		// Sleep
-		for (int i = 0; i < g_downlink_interval && running; i++) {
-			sleep(1);
-		}
-	}
-	
-	LOG("Downlink poller thread stopped\n");
-	return NULL;
-}
+// Downlink poller removed — downlinks now arrive via B100 receive callback
 
 // ==================================================================
 // HTTP Endpoints
@@ -1036,32 +1141,8 @@ HTTP_Endpoint_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Reques
 }
 
 // ==================================================================
-// LoRa Publishing
+// LoRa Publishing — sends binary counter data directly via byte array
 // ==================================================================
-
-// Base64 encoding for binary data transmission to AI-B100
-static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-char* base64_encode(const unsigned char* data, size_t len) {
-	size_t out_len = 4 * ((len + 2) / 3);
-	char* out = malloc(out_len + 1);
-	if (!out) return NULL;
-	
-	size_t i, j;
-	for (i = 0, j = 0; i < len;) {
-		uint32_t a = i < len ? data[i++] : 0;
-		uint32_t b = i < len ? data[i++] : 0;
-		uint32_t c = i < len ? data[i++] : 0;
-		uint32_t triple = (a << 16) + (b << 8) + c;
-		
-		out[j++] = base64_chars[(triple >> 18) & 0x3F];
-		out[j++] = base64_chars[(triple >> 12) & 0x3F];
-		out[j++] = (i > len + 1) ? '=' : base64_chars[(triple >> 6) & 0x3F];
-		out[j++] = (i > len) ? '=' : base64_chars[triple & 0x3F];
-	}
-	out[j] = '\0';
-	return out;
-}
 
 int Publish_Counters_To_LoRa() {
 	pthread_mutex_lock(&g_counter_mutex);
@@ -1135,16 +1216,7 @@ int Publish_Counters_To_LoRa() {
 	
 	pthread_mutex_unlock(&g_counter_mutex);
 	
-	// Base64 encode the binary buffer
-	char* payload = base64_encode(buffer, buffer_size);
-	free(buffer);
-	
-	if (!payload) {
-		LOG_WARN("Failed to base64 encode payload\n");
-		return 0;
-	}
-	
-// Decide confirmed/unconfirmed: every 10th uplink is confirmed for link health.
+	// Decide confirmed/unconfirmed: every 10th uplink is confirmed for link health.
 	pthread_mutex_lock(&g_health_mutex);
 	g_unconf_count++;
 	int use_confirmed = (g_unconf_count >= 10) ? 1 : 0;
@@ -1157,15 +1229,15 @@ int Publish_Counters_To_LoRa() {
 	}
 	pthread_mutex_unlock(&g_health_mutex);
 
-	// Send via LoRaWAN
+	// Send raw bytes directly via the B100 POST API (no base64 needed)
 	LOG("LoRa: Publishing %zu bytes (%d counters, %d classes) on port %d%s\n", 
 	    buffer_size, g_counter_count, class_count, g_lorawan_port,
 	    use_confirmed ? " [confirmed]" : "");
 
-	int success = B100_Send(payload, g_lorawan_port, use_confirmed);
+	int success = B100_Send_Bytes(buffer, (int)buffer_size, g_lorawan_port, use_confirmed);
 	
 	if (success) {
-		LOG("LoRa: Publish successful\n");
+		LOG("LoRa: Publish accepted\n");
 		pthread_mutex_lock(&g_publish_mutex);
 		g_next_publish_time = time(NULL) + (g_publish_interval_minutes * 60);
 		pthread_mutex_unlock(&g_publish_mutex);
@@ -1173,7 +1245,7 @@ int Publish_Counters_To_LoRa() {
 		LOG_WARN("LoRa: Publish failed - %s\n", B100_Get_Last_Error());
 	}
 	
-	free(payload);
+	free(buffer);
 	return success;
 }
 
@@ -1229,38 +1301,231 @@ HTTP_Endpoint_publish(const ACAP_HTTP_Response response, const ACAP_HTTP_Request
 
 void
 HTTP_Endpoint_receive(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	// Manual linkcheck trigger
 	const char* method = ACAP_HTTP_Get_Method(request);
 	if (!method || strcmp(method, "POST") != 0) {
 		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
 		return;
 	}
 	
-	LOG("Manual receive/downlink check requested\n");
+	LOG("Manual linkcheck requested\n");
 	
-	B100_Downlink* downlink = B100_Receive();
-	if (downlink) {
-		LOG("Downlink received: port=%d, payload=%s, rssi=%.1f, snr=%.1f, fcntDown=%u\n",
-		    downlink->port, downlink->payload, downlink->rssi, downlink->snr, downlink->fcntDown);
-		
-		// Create JSON response
-		cJSON* result = cJSON_CreateObject();
-		cJSON_AddNumberToObject(result, "port", downlink->port);
-		cJSON_AddStringToObject(result, "payload", downlink->payload);
-		cJSON_AddNumberToObject(result, "length", downlink->length);
-		cJSON_AddNumberToObject(result, "rssi", downlink->rssi);
-		cJSON_AddNumberToObject(result, "snr", downlink->snr);
-		cJSON_AddNumberToObject(result, "fcntDown", downlink->fcntDown);
-		
-		// Also call the handler
-		B100_Downlink_Handler(downlink);
-		
-		B100_Free_Downlink(downlink);
-		
-		ACAP_HTTP_Respond_JSON(response, result);
-		cJSON_Delete(result);
+	if (B100_Link_Check()) {
+		ACAP_HTTP_Respond_Text(response, "Linkcheck request sent");
 	} else {
-		LOG("No downlink available from B100\n");
-		ACAP_HTTP_Respond_Error(response, 404, "No downlink messages available");
+		ACAP_HTTP_Respond_Error(response, 500, B100_Get_Last_Error());
+	}
+}
+
+void
+HTTP_Endpoint_b100_request_status(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "POST") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+
+	// Ensure B100 has http_api_enable=1 and correct callback URIs configured
+	const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
+	char status_uri[64], receive_uri[64];
+	snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
+	snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+	if (!B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri)) {
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to configure B100 callbacks");
+		return;
+	}
+	g_callbacks_configured = 1;
+
+	if (B100_Request_Status()) {
+		ACAP_HTTP_Respond_Text(response, "Status request sent");
+	} else {
+		ACAP_HTTP_Respond_Error(response, 500, B100_Get_Last_Error());
+	}
+}
+
+// ==================================================================
+// B100 Callback Endpoints — the B100 POSTs status/downlink data here
+// ==================================================================
+
+void
+HTTP_Endpoint_B100_Status_Callback(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "POST") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+	
+	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
+	if (!body) {
+		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
+		return;
+	}
+
+	char *json_str = cJSON_PrintUnformatted(body);
+	if( json_str ) {
+		LOG_TRACE("B100 status callback received JSON: %s\n", json_str);
+		free(json_str);
+	}
+
+	B100_Process_Status_Callback(body);
+	cJSON_Delete(body);
+
+	ACAP_HTTP_Respond_Text(response, "OK");
+}
+
+void
+HTTP_Endpoint_B100_Receive_Callback(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "POST") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+
+	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
+	if (!body) {
+		LOG_WARN("B100 receive callback: failed to parse JSON body (Content-Type may be wrong)\n");
+		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
+		return;
+	}
+
+	char *json_str = cJSON_PrintUnformatted(body);
+	if (json_str) {
+		LOG("B100 receive callback: %s\n", json_str);
+		free(json_str);
+	}
+
+	B100_Process_Receive_Callback(body);
+	cJSON_Delete(body);
+
+	ACAP_HTTP_Respond_Text(response, "OK");
+}
+
+void
+B100_GPS_Handler(B100_GPS* gps) {
+	if (!gps) return;
+
+	ACAP_STATUS_SetNumber("gps", "gps_status", gps->gps_status);
+	ACAP_STATUS_SetString("gps", "ns",          gps->ns);
+	ACAP_STATUS_SetNumber("gps", "lat",          gps->lat);
+	ACAP_STATUS_SetString("gps", "ew",          gps->ew);
+	ACAP_STATUS_SetNumber("gps", "lon",          gps->lon);
+	ACAP_STATUS_SetNumber("gps", "alt",          gps->alt);
+	ACAP_STATUS_SetNumber("gps", "nosv",         gps->nosv);
+	ACAP_STATUS_SetNumber("gps", "pdop",         gps->pdop);
+	ACAP_STATUS_SetNumber("gps", "hdop",         gps->hdop);
+	ACAP_STATUS_SetNumber("gps", "vdop",         gps->vdop);
+	ACAP_STATUS_SetString("gps", "utc",          gps->utc);
+	ACAP_STATUS_SetString("gps", "date",         gps->date);
+	ACAP_STATUS_SetNumber("gps", "sog",          gps->sog);
+	ACAP_STATUS_SetNumber("gps", "cog",          gps->cog);
+}
+
+void
+HTTP_Endpoint_B100_GPS_Callback(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "POST") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+
+	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
+	if (!body) {
+		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
+		return;
+	}
+
+	char* json_str = cJSON_PrintUnformatted(body);
+	if (json_str) {
+		LOG_TRACE("B100 GPS callback received JSON: %s\n", json_str);
+		free(json_str);
+	}
+
+	B100_Process_GPS_Callback(body);
+	cJSON_Delete(body);
+
+	ACAP_HTTP_Respond_Text(response, "OK");
+}
+
+void
+HTTP_Endpoint_gps(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	cJSON* gps_json = B100_Get_GPS();
+	if (gps_json) {
+		ACAP_HTTP_Respond_JSON(response, gps_json);
+		cJSON_Delete(gps_json);
+	} else {
+		ACAP_HTTP_Respond_Error(response, 503, "B100 GPS not available");
+	}
+}
+
+// ==================================================================
+// B100 Info/Config Endpoint — expose B100 device info and params
+// ==================================================================
+
+void
+HTTP_Endpoint_b100_info(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	cJSON* info = B100_Get_Info();
+	if (info) {
+		// Add current callback config
+		cJSON* cb_params = B100_Get_Params("callback_addr");
+		if (cb_params) {
+			cJSON* addr = cJSON_GetObjectItem(cb_params, "callback_addr");
+			if (addr && addr->valuestring)
+				cJSON_AddStringToObject(info, "callback_configured_addr", addr->valuestring);
+			cJSON_Delete(cb_params);
+		}
+		cJSON_AddBoolToObject(info, "callbacks_active", g_callbacks_configured);
+		
+		ACAP_HTTP_Respond_JSON(response, info);
+		cJSON_Delete(info);
+	} else {
+		ACAP_HTTP_Respond_Error(response, 503, "B100 not reachable");
+	}
+}
+
+void
+HTTP_Endpoint_b100_params(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	
+	if (method && strcmp(method, "GET") == 0) {
+		// Read all parameters
+		cJSON* params = B100_Get_Params(NULL);
+		if (params) {
+			ACAP_HTTP_Respond_JSON(response, params);
+			cJSON_Delete(params);
+		} else {
+			ACAP_HTTP_Respond_Error(response, 503, "B100 not reachable");
+		}
+	} else if (method && strcmp(method, "POST") == 0) {
+		// Set parameters
+		cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
+		if (!body) {
+			ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
+			return;
+		}
+		if (B100_Set_Params(body)) {
+			cJSON_Delete(body);
+			ACAP_HTTP_Respond_Text(response, "Parameters updated");
+		} else {
+			cJSON_Delete(body);
+			ACAP_HTTP_Respond_Error(response, 500, B100_Get_Last_Error());
+		}
+	} else {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be GET or POST");
+	}
+}
+
+void
+HTTP_Endpoint_linkcheck(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "POST") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+	
+	if (B100_Link_Check()) {
+		ACAP_HTTP_Respond_Text(response, "Linkcheck request sent");
+	} else {
+		ACAP_HTTP_Respond_Error(response, 500, B100_Get_Last_Error());
 	}
 }
 
@@ -1360,7 +1625,7 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 	}
 	
 	// Build JavaScript decoder function
-	char js[4096];
+	char js[8192];
 	int pos = 0;
 	
 	// Build counter names list for documentation
@@ -1370,48 +1635,35 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		strcat(counter_names, g_counters[i].scenario);
 	}
 	
+	const char* dev_model  = ACAP_DEVICE_Prop("model")  ? ACAP_DEVICE_Prop("model")  : "unknown";
+	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
+	const char* dev_date   = ACAP_DEVICE_Date();
+
 	pos += snprintf(js + pos, sizeof(js) - pos,
 		"/**\n"
-		" * AI-B100 Counter Decoder for TTN/Node-RED\n"
+		" * AI-B100 Counter Decoder\n"
+		" * Device  : %s  (serial %s)\n"
 		" * Generated: %s\n"
 		" * Counters: %s\n"
 		" * Enabled classes: %s\n"
-		" * Payload format: Little-endian 16-bit unsigned integers\n"
-		" * Note: Double base64 decoding required (B100 sends base64 as ASCII over LoRa)\n"
+		" *\n"
+		" * Payload format\n"
+		" * --------------\n"
+		" * The AI-B100 sends raw binary bytes over LoRaWAN.\n"
+		" * Each counter contributes one 16-bit little-endian unsigned integer\n"
+		" * per enabled class, in the order: human, car, bike, bus, truck, other.\n"
+		" * Total payload size = (number of counters) x (number of classes) x 2 bytes.\n"
+		" *\n"
+		" * Usage\n"
+		" * -----\n"
+		" * Call decodeCounters(bytes) where 'bytes' is the raw LoRaWAN payload\n"
+		" * as a Buffer or Uint8Array. Returns an object with one key per counter,\n"
+		" * each containing the enabled class counts.\n"
 		" */\n\n"
-		"function decodeUplink(input) {\n"
-		"  // AI-B100 sends base64-encoded data, but B100 transmits it as ASCII bytes\n"
-		"  // TTN base64-encodes those ASCII bytes, resulting in double-encoding\n"
-		"  var base64String = String.fromCharCode.apply(null, input.bytes);\n"
-		"  var bytes;\n"
-		"  \n"
-		"  // Node.js/Node-RED: use Buffer\n"
-		"  if (typeof Buffer !== 'undefined') {\n"
-		"    var buf = Buffer.from(base64String, 'base64');\n"
-		"    bytes = Array.from(buf);\n"
-		"  }\n"
-		"  // Browser: use atob\n"
-		"  else if (typeof atob !== 'undefined') {\n"
-		"    var binaryString = atob(base64String);\n"
-		"    bytes = new Array(binaryString.length);\n"
-		"    for (var i = 0; i < binaryString.length; i++) {\n"
-		"      bytes[i] = binaryString.charCodeAt(i);\n"
-		"    }\n"
-		"  }\n"
-		"  else {\n"
-		"    return { data: {}, warnings: [], errors: ['No base64 decoder available'] };\n"
-		"  }\n"
-		"  \n"
-		"  return {\n"
-		"    data: decodeCounters(bytes),\n"
-		"    warnings: [],\n"
-		"    errors: []\n"
-		"  };\n"
-		"}\n\n"
 		"function decodeCounters(bytes) {\n"
 		"  var result = {};\n"
 		"  var offset = 0;\n\n",
-		"auto-generated", counter_names, classes
+		dev_model, dev_serial, dev_date, counter_names, classes
 	);
 	
 	// Generate decoding for each counter
@@ -1477,8 +1729,13 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 	pthread_mutex_unlock(&g_publish_mutex);
 	pthread_mutex_unlock(&g_counter_mutex);
 	
+	// Build filename: aib100-decoder-{model}-{serial}-{date}.js
+	char filename[128];
+	snprintf(filename, sizeof(filename), "aib100-decoder-%s-%s-%s.js",
+	         dev_model, dev_serial, dev_date);
+
 	// Send as downloadable JavaScript file
-	ACAP_HTTP_Header_FILE(response, "ttn-decoder.js", "application/javascript", strlen(js));
+	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", strlen(js));
 	ACAP_HTTP_Respond_String(response, "%s", js);
 }
 
@@ -1542,7 +1799,13 @@ int main(void) {
             if (ip && ip->valuestring) {
                 strncpy(g_b100_ip, ip->valuestring, sizeof(g_b100_ip) - 1);
             }
-            
+            cJSON* cbip = cJSON_GetObjectItem(b100, "callbackIP");
+            if (cbip && cbip->valuestring && cbip->valuestring[0]) {
+                strncpy(g_callback_ip, cbip->valuestring, sizeof(g_callback_ip) - 1);
+            }
+            cJSON* cbport = cJSON_GetObjectItem(b100, "callbackPort");
+            if (cbport && cbport->valueint > 0)
+                g_callback_port = cbport->valueint;
             cJSON* port = cJSON_GetObjectItem(b100, "port");
             if (port) {
                 g_b100_port = port->valueint;
@@ -1564,11 +1827,6 @@ int main(void) {
         
         cJSON* polling = cJSON_GetObjectItem(settings, "polling");
         if (polling) {
-            cJSON* downlink = cJSON_GetObjectItem(polling, "downlinkIntervalSeconds");
-            if (downlink) {
-                g_downlink_interval = downlink->valueint;
-            }
-            
             cJSON* health = cJSON_GetObjectItem(polling, "healthCheckIntervalSeconds");
             if (health) {
                 g_health_check_interval = health->valueint;
@@ -1613,15 +1871,35 @@ int main(void) {
     B100_Init(g_b100_ip, g_b100_port, 30);
     B100_Set_Downlink_Callback(B100_Downlink_Handler);
     B100_Set_Status_Callback(B100_Status_Handler);
+    B100_Set_GPS_Callback(B100_GPS_Handler);
     
-    // Initial connection test
+    // Initial connection test using /info endpoint
     ACAP_STATUS_SetString("app", "status", "Testing B100 connection...");
     if (B100_Test_Connection()) {
         LOG("B100 connection successful\n");
-        ACAP_STATUS_SetString("app", "status", "Running");
         
-        // Initial status update
-        B100_Update_Status();
+        // Configure B100 API enable and callback URIs
+        {
+            const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
+            char status_uri[64], receive_uri[64];
+            snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
+            snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+            if (B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri)) {
+                g_callbacks_configured = 1;
+                // Configure GPS callback — POST every 60 s to the b100_gps endpoint
+                char gps_uri[64];
+                snprintf(gps_uri, sizeof(gps_uri), "/local/%s/b100_gps", APP_PACKAGE);
+                B100_Configure_GPS_Callback(gps_uri, 60);
+                ACAP_STATUS_SetString("app", "status", "Running");
+            } else {
+                LOG_WARN("Failed to configure B100 callbacks\n");
+                ACAP_STATUS_SetString("app", "status", "Running (callbacks failed)");
+            }
+        }
+
+        // Trigger initial status request
+        if (g_callbacks_configured)
+            B100_Request_Status();
     } else {
         LOG_WARN("B100 connection failed - will retry in background\n");
         ACAP_STATUS_SetString("app", "status", "B100 connection failed - retrying...");
@@ -1638,6 +1916,14 @@ int main(void) {
     ACAP_HTTP_Node("delete_counter", HTTP_Endpoint_delete_counter);
     ACAP_HTTP_Node("sync_counters", HTTP_Endpoint_sync_counters);
     ACAP_HTTP_Node("receive", HTTP_Endpoint_receive);
+    ACAP_HTTP_Node("b100_status", HTTP_Endpoint_B100_Status_Callback);
+    ACAP_HTTP_Node("b100_receive", HTTP_Endpoint_B100_Receive_Callback);
+    ACAP_HTTP_Node("b100_gps", HTTP_Endpoint_B100_GPS_Callback);
+    ACAP_HTTP_Node("gps", HTTP_Endpoint_gps);
+    ACAP_HTTP_Node("b100_info", HTTP_Endpoint_b100_info);
+    ACAP_HTTP_Node("b100_params", HTTP_Endpoint_b100_params);
+    ACAP_HTTP_Node("b100_request_status", HTTP_Endpoint_b100_request_status);
+    ACAP_HTTP_Node("linkcheck", HTTP_Endpoint_linkcheck);
     
     // Initialize next publish time
     pthread_mutex_lock(&g_publish_mutex);
@@ -1647,7 +1933,6 @@ int main(void) {
     // Start background threads
     LOG("Starting background threads...\n");
     pthread_create(&health_thread, NULL, Health_Monitor_Thread, NULL);
-    pthread_create(&downlink_thread, NULL, Downlink_Poller_Thread, NULL);
     pthread_create(&publish_thread, NULL, Publish_Thread, NULL);
     
     // Setup signal handler
@@ -1668,7 +1953,6 @@ int main(void) {
 	running = 0;
 	
 	pthread_join(health_thread, NULL);
-	pthread_join(downlink_thread, NULL);
 	pthread_join(publish_thread, NULL);
 	
 	// Save counters before exit

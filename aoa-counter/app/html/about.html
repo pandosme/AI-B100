@@ -18,6 +18,7 @@
 			<a href="aoa.html">AOA</a>
 			<a href="bridge.html">LoRA Bridge</a>
 			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
 			<a href="about.html" class="active">About</a>
 			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
 		</nav>
@@ -62,15 +63,21 @@
 			<div class="col-12 col-md-6">
 				<div class="card mb-3">
 					<div class="card-header">
-						<h5 class="card-title mb-0">LoRA Bridge</h5>
+						<h5 class="card-title mb-0">LoRA Bridge (AI-B100)</h5>
 					</div>
 					<div class="card-body">
 						<div class="info-grid">
+							<div class="info-row"><div class="info-label">Hardware:</div><div class="info-value"><span id="bridge-hw"></span></div></div>
+							<div class="info-row"><div class="info-label">HW Version:</div><div class="info-value"><span id="bridge-hwver"></span></div></div>
+							<div class="info-row"><div class="info-label">Firmware:</div><div class="info-value"><span id="bridge-fwver"></span></div></div>
 							<div class="info-row"><div class="info-label">IP Address:</div><div class="info-value"><span id="bridge-ip"></span></div></div>
-							<div class="info-row"><div class="info-label">Status:</div><div class="info-value"><span id="bridge-status"></span></div></div>
+							<div class="info-row"><div class="info-label">Power:</div><div class="info-value"><span id="bridge-power"></span></div></div>
+							<div class="info-row"><div class="info-label">Connection:</div><div class="info-value"><span id="bridge-status"></span></div></div>
 							<div class="info-row"><div class="info-label">Network Joined:</div><div class="info-value"><span id="bridge-joined"></span></div></div>
-							<div class="info-row"><div class="info-label">DevEUI:</div><div class="info-value"><span id="bridge-deveui"></span></div></div>
+							<div class="info-row"><div class="info-label">DevEUI:</div><div class="info-value"><span id="bridge-deveui" style="font-family:monospace"></span></div></div>
+							<div class="info-row"><div class="info-label">DevAddr:</div><div class="info-value"><span id="bridge-devaddr" style="font-family:monospace"></span></div></div>
 							<div class="info-row"><div class="info-label">Uplink Count:</div><div class="info-value"><span id="bridge-uplink"></span></div></div>
+							<div class="info-row"><div class="info-label">Restarts:</div><div class="info-value"><span id="bridge-restarts"></span></div></div>
 						</div>
 					</div>
 				</div>
@@ -166,17 +173,30 @@ $(document).ready(function() {
 			success: function(status) {
 				fullStatusData.status = status;			updateNavDot(status);
 				// Bridge status
+				const br = status.bridge;
 				const lorawan = status.lorawan;
-				if (lorawan && lorawan.connected) {
+				if (br && br.connected) {
+					$("#bridge-hw").text(br.hardware || '-');
+					$("#bridge-hwver").text(br.hardwareVersion || '-');
+					$("#bridge-fwver").text(br.firmwareVersion || '-');
+					$("#bridge-power").text(br.powerSource || '-');
 					$("#bridge-status").text("Connected").css('color', 'green');
-					$("#bridge-joined").text(lorawan.joined ? 'Yes' : 'No').css('color', lorawan.joined ? 'green' : 'orange');
-					$("#bridge-deveui").text(lorawan.devAddr || '-');
-					$("#bridge-uplink").text(lorawan.fcntUp || 0);
+					$("#bridge-deveui").text(br.devEUI || '-');
+					$("#bridge-devaddr").text(br.devAddr && br.devAddr !== '00000000' ? br.devAddr : 'Not joined');
+					$("#bridge-restarts").text(br.restartCounter != null ? br.restartCounter : '-');
 				} else {
+					$("#bridge-hw").text('-');
+					$("#bridge-hwver").text('-');
+					$("#bridge-fwver").text('-');
+					$("#bridge-power").text('-');
 					$("#bridge-status").text("Disconnected").css('color', 'red');
-					$("#bridge-joined").text('-');
 					$("#bridge-deveui").text('-');
-					$("#bridge-uplink").text('-');
+					$("#bridge-devaddr").text('-');
+					$("#bridge-restarts").text('-');
+				}
+				if (lorawan) {
+					$("#bridge-joined").text(lorawan.joined ? 'Yes' : 'No').css('color', lorawan.joined ? 'green' : 'orange');
+					$("#bridge-uplink").text(lorawan.fcntUp != null ? lorawan.fcntUp : '-');
 				}
 
 				// Counter status
