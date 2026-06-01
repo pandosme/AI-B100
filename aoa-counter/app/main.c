@@ -720,35 +720,62 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 		// Port 12: Information requests
 		switch (first_byte) {
 			case 0x01: {
+				// Camera identity + health → reply on port 5
 				const char* model    = ACAP_DEVICE_Prop("model");
 				const char* serial   = ACAP_DEVICE_Prop("serial");
 				const char* firmware = ACAP_DEVICE_Prop("firmware");
-				int uptime_days = (int)((time(NULL) - g_app_start_time) / 86400);
-				char info[128] = {0};
-				snprintf(info, sizeof(info), "%s,%s,%s,%dd",
+				int uptime_hours = (int)(ACAP_DEVICE_Uptime() / 3600.0);
+				int cpu_pct = (int)(ACAP_DEVICE_CPU_Average() * 100.0);
+				if (cpu_pct > 99) cpu_pct = 99;
+				const char* app_ver = "?";
+				cJSON* mf = ACAP_Get_Config("manifest");
+				if (mf) {
+					cJSON* setup = cJSON_GetObjectItem(cJSON_GetObjectItem(mf, "acapPackageConf"), "setup");
+					if (setup) {
+						cJSON* ver = cJSON_GetObjectItem(setup, "version");
+						if (ver && ver->valuestring) app_ver = ver->valuestring;
+					}
+				}
+				char info[192] = {0};
+				snprintf(info, sizeof(info), "%s,%s,%s,%dh,%d%%,%s",
 				         model    ? model    : "?",
 				         serial   ? serial   : "?",
 				         firmware ? firmware : "?",
-				         uptime_days);
-				LOG("Downlink: Camera Info, sending: %s\n", info);
+				         uptime_hours, cpu_pct, app_ver);
+				LOG("Downlink: Camera Info reply: %s\n", info);
 				if (!B100_Send(info, 5, 0))
 					LOG_WARN("Downlink: Camera Info send failed: %s\n", B100_Get_Last_Error());
 				break;
 			}
 			case 0x02: {
-				// Reply with bridge info on port 6
+				// Bridge identity + LoRaWAN state → reply on port 6
 				B100_Status* s = B100_Get_Status();
-				char info[192] = {0};
-				snprintf(info, sizeof(info), "%s v%s,FW %s,DR%d,%dB",
+				char info[256] = {0};
+				snprintf(info, sizeof(info), "%s/%s,%s,%s,%.0fC,R%u,%s",
 				         s->hardware[0]        ? s->hardware        : "?",
 				         s->hardwareVersion[0] ? s->hardwareVersion : "?",
 				         s->firmwareVersion[0] ? s->firmwareVersion : "?",
-				         s->dataRate,
-				         s->maxPayload);
-				LOG("Downlink: Bridge Info, sending: %s\n", info);
+				         s->powerSource[0]     ? s->powerSource     : "?",
+				         s->tempC,
+				         s->restartCounter,
+				         s->devAddrStr[0]      ? s->devAddrStr      : "0");
+				LOG("Downlink: Bridge Info reply: %s\n", info);
 				if (!B100_Send(info, 6, 0))
 					LOG_WARN("Downlink: Bridge Info send failed: %s\n", B100_Get_Last_Error());
 				ACAP_STATUS_SetString("lorawan", "bridgeInfo", info);
+				break;
+			}
+			case 0x03: {
+				// Signal quality snapshot → reply on port 7
+				B100_Status* s = B100_Get_Status();
+				char info[128] = {0};
+				snprintf(info, sizeof(info), "DR%d,%dB,%.0fdBm,%.1fdB,%uup,%udn",
+				         s->dataRate, s->maxPayload,
+				         s->rssi, s->snr,
+				         s->fcntUp, s->fcntDown);
+				LOG("Downlink: Signal Quality reply: %s\n", info);
+				if (!B100_Send(info, 7, 0))
+					LOG_WARN("Downlink: Signal Quality send failed: %s\n", B100_Get_Last_Error());
 				break;
 			}
 			default:
@@ -756,17 +783,6 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				break;
 		}
 
-	} else if (port == 13) {
-		// Port 13: Test
-		switch (first_byte) {
-			case 0x01:
-				LOG("Downlink: Test Hello\n");
-				B100_Send("Hello", 7, 0);
-				break;
-			default:
-				LOG_WARN("Downlink: Unknown port 13 command 0x%02X\n", first_byte);
-				break;
-		}
 	} else {
 		LOG_WARN("Downlink: Unhandled port %d\n", port);
 	}

@@ -119,10 +119,9 @@ const DEFAULT_COMMANDS = [
 	{ enabled: true,  port: 11, byte: '0x02', message: 'Set Data Rate',         action: 'Set fixed data rate; byte 1 = 0–5 (DR0–DR5)' },
 	{ enabled: true,  port: 11, byte: '0x03', message: 'Set ADR',               action: 'Enable/disable ADR; byte 1 = 1 (on) / 0 (off)' },
 	// Port 12 — Information requests
-	{ enabled: true,  port: 12, byte: '0x01', message: 'Request Camera Info',   action: 'Reply on port 5: model, serial, firmware, uptime days' },
-	{ enabled: true,  port: 12, byte: '0x02', message: 'Request Bridge Info',   action: 'Reply on port 6: hardware version, software version, data rate, max payload' },
-	// Port 13 — Test
-	{ enabled: false, port: 13, byte: '0x01', message: 'Send Hello',            action: 'Send test message "Hello" on port 7' }
+	{ enabled: true,  port: 12, byte: '0x01', message: 'Request Camera Info',   action: 'Reply on port 5: model, serial, firmware, uptime hours, CPU %, ACAP version' },
+	{ enabled: true,  port: 12, byte: '0x02', message: 'Request Bridge Info',   action: 'Reply on port 6: hardware, firmware, power source, temperature, restart count, DevAddr' },
+	{ enabled: true,  port: 12, byte: '0x03', message: 'Request Signal Quality',action: 'Reply on port 7: data rate, max payload, RSSI, SNR, frame counters up/down' }
 ];
 
 $(document).ready(function() {

@@ -37,6 +37,6 @@
     { "port": 11, "byte": 3, "enabled": true  },
     { "port": 12, "byte": 1, "enabled": true  },
     { "port": 12, "byte": 2, "enabled": true  },
-    { "port": 13, "byte": 1, "enabled": false }
+    { "port": 12, "byte": 3, "enabled": true  }
   ]
 }
