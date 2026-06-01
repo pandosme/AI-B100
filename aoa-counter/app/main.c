@@ -1406,6 +1406,7 @@ HTTP_Endpoint_B100_Receive_Callback(const ACAP_HTTP_Response response, const ACA
 
 	char *json_str = cJSON_PrintUnformatted(body);
 	if (json_str) {
+		syslog(LOG_WARNING, "B100 receive callback: %s", json_str);
 		LOG("B100 receive callback: %s\n", json_str);
 		free(json_str);
 	}
