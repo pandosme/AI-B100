@@ -19,11 +19,28 @@
     "enabled": true,
     "classes": {
       "human": true,
-      "car": true,
-      "bike": true,
-      "bus": true,
-      "truck": true,
-      "other": true
+      "vehicle": false,
+      "unknown": false
+    }
+  },
+  "radar": {
+    "occupancyMode": "maximum",
+    "objectClass": "human",
+    "staleTimeoutSeconds": 60,
+    "minDwellSeconds": 0,
+    "minConfidence": 30,
+    "aoi": {
+      "enabled": false,
+      "x1": 0,
+      "x2": 1000,
+      "y1": 0,
+      "y2": 1000,
+      "points": [
+        { "x": 0, "y": 0 },
+        { "x": 1000, "y": 0 },
+        { "x": 1000, "y": 1000 },
+        { "x": 0, "y": 1000 }
+      ]
     }
   },
   "polling": {

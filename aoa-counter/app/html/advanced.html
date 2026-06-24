@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title></title>
+<link rel="stylesheet" href="css/bootstrap.min.css">
+<link rel="stylesheet" href="css/app.css">
+<script src="js/jquery-3.7.1.min.js"></script>
+<script src="js/bootstrap.bundle.min.js"></script>
+<script src="js/toast.js"></script>
+</head>
+<body>
+<header class="app-header">
+<div class="app-name" id="app-name">&nbsp;</div>
+<nav class="nav-bar">
+<a href="index.html">Counters</a>
+<a href="aoa.html">AOA</a>
+<a href="bridge.html">LoRA Bridge</a>
+<a href="downlink.html">LoRA Downlink</a>
+<a href="gps.html">GPS</a>
+<a href="about.html">About</a>
+<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+</nav>
+</header>
+
+<div class="page-content">
+
+<h4 class="mb-3">Advanced Settings</h4>
+
+<!-- ===== SET COUNTER VALUES ===== -->
+<div class="card mb-3">
+<div class="card-header">
+<h5 class="card-title mb-0">Set Counter Values</h5>
+</div>
+<div class="card-body">
+<p class="text-muted">Override counter values when a system component has been replaced or reset. Select a scenario and set the desired values.</p>
+
+<div class="form-group mb-3">
+	<label for="scenarioSelect" class="form-label">Scenario</label>
+	<select class="form-select" id="scenarioSelect">
+		<option value="">Loading...</option>
+	</select>
+</div>
+
+<div id="counterFields" style="display:none;">
+	<div class="row">
+		<div class="col-md-4 mb-3">
+			<label for="valHuman" class="form-label">👤 Humans</label>
+			<input type="number" class="form-control" id="valHuman" min="0" value="0">
+		</div>
+		<div class="col-md-4 mb-3">
+			<label for="valCar" class="form-label">🚗 Cars</label>
+			<input type="number" class="form-control" id="valCar" min="0" value="0">
+		</div>
+		<div class="col-md-4 mb-3">
+			<label for="valBike" class="form-label">🚲 Bikes</label>
+			<input type="number" class="form-control" id="valBike" min="0" value="0">
+		</div>
+		<div class="col-md-4 mb-3">
+			<label for="valBus" class="form-label">🚌 Buses</label>
+			<input type="number" class="form-control" id="valBus" min="0" value="0">
+		</div>
+		<div class="col-md-4 mb-3">
+			<label for="valTruck" class="form-label">🚚 Trucks</label>
+			<input type="number" class="form-control" id="valTruck" min="0" value="0">
+		</div>
+		<div class="col-md-4 mb-3">
+			<label for="valOther" class="form-label">🚙 Other Vehicles</label>
+			<input type="number" class="form-control" id="valOther" min="0" value="0">
+		</div>
+	</div>
+</div>
+</div>
+<div class="card-footer">
+<button id="btn-set-counters" class="btn btn-warning" disabled>Set Counter Values</button>
+<small class="text-muted ms-3">This will overwrite the current counter values for the selected scenario.</small>
+</div>
+</div>
+
+</div>
+
+<script>
+$(document).ready(function() {
+	$.ajax({
+		type: "GET",
+		url: 'app',
+		dataType: 'json',
+		cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+			loadCounters();
+		},
+		error: function(response) {
+			showToast("Failed to load application: " + response.statusText, 'danger');
+		}
+	});
+
+	$('#scenarioSelect').on('change', onScenarioChange);
+	$('#btn-set-counters').on('click', setCounters);
+
+	// LoRa nav dot
+	function updateNavDot(data) {
+		const dot = $('#lora-nav-dot');
+		const lw = data && data.lorawan;
+		dot.removeClass('lora-joined lora-connected lora-disconnected');
+		if (lw && lw.joined)         dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+		else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+		else                         dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+	}
+	function pollLoraStatus() {
+		$.ajax({ type:'GET', url:'status', dataType:'json', cache:false,
+			success: function(d) { updateNavDot(d); } });
+	}
+	setInterval(pollLoraStatus, 10000);
+	pollLoraStatus();
+});
+
+var g_counters = [];
+
+function loadCounters() {
+	$.ajax({
+		type: "GET",
+		url: 'counters',
+		dataType: 'json',
+		cache: false,
+		success: function(data) {
+			g_counters = data.counters || [];
+			populateScenarioSelect();
+		},
+		error: function(xhr, status, error) {
+			showToast("Failed to load counters: " + error, 'danger');
+		}
+	});
+}
+
+function populateScenarioSelect() {
+	var sel = $('#scenarioSelect');
+	sel.empty();
+
+	if (g_counters.length === 0) {
+		sel.append('<option value="">No active scenarios</option>');
+		$('#btn-set-counters').prop('disabled', true);
+		$('#counterFields').hide();
+		return;
+	}
+
+	sel.append('<option value="">-- Select scenario --</option>');
+	g_counters.forEach(function(c) {
+		sel.append($('<option>').val(c.scenario).text(c.scenario));
+	});
+}
+
+function onScenarioChange() {
+	var scenario = $('#scenarioSelect').val();
+	if (!scenario) {
+		$('#counterFields').hide();
+		$('#btn-set-counters').prop('disabled', true);
+		return;
+	}
+
+	var counter = g_counters.find(function(c) { return c.scenario === scenario; });
+	if (counter) {
+		$('#valHuman').val(counter.human || 0);
+		$('#valCar').val(counter.car || 0);
+		$('#valBike').val(counter.bike || 0);
+		$('#valBus').val(counter.bus || 0);
+		$('#valTruck').val(counter.truck || 0);
+		$('#valOther').val(counter.other || 0);
+	}
+
+	$('#counterFields').show();
+	$('#btn-set-counters').prop('disabled', false);
+}
+
+function setCounters() {
+	var scenario = $('#scenarioSelect').val();
+	if (!scenario) return;
+
+	var payload = {
+		scenario: scenario,
+		human: parseInt($('#valHuman').val()) || 0,
+		car: parseInt($('#valCar').val()) || 0,
+		bike: parseInt($('#valBike').val()) || 0,
+		bus: parseInt($('#valBus').val()) || 0,
+		truck: parseInt($('#valTruck').val()) || 0,
+		other: parseInt($('#valOther').val()) || 0
+	};
+
+	$('#btn-set-counters').prop('disabled', true).text('Saving...');
+
+	$.ajax({
+		type: "POST",
+		url: 'set_counters',
+		contentType: 'application/json',
+		data: JSON.stringify(payload),
+		success: function() {
+			showToast("Counter values updated for " + scenario, 'success');
+			$('#btn-set-counters').prop('disabled', false).text('Set Counter Values');
+			loadCounters();
+		},
+		error: function(xhr, status, error) {
+			showToast("Failed to set counters: " + (xhr.responseText || error), 'danger');
+			$('#btn-set-counters').prop('disabled', false).text('Set Counter Values');
+		}
+	});
+}
+</script>
+</body>
+</html>

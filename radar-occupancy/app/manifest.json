@@ -1,0 +1,52 @@
+
+{
+    "schemaVersion": "1.7.1",
+    "acapPackageConf": {
+        "setup": {
+			"friendlyName": "AIB100 Radar Occupancy",
+			"appName": "aib100",
+            "vendor": "Fred Juhlin",
+            "embeddedSdkVersion": "3.0",
+            "vendorUrl": "https://pandosme.github.io",
+            "runMode": "respawn",
+            "version": "1.0.1"
+        },
+        "configuration": {
+			"settingPage": "index.html",
+			"httpConfig": [
+				{"name": "app","access": "viewer","type": "fastCgi"},
+				{"name": "settings","access": "viewer","type": "fastCgi"},
+				{"name": "status","access": "viewer","type": "fastCgi"},
+				{"name": "join","access": "viewer","type": "fastCgi"},
+				{"name": "test","access": "viewer","type": "fastCgi"},
+				{"name": "restart","access": "viewer","type": "fastCgi"},
+				{"name": "send","access": "viewer","type": "fastCgi"},
+				{"name": "counters","access": "viewer","type": "fastCgi"},
+				{"name": "radar","access": "viewer","type": "fastCgi"},
+				{"name": "radar_reset","access": "viewer","type": "fastCgi"},
+				{"name": "publish","access": "viewer","type": "fastCgi"},
+				{"name": "translator","access": "viewer","type": "fastCgi"},
+				{"name": "receive","access": "viewer","type": "fastCgi"},
+				{"name": "b100_status","access": "viewer","type": "fastCgi"},
+				{"name": "b100_receive","access": "viewer","type": "fastCgi"},
+				{"name": "b100_gps","access": "viewer","type": "fastCgi"},
+				{"name": "b100_info","access": "viewer","type": "fastCgi"},
+				{"name": "b100_params","access": "viewer","type": "fastCgi"},
+				{"name": "b100_request_status","access": "viewer","type": "fastCgi"},
+				{"name": "gps","access": "viewer","type": "fastCgi"},
+				{"name": "linkcheck","access": "viewer","type": "fastCgi"}
+			]
+		}
+    },
+	"resources": {
+		"dbus": {
+			"requiredMethods": [
+				"com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials",
+	            "com.axis.RadarSceneProvider1.Scene.SubscribeSocket",
+    	        "com.axis.RadarSceneProvider1.Scene.UnsubscribeSocket",
+				"com.axis.RadarSceneProvider1.Scene.GetObjectClassifications",
+				"com.axis.RadarSceneProvider1.Scene.GetObjectClassification"
+			]
+		}
+	}
+}

@@ -24,7 +24,7 @@
 
 #define LOG(fmt, args...)    { syslog(LOG_INFO, "B100: " fmt, ## args); printf("B100: " fmt, ## args);}
 #define LOG_WARN(fmt, args...)    { syslog(LOG_WARNING, "B100: " fmt, ## args); printf("B100: " fmt, ## args);}
-//#define LOG_TRACE(fmt, args...)    { syslog(LOG_INFO, "B100_TRACE: " fmt, ## args); printf("B100_TRACE: " fmt, ## args);}
+#define LOG_API(fmt, args...)    { syslog(LOG_INFO, "B100_API: " fmt, ## args); printf("B100_API: " fmt, ## args);}
 #define LOG_TRACE(fmt, args...)    {}
 
 // Configuration
@@ -101,7 +101,7 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
     pthread_mutex_lock(&g_http_mutex);
 
     snprintf(url, sizeof(url), "http://%s:%d%s", g_ip, g_port, endpoint);
-    LOG_TRACE("HTTP GET: %s\n", url);
+    LOG_API("REQUEST GET %s\n", url);
 
     curl = curl_easy_init();
     if (!curl) {
@@ -129,6 +129,7 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
     if (res != CURLE_OK) {
         snprintf(g_last_error, sizeof(g_last_error), "HTTP GET failed: %s", curl_easy_strerror(res));
         LOG_WARN("%s\n", g_last_error);
+        LOG_API("RESPONSE GET %s curl_error=%s\n", url, curl_easy_strerror(res));
         http_response_free(response);
         curl_easy_cleanup(curl);
         pthread_mutex_unlock(&g_http_mutex);
@@ -138,6 +139,10 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     if (http_code_out) *http_code_out = http_code;
+
+        LOG_API("RESPONSE GET %s http=%ld body=%s\n",
+            url, http_code,
+            response->data && response->size > 0 ? response->data : "(empty)");
 
     if (http_code != 200 && http_code != 202) {
         snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from %s", http_code, endpoint);
@@ -150,7 +155,6 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
 
     if (response->data && response->size > 0) {
         result = strdup(response->data);
-        LOG_TRACE("HTTP Response (%zu bytes): %s\n", response->size, result);
     }
 
     http_response_free(response);
@@ -177,7 +181,7 @@ static char* http_post_json(const char* endpoint, const char* json_body, long* h
     pthread_mutex_lock(&g_http_mutex);
 
     snprintf(url, sizeof(url), "http://%s:%d%s", g_ip, g_port, endpoint);
-    LOG_TRACE("HTTP POST: %s body=%s\n", url, json_body ? json_body : "(none)");
+    LOG_API("REQUEST POST %s body=%s\n", url, json_body ? json_body : "(none)");
 
     curl = curl_easy_init();
     if (!curl) {
@@ -218,6 +222,7 @@ static char* http_post_json(const char* endpoint, const char* json_body, long* h
     if (res != CURLE_OK) {
         snprintf(g_last_error, sizeof(g_last_error), "HTTP POST failed: %s", curl_easy_strerror(res));
         LOG_WARN("%s\n", g_last_error);
+        LOG_API("RESPONSE POST %s curl_error=%s\n", url, curl_easy_strerror(res));
         http_response_free(response);
         curl_easy_cleanup(curl);
         pthread_mutex_unlock(&g_http_mutex);
@@ -228,9 +233,12 @@ static char* http_post_json(const char* endpoint, const char* json_body, long* h
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     if (http_code_out) *http_code_out = http_code;
 
+    LOG_API("RESPONSE POST %s http=%ld body=%s\n",
+            url, http_code,
+            response->data && response->size > 0 ? response->data : "(empty)");
+
     if (response->data && response->size > 0) {
         result = strdup(response->data);
-        LOG_TRACE("HTTP POST Response (%zu bytes): %s\n", response->size, result);
     }
 
     if (http_code != 200 && http_code != 202) {

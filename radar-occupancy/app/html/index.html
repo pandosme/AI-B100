@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		.metric { font-size: 2.4rem; font-weight: 700; color: #0d6efd; line-height: 1; }
+		.metric-label { color: #6c757d; font-size: 0.95rem; }
+	</style>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html" class="active">Publish</a>
+			<a href="aoa.html">Radar</a>
+			<a href="bridge.html">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
+			<a href="about.html">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="row mb-4">
+			<div class="col-12 col-lg-7 mb-3 mb-lg-0">
+				<div class="card h-100">
+					<div class="card-header"><h5 class="card-title mb-0">LoRa Uplink</h5></div>
+					<div class="card-body">
+						<div class="row">
+							<div class="col-md-8">
+								<div class="form-group mb-3">
+									<label>Active</label>
+									<div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="publishEnabled"></div>
+								</div>
+								<div class="form-group mb-3" id="intervalSetting">
+									<label for="publishInterval">Interval: <strong id="intervalValue">15</strong> m</label>
+									<input type="range" class="form-range" id="publishInterval" min="5" max="60" value="15">
+								</div>
+								<div class="form-group mb-3">
+									<label for="lorawanPort" class="form-label">Port (1-223)</label>
+									<input type="number" class="form-control" id="lorawanPort" min="1" max="223" value="10">
+								</div>
+								<div class="form-group mb-3">
+									<label id="publishTimeLabel">Next Publish</label>
+									<div id="publishTimeValue" class="text-muted">--</div>
+								</div>
+							</div>
+						</div>
+						<div class="mt-3">
+							<button id="saveSettings" class="btn btn-primary">Save Settings</button>
+							<button id="publishNow" class="btn btn-success ms-2">Publish Now</button>
+							<button id="downloadTranslator" class="btn btn-secondary ms-2">Download JavaScript Translator</button>
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="col-12 col-lg-5">
+				<div class="card h-100">
+					<div class="card-header"><h5 class="card-title mb-0">Publish Value</h5></div>
+					<div class="card-body">
+						<div class="row text-center g-3">
+							<div class="col-6"><div class="metric" id="occTotal">0</div><div class="metric-label">Total</div></div>
+							<div class="col-6"><div class="metric" id="occHuman">0</div><div class="metric-label">Human</div></div>
+							<div class="col-6"><div class="metric" id="occVehicle">0</div><div class="metric-label">Vehicle</div></div>
+							<div class="col-6"><div class="metric" id="occUnknown">0</div><div class="metric-label">Unknown</div></div>
+						</div>
+						<hr>
+						<div class="d-flex justify-content-between"><span>Count Mode</span><strong id="radarMode">--</strong></div>
+						<div class="d-flex justify-content-between"><span>Tracked Objects</span><strong id="trackedObjects">0</strong></div>
+						<div class="d-flex justify-content-between"><span>Last Frame</span><strong id="lastFrame">--</strong></div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<script>
+$(document).ready(function() {
+	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+			loadSettings();
+			loadRadar();
+			setInterval(loadRadar, 2000);
+			setInterval(updateTimer, 1000);
+		},
+		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
+	});
+
+	$('#publishInterval').on('input', function() { $('#intervalValue').text($(this).val()); });
+	$('#saveSettings').on('click', saveSettings);
+	$('#publishNow').on('click', publishNow);
+	$('#downloadTranslator').on('click', function() { window.location.href = 'translator'; });
+	setInterval(pollLoraStatus, 10000);
+	pollLoraStatus();
+});
+
+function loadSettings() {
+	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
+		success: function(settings) {
+			window.currentSettings = settings;
+			const t = settings.transmission || {};
+			$('#publishEnabled').prop('checked', !!t.enabled);
+			$('#publishInterval').val(t.intervalMinutes || 15);
+			$('#intervalValue').text(t.intervalMinutes || 15);
+			if (settings.lorawan) $('#lorawanPort').val(settings.lorawan.port || 10);
+		}
+	});
+}
+
+function saveSettings() {
+	const current = window.currentSettings || {};
+	const currentLora = current.lorawan || {};
+	const settings = {
+		transmission: {
+			enabled: $('#publishEnabled').is(':checked'),
+			intervalMinutes: parseInt($('#publishInterval').val(), 10)
+		},
+		lorawan: Object.assign({}, currentLora, { port: parseInt($('#lorawanPort').val(), 10) })
+	};
+	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify(settings), contentType: 'application/json',
+		success: function() { showToast('Settings saved successfully', 'success'); loadRadar(); },
+		error: function(xhr, status, error) { showToast('Failed to save settings: ' + error, 'danger'); }
+	});
+}
+
+function loadRadar() {
+	$.ajax({ type: 'GET', url: 'radar', dataType: 'json', cache: false,
+		success: function(data) {
+			const occ = data.peakOccupancy || data.occupancy || {};
+			$('#occTotal').text(occ.total || 0);
+			$('#occHuman').text(occ.human || 0);
+			$('#occVehicle').text(occ.vehicle || 0);
+			$('#occUnknown').text(occ.unknown || 0);
+			$('#radarMode').text(data.occupancyModeLabel || data.occupancyMode || '--');
+			$('#trackedObjects').text(data.trackedObjects || 0);
+			$('#lastFrame').text(data.lastFrameAgeSeconds >= 0 ? data.lastFrameAgeSeconds + ' s ago' : '--');
+			window.lastRadar = data;
+			updatePublishModeView();
+		}
+	});
+}
+
+function publishNow() {
+	$.ajax({ type: 'POST', url: 'publish', success: function() { showToast('Radar occupancy published', 'success'); loadRadar(); },
+		error: function(xhr) { showToast('Publish failed: ' + xhr.responseText, 'danger'); }
+	});
+}
+
+function updateTimer() {
+	if (!window.lastRadar) return;
+	if (window.lastRadar.occupancyMode === 'alert') {
+		updatePublishModeView();
+		return;
+	}
+	const seconds = window.lastRadar.secondsUntilPublish || 0;
+	const minutes = Math.floor(seconds / 60);
+	const rem = seconds % 60;
+	$('#publishTimeValue').text(seconds > 0 ? minutes + 'm ' + rem + 's' : 'Due now');
+}
+
+function updatePublishModeView() {
+	if (!window.lastRadar) return;
+	const alertMode = window.lastRadar.occupancyMode === 'alert';
+	$('#intervalSetting').toggle(!alertMode);
+	$('#publishTimeLabel').text(alertMode ? 'Last Alert' : 'Next Publish');
+	if (alertMode) {
+		const lastAlertTime = Number(window.lastRadar.lastAlertTime || 0);
+		$('#publishTimeValue').text(lastAlertTime > 0 ? new Date(lastAlertTime * 1000).toLocaleString() : '--');
+	} else {
+		updateTimer();
+	}
+}
+
+function pollLoraStatus() {
+	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
+		success: function(d) {
+			const dot = $('#lora-nav-dot');
+			const lw = d && d.lorawan;
+			dot.removeClass('lora-joined lora-connected lora-disconnected');
+			if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+			else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+			else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+		}
+	});
+}
+</script>
+</body>
+</html>

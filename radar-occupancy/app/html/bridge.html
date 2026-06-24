@@ -14,8 +14,8 @@
 <header class="app-header">
 <div class="app-name" id="app-name">&nbsp;</div>
 <nav class="nav-bar">
-<a href="index.html">Counters</a>
-<a href="aoa.html">AOA</a>
+<a href="index.html">Publish</a>
+<a href="aoa.html">Radar</a>
 <a href="bridge.html" class="active">LoRA Bridge</a>
 <a href="downlink.html">LoRA Downlink</a>
 <a href="gps.html">GPS</a>
@@ -222,6 +222,11 @@
 <div class="info-row"><div class="info-label">Restart Count:</div><div class="info-value"><span id="d-restarts">-</span></div></div>
 <div class="info-row"><div class="info-label">MQTT:</div><div class="info-value"><span id="d-mqtt">-</span></div></div>
 <div class="info-row"><div class="info-label">HTTP API:</div><div class="info-value"><span id="d-httpapi">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback Addr:</div><div class="info-value"><span id="d-cbaddr" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback Port:</div><div class="info-value"><span id="d-cbport" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback User:</div><div class="info-value"><span id="d-cbuser" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Status URI:</div><div class="info-value"><span id="d-cbstatusuri" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Receive URI:</div><div class="info-value"><span id="d-cbreceiveuri" style="font-family:monospace">-</span></div></div>
 <div class="info-row"><div class="info-label">Network Time:</div><div class="info-value"><span id="d-time">-</span></div></div>
 <div class="info-row"><div class="info-label">Tamper:</div><div class="info-value"><span id="d-tamper">-</span></div></div>
 </div>
@@ -247,6 +252,7 @@ document.title = data.manifest.acapPackageConf.setup.friendlyName;
 $('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
 loadSettings(data.settings);
 loadBridgeStatus();
+loadB100Info();
 loadB100Params();
 },
 error: function(response) {
@@ -387,6 +393,11 @@ $('#d-deveui').text(info.dev_eui || '-');
 $('#d-restarts').text(info.restart_counter != null ? info.restart_counter : '-');
 $('#d-mqtt').text(info.mqtt_enable ? 'Enabled' : 'Disabled');
 $('#d-httpapi').text(info.http_api_enable ? 'Enabled' : 'Disabled');
+$('#d-cbaddr').text(info.callback_configured_addr || '-');
+$('#d-cbport').text(info.callback_configured_port != null ? info.callback_configured_port : '-');
+$('#d-cbuser').text(info.callback_digest_user || '-');
+$('#d-cbstatusuri').text(info.callback_status_uri || '-');
+$('#d-cbreceiveuri').text(info.callback_receive_uri || '-');
 $('#s-callbacks').text(info.callbacks_active ? 'Active' : (info.callback === 'fail' ? 'Fail' : 'Not configured'))
 .css('color', info.callbacks_active ? 'green' : 'red');
 if (info.tUnix && info.tUnix > 0) {
@@ -452,10 +463,31 @@ callbackDigestPassword: $('#callback-password').val()
 }),
 polling: { healthCheckIntervalSeconds: parseInt($('#polling-health').val()) }
 }),
-success: function() { showToast("Settings saved", 'success'); },
+success: function() {
+showToast("Settings saved", 'success');
+configureCallbacksNow();
+},
 error: function(xhr, status, error) { showToast("Failed to save settings: " + error, 'danger'); }
 });
 });
+
+function configureCallbacksNow() {
+$.ajax({
+type: "POST",
+url: "b100_request_status",
+success: function() {
+showToast("Callback API request sent", 'success');
+loadBridgeStatus();
+loadB100Info();
+loadB100Params();
+},
+error: function(xhr) {
+showToast("Callback API request failed: " + xhr.responseText, 'danger');
+loadBridgeStatus();
+loadB100Info();
+}
+});
+}
 
 $('#save-b100-params').on('click', function() {
 $.ajax({

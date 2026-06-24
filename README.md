@@ -15,10 +15,8 @@ The **AI-B100** is an industrial LoRaWAN bridge by [AI Embedded Nordic AB](https
 | Operating range | −20 °C to +85 °C |
 
 **Variants:**
-- **AI-B100** — Standard (USB-C powered)
-- **AI-B100-POE** — PoE-powered; connects directly to a PoE switch without a splitter
-- **AI-B100-ANT** — External antenna connector for extended RF range
-- **AI-B100-POE-ANT** — Both
+- **AI-B100**
+- **AI-B100-GPS** — GPS antenna
 
 Contact: **ai-b100@ai-embedded.se** | **www.ai-embedded.se**  
 Location: AI Embedded Nordic AB, Vellinge, Sweden

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <syslog.h>
 #include <glib.h>
 #include <glib-unix.h>
@@ -16,9 +17,18 @@
 #include "ACAP.h"
 #include "cJSON.h"
 #include "B100.h"
+#include "RadarDetection.h"
 
 #define APP_PACKAGE	"aib100"
+#define B100_STATUS_CALLBACK_NODE "b100_status"
+#define B100_RECEIVE_CALLBACK_NODE "b100_receive"
+#define B100_GPS_CALLBACK_NODE "b100_gps"
 #define DOWNLINK_LOG_MAX 10
+#define RADAR_MAX_OBJECTS 128
+#define RADAR_MAX_POLYGON_POINTS 16
+#define RADAR_MODE_MAXIMUM 0
+#define RADAR_MODE_ENTRY_EXIT 1
+#define RADAR_MODE_ALERT 2
 
 #define LOG(fmt, args...)    { syslog(LOG_INFO, fmt, ## args); printf(fmt, ## args);}
 #define LOG_WARN(fmt, args...)    { syslog(LOG_WARNING, fmt, ## args); printf(fmt, ## args);}
@@ -29,7 +39,6 @@ static GMainLoop *main_loop = NULL;
 static pthread_t health_thread;
 static pthread_t publish_thread;
 static int running = 1;
-static cJSON* eventSubscriptions = NULL;
 static int g_callbacks_configured = 0;
 static cJSON* g_downlink_log = NULL;
 
@@ -37,38 +46,58 @@ static cJSON* g_downlink_log = NULL;
 static int g_publish_interval_minutes = 15;
 static int g_publish_enabled = 1;
 static int g_publish_human = 1;
-static int g_publish_car = 1;
-static int g_publish_bike = 1;
-static int g_publish_bus = 1;
-static int g_publish_truck = 1;
-static int g_publish_other = 1;
+static int g_publish_vehicle = 1;
+static int g_publish_unknown = 0;
 static time_t g_next_publish_time = 0;
 static pthread_mutex_t g_publish_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Counter tracking structures
+// Radar occupancy settings and runtime state
 typedef struct {
-	char scenario[64];
-	int aoa_reference_total;
-	int aoa_reference_human;
-	int aoa_reference_car;
-	int aoa_reference_bike;
-	int aoa_reference_bus;
-	int aoa_reference_truck;
-	int aoa_reference_other;
-	int internal_total;
-	int internal_human;
-	int internal_car;
-	int internal_bike;
-	int internal_bus;
-	int internal_truck;
-	int internal_other;
-	int has_reference;
-} CounterState;
+	char id[32];
+	char class_name[32];
+	int class_bucket;
+	int confidence;
+	double x;
+	double y;
+	double speed;
+	time_t first_seen;
+	time_t last_seen;
+	int active;
+	int valid;
+	int inside_area;
+	int counted_inside;
+	int counted_bucket;
+} RadarObjectState;
 
-static CounterState g_counters[10];
-static int g_counter_count = 0;
-static time_t g_last_save_time = 0;
-static pthread_mutex_t g_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+static RadarObjectState g_radar_objects[RADAR_MAX_OBJECTS];
+static int g_radar_object_count = 0;
+static int g_radar_mode = RADAR_MODE_MAXIMUM;
+static int g_radar_stale_timeout_seconds = 600;
+static int g_radar_min_dwell_seconds = 0;
+static int g_radar_min_confidence = 30;
+static int g_radar_object_class_bucket = 1;
+static int g_radar_aoi_enabled = 0;
+static int g_radar_aoi_x1 = 0;
+static int g_radar_aoi_x2 = 1000;
+static int g_radar_aoi_y1 = 0;
+static int g_radar_aoi_y2 = 1000;
+static double g_radar_area_x[RADAR_MAX_POLYGON_POINTS] = {0, 1000, 1000, 0};
+static double g_radar_area_y[RADAR_MAX_POLYGON_POINTS] = {0, 0, 1000, 1000};
+static int g_radar_area_point_count = 4;
+static int g_radar_current_total = 0;
+static int g_radar_current_human = 0;
+static int g_radar_current_vehicle = 0;
+static int g_radar_current_unknown = 0;
+static int g_radar_peak_total = 0;
+static int g_radar_peak_human = 0;
+static int g_radar_peak_vehicle = 0;
+static int g_radar_peak_unknown = 0;
+static int g_radar_connected = 0;
+static time_t g_radar_last_frame_time = 0;
+static time_t g_radar_last_alert_time = 0;
+static int g_radar_alert_active = 0;
+static int g_radar_alert_pending = 0;
+static pthread_mutex_t g_radar_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Settings cache
 static char g_b100_ip[64] = "192.168.0.3";
@@ -94,344 +123,488 @@ static time_t g_conf_sent_time = 0;   // when the last confirmed uplink was sent
 static pthread_mutex_t g_health_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ==================================================================
-// Counter Management
+// Radar Occupancy Management
 // ==================================================================
 
-CounterState* Find_Or_Create_Counter(const char* scenario) {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	// Find existing counter
-	for (int i = 0; i < g_counter_count; i++) {
-		if (strcmp(g_counters[i].scenario, scenario) == 0) {
-			pthread_mutex_unlock(&g_counter_mutex);
-			return &g_counters[i];
-		}
-	}
-	
-	// Create new counter if space available
-	if (g_counter_count < 10) {
-		CounterState* counter = &g_counters[g_counter_count];
-		memset(counter, 0, sizeof(CounterState));
-		strncpy(counter->scenario, scenario, sizeof(counter->scenario) - 1);
-		g_counter_count++;
-		LOG("Created new counter for scenario: %s\n", scenario);
-		pthread_mutex_unlock(&g_counter_mutex);
-		return counter;
-	}
-	
-	pthread_mutex_unlock(&g_counter_mutex);
-	LOG_WARN("Too many counters, cannot create for %s\n", scenario);
-	return NULL;
+static int
+Clamp_Int(int value, int min_value, int max_value) {
+	if (value < min_value) return min_value;
+	if (value > max_value) return max_value;
+	return value;
 }
 
-void Load_Counters_From_File() {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	cJSON* data = ACAP_FILE_Read("localdata/counters.json");
-	if (!data) {
-		LOG("No saved counters found, starting fresh\n");
-		pthread_mutex_unlock(&g_counter_mutex);
+static const char*
+Radar_Mode_Name(int mode) {
+	switch (mode) {
+		case RADAR_MODE_ALERT: return "alert";
+		case RADAR_MODE_ENTRY_EXIT: return "entry_exit";
+		case RADAR_MODE_MAXIMUM:
+		default: return "maximum";
+	}
+}
+
+static int
+Radar_Mode_From_String(const char* value) {
+	if (!value) return RADAR_MODE_MAXIMUM;
+	if (strcasecmp(value, "alert") == 0) return RADAR_MODE_ALERT;
+	if (strcasecmp(value, "entry_exit") == 0) return RADAR_MODE_ENTRY_EXIT;
+	if (strcasecmp(value, "entryExit") == 0) return RADAR_MODE_ENTRY_EXIT;
+	return RADAR_MODE_MAXIMUM;
+}
+
+static const char*
+Radar_Selected_Class_Name(void) {
+	return g_radar_object_class_bucket == 2 ? "Vehicle" : "Human";
+}
+
+static int
+Radar_Class_From_String(const char* value) {
+	if (value && strcasecmp(value, "vehicle") == 0) return 2;
+	return 1;
+}
+
+static const char*
+Radar_Mode_Display_Name(int mode) {
+	switch (mode) {
+		case RADAR_MODE_ALERT: return "Presence alert";
+		case RADAR_MODE_ENTRY_EXIT: return "Area balance";
+		case RADAR_MODE_MAXIMUM:
+		default: return "Interval peak";
+	}
+}
+
+static int
+Radar_Class_Bucket(const char* class_name) {
+	if (!class_name || !class_name[0]) return g_radar_object_class_bucket;
+	if (strcasecmp(class_name, "Human") == 0) return 1;
+	if (strcasecmp(class_name, "Vehicle") == 0) return 2;
+	return g_radar_object_class_bucket;
+}
+
+static int
+Radar_Class_Enabled(int bucket) {
+	return bucket == g_radar_object_class_bucket;
+}
+
+static void
+Radar_Set_Rectangle_Area_Points(void) {
+	g_radar_area_point_count = 4;
+	g_radar_area_x[0] = g_radar_aoi_x1;
+	g_radar_area_y[0] = g_radar_aoi_y1;
+	g_radar_area_x[1] = g_radar_aoi_x2;
+	g_radar_area_y[1] = g_radar_aoi_y1;
+	g_radar_area_x[2] = g_radar_aoi_x2;
+	g_radar_area_y[2] = g_radar_aoi_y2;
+	g_radar_area_x[3] = g_radar_aoi_x1;
+	g_radar_area_y[3] = g_radar_aoi_y2;
+}
+
+static void
+Radar_Load_Area_Points(cJSON* points) {
+	if (!points || !cJSON_IsArray(points) || cJSON_GetArraySize(points) < 3) {
+		Radar_Set_Rectangle_Area_Points();
 		return;
 	}
-	
-	g_counter_count = 0;
-	cJSON* counter_item = data->child;
-	while (counter_item && g_counter_count < 10) {
-		CounterState* counter = &g_counters[g_counter_count];
-		memset(counter, 0, sizeof(CounterState));
-		
-		cJSON* scenario = cJSON_GetObjectItem(counter_item, "scenario");
-		if (scenario && scenario->valuestring) {
-			strncpy(counter->scenario, scenario->valuestring, sizeof(counter->scenario) - 1);
-		}
-		
-		cJSON* total = cJSON_GetObjectItem(counter_item, "total");
-		if (total) counter->internal_total = total->valueint;
-		
-		cJSON* human = cJSON_GetObjectItem(counter_item, "human");
-		if (human) counter->internal_human = human->valueint;
-		
-		cJSON* car = cJSON_GetObjectItem(counter_item, "car");
-		if (car) counter->internal_car = car->valueint;
-		
-		cJSON* bike = cJSON_GetObjectItem(counter_item, "bike");
-		if (bike) counter->internal_bike = bike->valueint;
-		
-		cJSON* bus = cJSON_GetObjectItem(counter_item, "bus");
-		if (bus) counter->internal_bus = bus->valueint;
-		
-		cJSON* truck = cJSON_GetObjectItem(counter_item, "truck");
-		if (truck) counter->internal_truck = truck->valueint;
-		
-		cJSON* other = cJSON_GetObjectItem(counter_item, "other");
-		if (other) counter->internal_other = other->valueint;
-		
-		counter->has_reference = 0;  // Will be set on first event
-		
-		LOG("Loaded counter %s: total=%d, human=%d, car=%d\n", 
-		    counter->scenario, counter->internal_total, counter->internal_human, counter->internal_car);
-		
-		g_counter_count++;
-		counter_item = counter_item->next;
-	}
-	
-	cJSON_Delete(data);
-	pthread_mutex_unlock(&g_counter_mutex);
-	LOG("Loaded %d counters from file\n", g_counter_count);
-}
 
-void Save_Counters_To_File() {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	LOG("Saving %d counters to file...\n", g_counter_count);
-	
-	cJSON* root = cJSON_CreateArray();
-	
-	for (int i = 0; i < g_counter_count; i++) {
-		CounterState* counter = &g_counters[i];
-		LOG("  - %s (total=%d)\n", counter->scenario, counter->internal_total);
-		cJSON* item = cJSON_CreateObject();
-		
-		cJSON_AddStringToObject(item, "scenario", counter->scenario);
-		cJSON_AddNumberToObject(item, "total", counter->internal_total);
-		cJSON_AddNumberToObject(item, "human", counter->internal_human);
-		cJSON_AddNumberToObject(item, "car", counter->internal_car);
-		cJSON_AddNumberToObject(item, "bike", counter->internal_bike);
-		cJSON_AddNumberToObject(item, "bus", counter->internal_bus);
-		cJSON_AddNumberToObject(item, "truck", counter->internal_truck);
-		cJSON_AddNumberToObject(item, "other", counter->internal_other);
-		
-		cJSON_AddItemToArray(root, item);
-	}
-	
-	ACAP_FILE_Write("localdata/counters.json", root);
-	cJSON_Delete(root);
-	
-	pthread_mutex_unlock(&g_counter_mutex);
-	g_last_save_time = time(NULL);
-	LOG("Counters saved to localdata/counters.json\n");
-}
-
-void Delete_Counter_By_Scenario(const char* scenario) {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	int found_index = -1;
-	for (int i = 0; i < g_counter_count; i++) {
-		if (strcmp(g_counters[i].scenario, scenario) == 0) {
-			found_index = i;
+	int count = 0;
+	double min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+	cJSON* point = NULL;
+	cJSON_ArrayForEach(point, points) {
+		if (count >= RADAR_MAX_POLYGON_POINTS)
 			break;
-		}
+
+		cJSON* x_json = cJSON_GetObjectItem(point, "x");
+		cJSON* y_json = cJSON_GetObjectItem(point, "y");
+		if (!x_json || !y_json)
+			continue;
+
+		double x = Clamp_Int(x_json->valueint, 0, 1000);
+		double y = Clamp_Int(y_json->valueint, 0, 1000);
+		g_radar_area_x[count] = x;
+		g_radar_area_y[count] = y;
+		if (x < min_x) min_x = x;
+		if (x > max_x) max_x = x;
+		if (y < min_y) min_y = y;
+		if (y > max_y) max_y = y;
+		count++;
 	}
-	
-	if (found_index >= 0) {
-		LOG("Deleting counter: %s\n", scenario);
-		
-		// Shift remaining counters down
-		for (int i = found_index; i < g_counter_count - 1; i++) {
-			memcpy(&g_counters[i], &g_counters[i + 1], sizeof(CounterState));
-		}
-		
-		g_counter_count--;
-		
-		// Clear the last slot
-		memset(&g_counters[g_counter_count], 0, sizeof(CounterState));
-		
-		pthread_mutex_unlock(&g_counter_mutex);
-		
-		// Save updated counters
-		Save_Counters_To_File();
-	} else {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("Counter not found for deletion: %s\n", scenario);
+
+	if (count < 3) {
+		Radar_Set_Rectangle_Area_Points();
+		return;
+	}
+
+	g_radar_area_point_count = count;
+	g_radar_aoi_x1 = (int)min_x;
+	g_radar_aoi_x2 = (int)max_x;
+	g_radar_aoi_y1 = (int)min_y;
+	g_radar_aoi_y2 = (int)max_y;
+}
+
+static int
+Radar_Point_In_Area(double x, double y) {
+	if (!g_radar_aoi_enabled)
+		return 1;
+
+	if (g_radar_area_point_count < 3)
+		return (x >= g_radar_aoi_x1 && x <= g_radar_aoi_x2 && y >= g_radar_aoi_y1 && y <= g_radar_aoi_y2);
+
+	int inside = 0;
+	for (int i = 0, j = g_radar_area_point_count - 1; i < g_radar_area_point_count; j = i++) {
+		double xi = g_radar_area_x[i], yi = g_radar_area_y[i];
+		double xj = g_radar_area_x[j], yj = g_radar_area_y[j];
+		if (((yi > y) != (yj > y)) &&
+		    (x < (xj - xi) * (y - yi) / ((yj - yi) == 0 ? 0.000001 : (yj - yi)) + xi))
+			inside = !inside;
+	}
+	return inside;
+}
+
+static void
+Radar_Update_Peak_From_Current(void) {
+	if (g_radar_current_total > g_radar_peak_total) {
+		g_radar_peak_total = g_radar_current_total;
+		g_radar_peak_human = g_radar_current_human;
+		g_radar_peak_vehicle = g_radar_current_vehicle;
+		g_radar_peak_unknown = g_radar_current_unknown;
 	}
 }
 
-void Sync_Counters_With_AOA_List(cJSON* scenario_array) {
-	if (!scenario_array || !cJSON_IsArray(scenario_array)) {
-		LOG_WARN("Invalid scenario array for sync\n");
-		return;
+static void
+Radar_Set_Current_Counts(int total, int human, int vehicle, int unknown) {
+	g_radar_current_total = total;
+	g_radar_current_human = human;
+	g_radar_current_vehicle = vehicle;
+	g_radar_current_unknown = unknown;
+	Radar_Update_Peak_From_Current();
+}
+
+static void
+Radar_Adjust_Entry_Exit_Count(int bucket, int delta) {
+	g_radar_current_total += delta;
+	if (bucket == 1) g_radar_current_human += delta;
+	else if (bucket == 2) g_radar_current_vehicle += delta;
+	else g_radar_current_unknown += delta;
+
+	if (g_radar_current_total < 0) g_radar_current_total = 0;
+	if (g_radar_current_human < 0) g_radar_current_human = 0;
+	if (g_radar_current_vehicle < 0) g_radar_current_vehicle = 0;
+	if (g_radar_current_unknown < 0) g_radar_current_unknown = 0;
+	Radar_Update_Peak_From_Current();
+}
+
+static RadarObjectState*
+Radar_Find_Or_Create_Object(const char* id) {
+	for (int i = 0; i < g_radar_object_count; i++) {
+		if (strcmp(g_radar_objects[i].id, id) == 0)
+			return &g_radar_objects[i];
 	}
-	
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	// Build list of scenarios to keep
-	int keep_count = 0;
-	char* keep_list[10];
-	
-	cJSON* item = scenario_array->child;
-	while (item && keep_count < 10) {
-		if (cJSON_IsString(item) && item->valuestring) {
-			keep_list[keep_count] = item->valuestring;
-			keep_count++;
+
+	if (g_radar_object_count >= RADAR_MAX_OBJECTS)
+		return NULL;
+
+	RadarObjectState* object = &g_radar_objects[g_radar_object_count++];
+	memset(object, 0, sizeof(RadarObjectState));
+	strncpy(object->id, id, sizeof(object->id) - 1);
+	return object;
+}
+
+static int
+Radar_Object_Is_Countable(const RadarObjectState* object, time_t now) {
+	if (!object || !object->valid) return 0;
+	if (!Radar_Class_Enabled(object->class_bucket)) return 0;
+	if ((now - object->first_seen) < g_radar_min_dwell_seconds) return 0;
+	return object->active;
+}
+
+static void
+Radar_Prune_Expired(time_t now) {
+	for (int i = 0; i < g_radar_object_count; ) {
+		int remove_object = (now - g_radar_objects[i].last_seen) > 60;
+
+		if (remove_object) {
+			if (i < g_radar_object_count - 1)
+				memmove(&g_radar_objects[i], &g_radar_objects[i + 1], (g_radar_object_count - i - 1) * sizeof(RadarObjectState));
+			g_radar_object_count--;
+			memset(&g_radar_objects[g_radar_object_count], 0, sizeof(RadarObjectState));
+			continue;
 		}
-		item = item->next;
-	}
-	
-	// Check each counter - remove if not in keep list
-	int removed = 0;
-	for (int i = g_counter_count - 1; i >= 0; i--) {
-		int should_keep = 0;
-		for (int j = 0; j < keep_count; j++) {
-			if (strcmp(g_counters[i].scenario, keep_list[j]) == 0) {
-				should_keep = 1;
-				break;
-			}
-		}
-		
-		if (!should_keep) {
-			LOG("Sync: Removing counter '%s' (not in AOA)\n", g_counters[i].scenario);
-			
-			// Shift remaining counters down
-			for (int j = i; j < g_counter_count - 1; j++) {
-				memcpy(&g_counters[j], &g_counters[j + 1], sizeof(CounterState));
-			}
-			
-			g_counter_count--;
-			removed++;
-		}
-	}
-	
-	pthread_mutex_unlock(&g_counter_mutex);
-	
-	if (removed > 0) {
-		LOG("Sync: Removed %d counter(s), saving to file...\n", removed);
-		Save_Counters_To_File();
-		LOG("Sync: File saved with %d counters remaining\n", g_counter_count);
-	} else {
-		LOG("Sync: All counters match AOA configuration (%d counters)\n", g_counter_count);
+		i++;
 	}
 }
 
-// ==================================================================
-// Event Callback
-// ==================================================================
+static void
+Radar_Current_Frame_Counts(time_t now, int* total, int* human, int* vehicle, int* unknown) {
+	*total = *human = *vehicle = *unknown = 0;
+	for (int i = 0; i < g_radar_object_count; i++) {
+		RadarObjectState* object = &g_radar_objects[i];
+		if (!Radar_Object_Is_Countable(object, now))
+			continue;
 
-void
-AOA_Event_Callback(cJSON *event, void* userdata) {
-
-	// Only process CrosslineCounting events
-	cJSON* scenarioType = cJSON_GetObjectItem(event, "scenarioType");
-	if (!scenarioType || !scenarioType->valuestring || 
-	    strcmp(scenarioType->valuestring, "CrosslineCounting") != 0) {
-		return;  // Ignore non-counter events
+		(*total)++;
+		if (object->class_bucket == 1) (*human)++;
+		else if (object->class_bucket == 2) (*vehicle)++;
+		else (*unknown)++;
 	}
-	
-	// Extract scenario name
-	cJSON* scenario_name = cJSON_GetObjectItem(event, "scenario");
-	if (!scenario_name || !scenario_name->valuestring) {
-		LOG_WARN("CrosslineCounting event missing scenario name\n");
+}
+
+static void
+Radar_Published_Counts(int* total, int* human, int* vehicle, int* unknown) {
+	if (g_radar_mode == RADAR_MODE_ALERT) {
+		*total = g_radar_current_total;
+		*human = g_radar_current_human;
+		*vehicle = g_radar_current_vehicle;
+		*unknown = 0;
 		return;
 	}
-	
-	// Get counter state
-	CounterState* counter = Find_Or_Create_Counter(scenario_name->valuestring);
-	if (!counter) {
-		return;
-	}
-	
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	// Extract AOA counts
-	int aoa_total = 0, aoa_human = 0, aoa_car = 0, aoa_bike = 0;
-	int aoa_bus = 0, aoa_truck = 0, aoa_other = 0;
-	
-	cJSON* total = cJSON_GetObjectItem(event, "total");
-	if (total) aoa_total = total->valueint;
-	
-	cJSON* totalHuman = cJSON_GetObjectItem(event, "totalHuman");
-	if (totalHuman) aoa_human = totalHuman->valueint;
-	
-	cJSON* totalCar = cJSON_GetObjectItem(event, "totalCar");
-	if (totalCar) aoa_car = totalCar->valueint;
-	
-	cJSON* totalBike = cJSON_GetObjectItem(event, "totalBike");
-	if (totalBike) aoa_bike = totalBike->valueint;
-	
-	cJSON* totalBus = cJSON_GetObjectItem(event, "totalBus");
-	if (totalBus) aoa_bus = totalBus->valueint;
-	
-	cJSON* totalTruck = cJSON_GetObjectItem(event, "totalTruck");
-	if (totalTruck) aoa_truck = totalTruck->valueint;
-	
-	cJSON* totalOther = cJSON_GetObjectItem(event, "totalOtherVehicle");
-	if (totalOther) aoa_other = totalOther->valueint;
-	
-	// Get reason (what triggered this count)
-	cJSON* reason = cJSON_GetObjectItem(event, "reason");
-	const char* reason_str = reason && reason->valuestring ? reason->valuestring : "unknown";
-	
-	if (!counter->has_reference) {
-		// First event - set reference values
-		counter->aoa_reference_total = aoa_total;
-		counter->aoa_reference_human = aoa_human;
-		counter->aoa_reference_car = aoa_car;
-		counter->aoa_reference_bike = aoa_bike;
-		counter->aoa_reference_bus = aoa_bus;
-		counter->aoa_reference_truck = aoa_truck;
-		counter->aoa_reference_other = aoa_other;
-		counter->has_reference = 1;
-		
-		LOG("Set reference for %s: total=%d (reason: %s)\n", 
-		    counter->scenario, aoa_total, reason_str);
+	*total = g_radar_peak_total;
+	*human = g_radar_peak_human;
+	*vehicle = g_radar_peak_vehicle;
+	*unknown = 0;
+}
+
+static void
+Radar_Reset_Interval_State(void) {
+	g_radar_peak_total = 0;
+	g_radar_peak_human = 0;
+	g_radar_peak_vehicle = 0;
+	g_radar_peak_unknown = 0;
+
+	if (g_radar_mode == RADAR_MODE_ENTRY_EXIT) {
+		g_radar_current_total = 0;
+		g_radar_current_human = 0;
+		g_radar_current_vehicle = 0;
+		g_radar_current_unknown = 0;
+		for (int i = 0; i < g_radar_object_count; i++) {
+			g_radar_objects[i].counted_inside = 0;
+			g_radar_objects[i].counted_bucket = 0;
+		}
 	} else {
-		// Calculate deltas
-		int delta_total = aoa_total - counter->aoa_reference_total;
-		int delta_human = aoa_human - counter->aoa_reference_human;
-		int delta_car = aoa_car - counter->aoa_reference_car;
-		int delta_bike = aoa_bike - counter->aoa_reference_bike;
-		int delta_bus = aoa_bus - counter->aoa_reference_bus;
-		int delta_truck = aoa_truck - counter->aoa_reference_truck;
-		int delta_other = aoa_other - counter->aoa_reference_other;
-		
-		// Check if AOA counters were reset (negative delta)
-		if (delta_total < 0 || delta_human < 0 || delta_car < 0 || 
-		    delta_bike < 0 || delta_bus < 0 || delta_truck < 0 || delta_other < 0) {
-			LOG_WARN("%s: AOA counter reset detected (delta=%d), updating reference\n",
-			         counter->scenario, delta_total);
-			
-			// Update references without incrementing internal counters
-			counter->aoa_reference_total = aoa_total;
-			counter->aoa_reference_human = aoa_human;
-			counter->aoa_reference_car = aoa_car;
-			counter->aoa_reference_bike = aoa_bike;
-			counter->aoa_reference_bus = aoa_bus;
-			counter->aoa_reference_truck = aoa_truck;
-			counter->aoa_reference_other = aoa_other;
-		} else if (delta_total > 0) {
-			// Normal case - update internal counters
-			counter->internal_total += delta_total;
-			counter->internal_human += delta_human;
-			counter->internal_car += delta_car;
-			counter->internal_bike += delta_bike;
-			counter->internal_bus += delta_bus;
-			counter->internal_truck += delta_truck;
-			counter->internal_other += delta_other;
-			
-			// Update references
-			counter->aoa_reference_total = aoa_total;
-			counter->aoa_reference_human = aoa_human;
-			counter->aoa_reference_car = aoa_car;
-			counter->aoa_reference_bike = aoa_bike;
-			counter->aoa_reference_bus = aoa_bus;
-			counter->aoa_reference_truck = aoa_truck;
-			counter->aoa_reference_other = aoa_other;
-			
-			LOG("%s: +%d %s (internal: %d total, %d human, %d car)\n",
-			    counter->scenario, delta_total, reason_str,
-			    counter->internal_total, counter->internal_human, counter->internal_car);
-			
-			// Auto-save if it's been more than 1 minute
-			time_t now = time(NULL);
-			if (now - g_last_save_time >= 60) {
-				pthread_mutex_unlock(&g_counter_mutex);
-				Save_Counters_To_File();
-				return;
+		Radar_Set_Current_Counts(0, 0, 0, 0);
+	}
+	g_radar_alert_pending = 0;
+	g_radar_alert_active = 0;
+}
+
+static void
+Radar_Apply_Config_To_Subscriber(void) {
+	cJSON* config = cJSON_CreateObject();
+	if (!config) return;
+	cJSON_AddNumberToObject(config, "confidence", g_radar_min_confidence);
+	cJSON_AddNumberToObject(config, "units", 1);
+	cJSON_AddItemToObject(config, "ignoreClass", cJSON_CreateArray());
+	cJSON* aoi = cJSON_CreateObject();
+	cJSON_AddNumberToObject(aoi, "x1", g_radar_aoi_enabled ? g_radar_aoi_x1 : 0);
+	cJSON_AddNumberToObject(aoi, "x2", g_radar_aoi_enabled ? g_radar_aoi_x2 : 1000);
+	cJSON_AddNumberToObject(aoi, "y1", g_radar_aoi_enabled ? g_radar_aoi_y1 : 0);
+	cJSON_AddNumberToObject(aoi, "y2", g_radar_aoi_enabled ? g_radar_aoi_y2 : 1000);
+	cJSON_AddItemToObject(config, "aoi", aoi);
+	RadarDetection_Config(config);
+	cJSON_Delete(config);
+}
+
+static void
+Radar_Detections_Callback(cJSON* detections) {
+	time_t now = time(NULL);
+	pthread_mutex_lock(&g_radar_mutex);
+	g_radar_connected = 1;
+	g_radar_last_frame_time = now;
+
+	for (int i = 0; i < g_radar_object_count; i++)
+		g_radar_objects[i].active = 0;
+
+	cJSON* item = NULL;
+	cJSON_ArrayForEach(item, detections) {
+		cJSON* id_json = cJSON_GetObjectItem(item, "id");
+		if (!id_json || !id_json->valuestring) continue;
+
+		RadarObjectState* object = Radar_Find_Or_Create_Object(id_json->valuestring);
+		if (!object) continue;
+
+		cJSON* class_json = cJSON_GetObjectItem(item, "class");
+		const char* detected_class_name = class_json && class_json->valuestring ? class_json->valuestring : "Unknown";
+		const char* class_name = detected_class_name;
+		int bucket = Radar_Class_Bucket(class_name);
+		if (strcasecmp(detected_class_name, "Human") != 0 && strcasecmp(detected_class_name, "Vehicle") != 0)
+			class_name = Radar_Selected_Class_Name();
+		cJSON* confidence_json = cJSON_GetObjectItem(item, "confidence");
+		int confidence = confidence_json ? confidence_json->valueint : 100;
+		cJSON* x_json = cJSON_GetObjectItem(item, "cx");
+		cJSON* y_json = cJSON_GetObjectItem(item, "cy");
+		double x = x_json ? x_json->valuedouble : 0;
+		double y = y_json ? y_json->valuedouble : 0;
+
+		int in_aoi = Radar_Point_In_Area(x, y);
+		int valid = confidence >= g_radar_min_confidence && in_aoi && Radar_Class_Enabled(bucket);
+		int dwell_ok = object->first_seen != 0 && (now - object->first_seen) >= g_radar_min_dwell_seconds;
+		int was_inside = object->inside_area;
+
+		if (object->first_seen == 0)
+			object->first_seen = now;
+		object->last_seen = now;
+		object->active = 1;
+		object->valid = valid;
+		object->class_bucket = bucket;
+		object->confidence = confidence;
+		object->x = x;
+		object->y = y;
+		object->inside_area = valid;
+		strncpy(object->class_name, class_name, sizeof(object->class_name) - 1);
+		object->class_name[sizeof(object->class_name) - 1] = '\0';
+
+		if (g_radar_mode == RADAR_MODE_ENTRY_EXIT && Radar_Class_Enabled(bucket) && confidence >= g_radar_min_confidence && dwell_ok) {
+			if (in_aoi && !object->counted_inside) {
+				Radar_Adjust_Entry_Exit_Count(bucket, 1);
+				object->counted_inside = 1;
+				object->counted_bucket = bucket;
+			} else if (was_inside && !in_aoi && object->counted_inside) {
+				Radar_Adjust_Entry_Exit_Count(object->counted_bucket ? object->counted_bucket : bucket, -1);
+				object->counted_inside = 0;
+				object->counted_bucket = 0;
 			}
 		}
-		// If delta is 0, ignore (no change)
+
+		cJSON* radar = cJSON_GetObjectItem(item, "radar");
+		cJSON* speed_json = radar ? cJSON_GetObjectItem(radar, "speed") : cJSON_GetObjectItem(item, "speed");
+		if (speed_json) object->speed = speed_json->valuedouble;
 	}
-	
-	pthread_mutex_unlock(&g_counter_mutex);
+
+	Radar_Prune_Expired(now);
+	int total, human, vehicle, unknown;
+	if (g_radar_mode == RADAR_MODE_MAXIMUM || g_radar_mode == RADAR_MODE_ALERT) {
+		Radar_Current_Frame_Counts(now, &total, &human, &vehicle, &unknown);
+		Radar_Set_Current_Counts(total, human, vehicle, unknown);
+		if (g_radar_mode == RADAR_MODE_ALERT) {
+			if (total > 0 && !g_radar_alert_active) {
+				g_radar_alert_pending = 1;
+				g_radar_alert_active = 1;
+			} else if (total == 0) {
+				g_radar_alert_active = 0;
+			}
+		}
+	} else {
+		total = g_radar_current_total;
+		human = g_radar_current_human;
+		vehicle = g_radar_current_vehicle;
+		unknown = g_radar_current_unknown;
+	}
+	ACAP_STATUS_SetBool("radar", "connected", 1);
+	ACAP_STATUS_SetNumber("radar", "occupancy", total);
+	ACAP_STATUS_SetNumber("radar", "human", human);
+	ACAP_STATUS_SetNumber("radar", "vehicle", vehicle);
+	ACAP_STATUS_SetNumber("radar", "unknown", unknown);
+	ACAP_STATUS_SetNumber("radar", "trackedObjects", g_radar_object_count);
+	ACAP_STATUS_SetString("radar", "mode", Radar_Mode_Name(g_radar_mode));
+	ACAP_STATUS_SetString("radar", "modeLabel", Radar_Mode_Display_Name(g_radar_mode));
+	ACAP_STATUS_SetNumber("radar", "peakOccupancy", g_radar_peak_total);
+	pthread_mutex_unlock(&g_radar_mutex);
+
+	if (detections)
+		cJSON_Delete(detections);
+}
+
+static void
+Radar_Tracker_Callback(cJSON* detection, int timer) {
+	if (detection)
+		cJSON_Delete(detection);
+}
+
+static cJSON*
+Radar_Status_JSON(void) {
+	pthread_mutex_lock(&g_radar_mutex);
+	int total, human, vehicle, unknown;
+	time_t now = time(NULL);
+	Radar_Prune_Expired(now);
+	total = g_radar_current_total;
+	human = g_radar_current_human;
+	vehicle = g_radar_current_vehicle;
+	unknown = g_radar_current_unknown;
+
+	cJSON* root = cJSON_CreateObject();
+	cJSON_AddBoolToObject(root, "connected", g_radar_connected);
+	cJSON_AddStringToObject(root, "occupancyMode", Radar_Mode_Name(g_radar_mode));
+	cJSON_AddStringToObject(root, "occupancyModeLabel", Radar_Mode_Display_Name(g_radar_mode));
+	cJSON_AddStringToObject(root, "objectClass", Radar_Selected_Class_Name());
+	cJSON_AddNumberToObject(root, "staleTimeoutSeconds", g_radar_stale_timeout_seconds);
+	cJSON_AddNumberToObject(root, "minDwellSeconds", g_radar_min_dwell_seconds);
+	cJSON_AddNumberToObject(root, "minConfidence", g_radar_min_confidence);
+	cJSON_AddNumberToObject(root, "lastFrameAgeSeconds", g_radar_last_frame_time ? (int)(now - g_radar_last_frame_time) : -1);
+	cJSON_AddNumberToObject(root, "lastAlertTime", (double)g_radar_last_alert_time);
+	cJSON_AddNumberToObject(root, "trackedObjects", g_radar_object_count);
+	cJSON* aoi = cJSON_CreateObject();
+	cJSON_AddBoolToObject(aoi, "enabled", g_radar_aoi_enabled);
+	cJSON_AddNumberToObject(aoi, "x1", g_radar_aoi_x1);
+	cJSON_AddNumberToObject(aoi, "x2", g_radar_aoi_x2);
+	cJSON_AddNumberToObject(aoi, "y1", g_radar_aoi_y1);
+	cJSON_AddNumberToObject(aoi, "y2", g_radar_aoi_y2);
+	cJSON* points = cJSON_CreateArray();
+	for (int i = 0; i < g_radar_area_point_count; i++) {
+		cJSON* point = cJSON_CreateObject();
+		cJSON_AddNumberToObject(point, "x", g_radar_area_x[i]);
+		cJSON_AddNumberToObject(point, "y", g_radar_area_y[i]);
+		cJSON_AddItemToArray(points, point);
+	}
+	cJSON_AddItemToObject(aoi, "points", points);
+	cJSON_AddItemToObject(root, "aoi", aoi);
+
+	cJSON* counts = cJSON_CreateObject();
+	cJSON_AddNumberToObject(counts, "total", total);
+	cJSON_AddNumberToObject(counts, "human", human);
+	cJSON_AddNumberToObject(counts, "vehicle", vehicle);
+	cJSON_AddNumberToObject(counts, "unknown", unknown);
+	cJSON_AddItemToObject(root, "occupancy", counts);
+	cJSON* peak = cJSON_CreateObject();
+	cJSON_AddNumberToObject(peak, "total", g_radar_peak_total);
+	cJSON_AddNumberToObject(peak, "human", g_radar_peak_human);
+	cJSON_AddNumberToObject(peak, "vehicle", g_radar_peak_vehicle);
+	cJSON_AddNumberToObject(peak, "unknown", g_radar_peak_unknown);
+	cJSON_AddItemToObject(root, "peakOccupancy", peak);
+
+	cJSON* objects = cJSON_CreateArray();
+	for (int i = 0; i < g_radar_object_count; i++) {
+		RadarObjectState* object = &g_radar_objects[i];
+		cJSON* item = cJSON_CreateObject();
+		cJSON_AddStringToObject(item, "id", object->id);
+		cJSON_AddStringToObject(item, "class", object->class_name[0] ? object->class_name : "Unknown");
+		cJSON_AddNumberToObject(item, "confidence", object->confidence);
+		cJSON_AddNumberToObject(item, "x", object->x);
+		cJSON_AddNumberToObject(item, "y", object->y);
+		cJSON_AddNumberToObject(item, "speed", object->speed);
+		cJSON_AddNumberToObject(item, "ageSeconds", object->first_seen ? (int)(now - object->first_seen) : 0);
+		cJSON_AddNumberToObject(item, "lastSeenSeconds", object->last_seen ? (int)(now - object->last_seen) : -1);
+		cJSON_AddBoolToObject(item, "active", object->active);
+		cJSON_AddBoolToObject(item, "valid", Radar_Object_Is_Countable(object, now));
+		cJSON_AddBoolToObject(item, "insideArea", object->inside_area);
+		cJSON_AddItemToArray(objects, item);
+	}
+	cJSON_AddItemToObject(root, "objects", objects);
+
+	pthread_mutex_lock(&g_publish_mutex);
+	cJSON_AddBoolToObject(root, "publishEnabled", g_publish_enabled);
+	cJSON_AddNumberToObject(root, "publishInterval", g_publish_interval_minutes);
+	cJSON_AddNumberToObject(root, "nextPublishTime", (double)g_next_publish_time);
+	int seconds_until_publish = g_next_publish_time > now ? (int)(g_next_publish_time - now) : 0;
+	cJSON_AddNumberToObject(root, "secondsUntilPublish", seconds_until_publish);
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	pthread_mutex_unlock(&g_radar_mutex);
+	return root;
+}
+
+static void
+Radar_Reset_State(void) {
+	pthread_mutex_lock(&g_radar_mutex);
+	memset(g_radar_objects, 0, sizeof(g_radar_objects));
+	g_radar_object_count = 0;
+	g_radar_current_total = 0;
+	g_radar_current_human = 0;
+	g_radar_current_vehicle = 0;
+	g_radar_current_unknown = 0;
+	g_radar_peak_total = 0;
+	g_radar_peak_human = 0;
+	g_radar_peak_vehicle = 0;
+	g_radar_peak_unknown = 0;
+	pthread_mutex_unlock(&g_radar_mutex);
 }
 
 // ==================================================================
@@ -500,8 +673,7 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 		if (interval) {
 			pthread_mutex_lock(&g_publish_mutex);
 			g_publish_interval_minutes = interval->valueint;
-			if (g_publish_interval_minutes < 1) g_publish_interval_minutes = 1;
-			if (g_publish_interval_minutes > 60) g_publish_interval_minutes = 60;
+			g_publish_interval_minutes = Clamp_Int(g_publish_interval_minutes, 5, 60);
 			pthread_mutex_unlock(&g_publish_mutex);
 		}
 		cJSON* enabled = cJSON_GetObjectItem(data, "enabled");
@@ -515,18 +687,48 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 			pthread_mutex_lock(&g_publish_mutex);
 			cJSON* human = cJSON_GetObjectItem(classes, "human");
 			if (human) g_publish_human = cJSON_IsTrue(human);
-			cJSON* car = cJSON_GetObjectItem(classes, "car");
-			if (car) g_publish_car = cJSON_IsTrue(car);
-			cJSON* bike = cJSON_GetObjectItem(classes, "bike");
-			if (bike) g_publish_bike = cJSON_IsTrue(bike);
-			cJSON* bus = cJSON_GetObjectItem(classes, "bus");
-			if (bus) g_publish_bus = cJSON_IsTrue(bus);
-			cJSON* truck = cJSON_GetObjectItem(classes, "truck");
-			if (truck) g_publish_truck = cJSON_IsTrue(truck);
-			cJSON* other = cJSON_GetObjectItem(classes, "other");
-			if (other) g_publish_other = cJSON_IsTrue(other);
+			cJSON* vehicle = cJSON_GetObjectItem(classes, "vehicle");
+			if (vehicle) g_publish_vehicle = cJSON_IsTrue(vehicle);
+			cJSON* unknown = cJSON_GetObjectItem(classes, "unknown");
+			if (unknown) g_publish_unknown = cJSON_IsTrue(unknown);
 			pthread_mutex_unlock(&g_publish_mutex);
 		}
+	}
+
+	if (strcmp(service, "radar") == 0) {
+		pthread_mutex_lock(&g_radar_mutex);
+		cJSON* mode = cJSON_GetObjectItem(data, "occupancyMode");
+		if (mode && mode->valuestring) g_radar_mode = Radar_Mode_From_String(mode->valuestring);
+		cJSON* object_class = cJSON_GetObjectItem(data, "objectClass");
+		if (object_class && object_class->valuestring) g_radar_object_class_bucket = Radar_Class_From_String(object_class->valuestring);
+		cJSON* stale = cJSON_GetObjectItem(data, "staleTimeoutSeconds");
+		if (stale) g_radar_stale_timeout_seconds = Clamp_Int(stale->valueint, 30, 3600);
+		cJSON* dwell = cJSON_GetObjectItem(data, "minDwellSeconds");
+		if (dwell) g_radar_min_dwell_seconds = Clamp_Int(dwell->valueint, 0, 300);
+		cJSON* confidence = cJSON_GetObjectItem(data, "minConfidence");
+		if (confidence) g_radar_min_confidence = Clamp_Int(confidence->valueint, 0, 100);
+		cJSON* aoi = cJSON_GetObjectItem(data, "aoi");
+		if (aoi) {
+			cJSON* enabled = cJSON_GetObjectItem(aoi, "enabled");
+			if (enabled) g_radar_aoi_enabled = cJSON_IsTrue(enabled);
+			cJSON* x1 = cJSON_GetObjectItem(aoi, "x1");
+			cJSON* x2 = cJSON_GetObjectItem(aoi, "x2");
+			cJSON* y1 = cJSON_GetObjectItem(aoi, "y1");
+			cJSON* y2 = cJSON_GetObjectItem(aoi, "y2");
+			if (x1) g_radar_aoi_x1 = Clamp_Int(x1->valueint, 0, 1000);
+			if (x2) g_radar_aoi_x2 = Clamp_Int(x2->valueint, 0, 1000);
+			if (y1) g_radar_aoi_y1 = Clamp_Int(y1->valueint, 0, 1000);
+			if (y2) g_radar_aoi_y2 = Clamp_Int(y2->valueint, 0, 1000);
+			if (g_radar_aoi_x2 < g_radar_aoi_x1) g_radar_aoi_x2 = g_radar_aoi_x1;
+			if (g_radar_aoi_y2 < g_radar_aoi_y1) g_radar_aoi_y2 = g_radar_aoi_y1;
+			cJSON* points = cJSON_GetObjectItem(aoi, "points");
+			Radar_Load_Area_Points(points);
+		} else {
+			Radar_Set_Rectangle_Area_Points();
+		}
+		Radar_Reset_Interval_State();
+		pthread_mutex_unlock(&g_radar_mutex);
+		Radar_Apply_Config_To_Subscriber();
 	}
 
 	if (strcmp(service, "polling") == 0) {
@@ -543,7 +745,7 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 // ==================================================================
 
 // Forward declaration — defined further down in this file
-static int Publish_Counters_To_LoRa(void);
+static int Publish_Radar_To_LoRa(void);
 
 void
 B100_Downlink_Handler(B100_Downlink* downlink) {
@@ -653,22 +855,10 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				B100_Join_Auto();
 				break;
 			case 0x03:
-				LOG("Downlink: Reset Counters\n");
-				pthread_mutex_lock(&g_counter_mutex);
-				for (int i = 0; i < g_counter_count; i++) {
-					g_counters[i].internal_total = 0;
-					g_counters[i].internal_human = 0;
-					g_counters[i].internal_car   = 0;
-					g_counters[i].internal_bike  = 0;
-					g_counters[i].internal_bus   = 0;
-					g_counters[i].internal_truck = 0;
-					g_counters[i].internal_other = 0;
-					g_counters[i].has_reference  = 0;
-				}
-				pthread_mutex_unlock(&g_counter_mutex);
-				Save_Counters_To_File();
+				LOG("Downlink: Reset radar occupancy state\n");
+				Radar_Reset_State();
 				sleep(1);
-				Publish_Counters_To_LoRa();
+				Publish_Radar_To_LoRa();
 				break;
 			default:
 				LOG_WARN("Downlink: Unknown port 10 command 0x%02X\n", first_byte);
@@ -913,14 +1103,14 @@ Health_Monitor_Thread(void* arg) {
 			g_callbacks_configured = 0;
 			const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
 			char status_uri[64], receive_uri[64];
-			snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
-			snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+			snprintf(status_uri, sizeof(status_uri), "/local/%s/%s", APP_PACKAGE, B100_STATUS_CALLBACK_NODE);
+			snprintf(receive_uri, sizeof(receive_uri), "/local/%s/%s", APP_PACKAGE, B100_RECEIVE_CALLBACK_NODE);
 			if (B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri,
 			                           g_callback_digest_user, g_callback_digest_password)) {
 				g_callbacks_configured = 1;
 				// Also re-apply GPS callback so GPS push stays active
 				char gps_uri[64];
-				snprintf(gps_uri, sizeof(gps_uri), "/local/%s/b100_gps", APP_PACKAGE);
+				snprintf(gps_uri, sizeof(gps_uri), "/local/%s/%s", APP_PACKAGE, B100_GPS_CALLBACK_NODE);
 				B100_Configure_GPS_Callback(gps_uri, 60);
 				ACAP_STATUS_SetString("app", "status", "Running");
 			} else {
@@ -1130,120 +1320,48 @@ HTTP_Endpoint_send(const ACAP_HTTP_Response response, const ACAP_HTTP_Request re
 }
 
 void
-HTTP_Endpoint_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	cJSON* root = cJSON_CreateObject();
-	cJSON* counters_array = cJSON_CreateArray();
-	
-	for (int i = 0; i < g_counter_count; i++) {
-		CounterState* counter = &g_counters[i];
-		cJSON* item = cJSON_CreateObject();
-		
-		cJSON_AddStringToObject(item, "scenario", counter->scenario);
-		cJSON_AddNumberToObject(item, "total", counter->internal_total);
-		cJSON_AddNumberToObject(item, "human", counter->internal_human);
-		cJSON_AddNumberToObject(item, "car", counter->internal_car);
-		cJSON_AddNumberToObject(item, "bike", counter->internal_bike);
-		cJSON_AddNumberToObject(item, "bus", counter->internal_bus);
-		cJSON_AddNumberToObject(item, "truck", counter->internal_truck);
-		cJSON_AddNumberToObject(item, "other", counter->internal_other);
-		
-		cJSON_AddItemToArray(counters_array, item);
-	}
-	
-	pthread_mutex_unlock(&g_counter_mutex);
-	
-	// Add publishing info
-	pthread_mutex_lock(&g_publish_mutex);
-	cJSON_AddItemToObject(root, "counters", counters_array);
-	cJSON_AddBoolToObject(root, "publishEnabled", g_publish_enabled);
-	cJSON_AddNumberToObject(root, "publishInterval", g_publish_interval_minutes);
-	cJSON_AddNumberToObject(root, "nextPublishTime", (double)g_next_publish_time);
-	time_t now = time(NULL);
-	int seconds_until_publish = g_next_publish_time > now ? (int)(g_next_publish_time - now) : 0;
-	cJSON_AddNumberToObject(root, "secondsUntilPublish", seconds_until_publish);
-	pthread_mutex_unlock(&g_publish_mutex);
-	
+HTTP_Endpoint_radar(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	cJSON* root = Radar_Status_JSON();
 	ACAP_HTTP_Respond_JSON(response, root);
 	cJSON_Delete(root);
 }
 
+void
+HTTP_Endpoint_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	HTTP_Endpoint_radar(response, request);
+}
+
 // ==================================================================
-// LoRa Publishing — sends binary counter data directly via byte array
+// LoRa Publishing — sends binary radar occupancy data
 // ==================================================================
 
-int Publish_Counters_To_LoRa() {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	// Check if we have counters
-	if (g_counter_count == 0) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("No counters to publish\n");
-		return 0;
+int Publish_Radar_To_LoRa() {
+	int total, human, vehicle, unknown;
+	pthread_mutex_lock(&g_radar_mutex);
+	Radar_Published_Counts(&total, &human, &vehicle, &unknown);
+	int mode = g_radar_mode;
+	if (mode == RADAR_MODE_ALERT && (!g_radar_alert_pending || total <= 0)) {
+		if (total <= 0)
+			g_radar_alert_pending = 0;
+		pthread_mutex_unlock(&g_radar_mutex);
+		LOG("LoRa: Alert mode skipped publish, no alert pending\n");
+		return -1;
 	}
-	
-	// Count how many classes are enabled
-	pthread_mutex_lock(&g_publish_mutex);
-	int class_count = g_publish_human + g_publish_car + g_publish_bike + 
-	                  g_publish_bus + g_publish_truck + g_publish_other;
-	pthread_mutex_unlock(&g_publish_mutex);
-	
-	if (class_count == 0) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("No classes selected for publishing\n");
-		return 0;
+	pthread_mutex_unlock(&g_radar_mutex);
+
+	unsigned char buffer[10];
+	buffer[0] = 1;
+	buffer[1] = (unsigned char)mode;
+	uint16_t values[4] = {
+		(uint16_t)(total & 0xFFFF),
+		(uint16_t)(human & 0xFFFF),
+		(uint16_t)(vehicle & 0xFFFF),
+		(uint16_t)(unknown & 0xFFFF)
+	};
+	for (int i = 0; i < 4; i++) {
+		buffer[2 + (i * 2)] = values[i] & 0xFF;
+		buffer[3 + (i * 2)] = (values[i] >> 8) & 0xFF;
 	}
-	
-	// Calculate buffer size: counter_count * class_count * 2 bytes
-	size_t buffer_size = g_counter_count * class_count * 2;
-	unsigned char* buffer = malloc(buffer_size);
-	if (!buffer) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("Failed to allocate buffer\n");
-		return 0;
-	}
-	
-	// Fill buffer with counter values (16-bit unsigned, little-endian)
-	size_t offset = 0;
-	for (int i = 0; i < g_counter_count; i++) {
-		CounterState* counter = &g_counters[i];
-		
-		pthread_mutex_lock(&g_publish_mutex);
-		if (g_publish_human) {
-			uint16_t val = counter->internal_human & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_car) {
-			uint16_t val = counter->internal_car & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_bike) {
-			uint16_t val = counter->internal_bike & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_bus) {
-			uint16_t val = counter->internal_bus & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_truck) {
-			uint16_t val = counter->internal_truck & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_other) {
-			uint16_t val = counter->internal_other & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		pthread_mutex_unlock(&g_publish_mutex);
-	}
-	
-	pthread_mutex_unlock(&g_counter_mutex);
 	
 	// Decide confirmed/unconfirmed: every 10th uplink is confirmed for link health.
 	pthread_mutex_lock(&g_health_mutex);
@@ -1259,14 +1377,22 @@ int Publish_Counters_To_LoRa() {
 	pthread_mutex_unlock(&g_health_mutex);
 
 	// Send raw bytes directly via the B100 POST API (no base64 needed)
-	LOG("LoRa: Publishing %zu bytes (%d counters, %d classes) on port %d%s\n", 
-	    buffer_size, g_counter_count, class_count, g_lorawan_port,
+	LOG("LoRa: Publishing radar occupancy total=%d human=%d vehicle=%d unknown=%d on port %d%s\n",
+	    total, human, vehicle, unknown, g_lorawan_port,
 	    use_confirmed ? " [confirmed]" : "");
 
-	int success = B100_Send_Bytes(buffer, (int)buffer_size, g_lorawan_port, use_confirmed);
+	int success = B100_Send_Bytes(buffer, (int)sizeof(buffer), g_lorawan_port, use_confirmed);
 	
 	if (success) {
 		LOG("LoRa: Publish accepted\n");
+		pthread_mutex_lock(&g_radar_mutex);
+		if (g_radar_mode == RADAR_MODE_ALERT) {
+			g_radar_alert_pending = 0;
+			g_radar_last_alert_time = time(NULL);
+		} else {
+			Radar_Reset_Interval_State();
+		}
+		pthread_mutex_unlock(&g_radar_mutex);
 		pthread_mutex_lock(&g_publish_mutex);
 		g_next_publish_time = time(NULL) + (g_publish_interval_minutes * 60);
 		pthread_mutex_unlock(&g_publish_mutex);
@@ -1274,7 +1400,6 @@ int Publish_Counters_To_LoRa() {
 		LOG_WARN("LoRa: Publish failed - %s\n", B100_Get_Last_Error());
 	}
 	
-	free(buffer);
 	return success;
 }
 
@@ -1295,9 +1420,14 @@ Publish_Thread(void* arg) {
 		
 		if (enabled) {
 			time_t now = time(NULL);
-			if (now >= next_time) {
+			pthread_mutex_lock(&g_radar_mutex);
+			int alert_mode = g_radar_mode == RADAR_MODE_ALERT;
+			int alert_pending = g_radar_alert_pending;
+			pthread_mutex_unlock(&g_radar_mutex);
+
+			if ((alert_mode && alert_pending) || (!alert_mode && now >= next_time)) {
 				// Time to publish
-				Publish_Counters_To_LoRa();
+				Publish_Radar_To_LoRa();
 			}
 		}
 		
@@ -1321,11 +1451,25 @@ HTTP_Endpoint_publish(const ACAP_HTTP_Response response, const ACAP_HTTP_Request
 	
 	LOG("Manual publish requested\n");
 	
-	if (Publish_Counters_To_LoRa()) {
-		ACAP_HTTP_Respond_Text(response, "Counters published");
+	int result = Publish_Radar_To_LoRa();
+	if (result > 0) {
+		ACAP_HTTP_Respond_Text(response, "Radar occupancy published");
+	} else if (result < 0) {
+		ACAP_HTTP_Respond_Error(response, 409, "No alert pending");
 	} else {
-		ACAP_HTTP_Respond_Error(response, 500, "Failed to publish counters");
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to publish radar occupancy");
 	}
+}
+
+void
+HTTP_Endpoint_radar_reset(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "POST") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+	Radar_Reset_State();
+	ACAP_HTTP_Respond_Text(response, "Radar occupancy state reset");
 }
 
 void
@@ -1357,8 +1501,8 @@ HTTP_Endpoint_b100_request_status(const ACAP_HTTP_Response response, const ACAP_
 	// Ensure B100 has http_api_enable=1 and correct callback URIs configured
 	const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
 	char status_uri[64], receive_uri[64];
-	snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
-	snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+	snprintf(status_uri, sizeof(status_uri), "/local/%s/%s", APP_PACKAGE, B100_STATUS_CALLBACK_NODE);
+	snprintf(receive_uri, sizeof(receive_uri), "/local/%s/%s", APP_PACKAGE, B100_RECEIVE_CALLBACK_NODE);
 	if (!B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri,
 	                            g_callback_digest_user, g_callback_digest_password)) {
 		ACAP_HTTP_Respond_Error(response, 500, "Failed to configure B100 callbacks");
@@ -1496,12 +1640,24 @@ void
 HTTP_Endpoint_b100_info(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
 	cJSON* info = B100_Get_Info();
 	if (info) {
-		// Add current callback config
-		cJSON* cb_params = B100_Get_Params("callback_addr");
+		// Add current callback config from the bridge parameter API.
+		cJSON* cb_params = B100_Get_Params(NULL);
 		if (cb_params) {
 			cJSON* addr = cJSON_GetObjectItem(cb_params, "callback_addr");
 			if (addr && addr->valuestring)
 				cJSON_AddStringToObject(info, "callback_configured_addr", addr->valuestring);
+			cJSON* port = cJSON_GetObjectItem(cb_params, "callback_port");
+			if (port)
+				cJSON_AddNumberToObject(info, "callback_configured_port", port->valueint);
+			cJSON* user = cJSON_GetObjectItem(cb_params, "callback_digest_user");
+			if (user && user->valuestring)
+				cJSON_AddStringToObject(info, "callback_digest_user", user->valuestring);
+			cJSON* status_uri = cJSON_GetObjectItem(cb_params, "callback_status_uri");
+			if (status_uri && status_uri->valuestring)
+				cJSON_AddStringToObject(info, "callback_status_uri", status_uri->valuestring);
+			cJSON* receive_uri = cJSON_GetObjectItem(cb_params, "callback_receive_uri");
+			if (receive_uri && receive_uri->valuestring)
+				cJSON_AddStringToObject(info, "callback_receive_uri", receive_uri->valuestring);
 			cJSON_Delete(cb_params);
 		}
 		cJSON_AddBoolToObject(info, "callbacks_active", g_callbacks_configured);
@@ -1561,289 +1717,102 @@ HTTP_Endpoint_linkcheck(const ACAP_HTTP_Response response, const ACAP_HTTP_Reque
 }
 
 void
-HTTP_Endpoint_delete_counter(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
-	const char* method = ACAP_HTTP_Get_Method(request);
-	if (!method || strcmp(method, "POST") != 0) {
-		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
-		return;
-	}
-	
-	// Get scenario parameter
-	char* scenario = ACAP_HTTP_Request_Param(request, "scenario");
-	if (!scenario) {
-		ACAP_HTTP_Respond_Error(response, 400, "Missing scenario parameter");
-		return;
-	}
-	
-	LOG("Delete counter requested: %s\n", scenario);
-	Delete_Counter_By_Scenario(scenario);
-	free(scenario);
-	
-	ACAP_HTTP_Respond_Text(response, "Counter deleted");
-}
-
-void
-HTTP_Endpoint_sync_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
-	const char* method = ACAP_HTTP_Get_Method(request);
-	if (!method || strcmp(method, "POST") != 0) {
-		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
-		return;
-	}
-	
-	// Get JSON body with scenario list
-	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
-	if (!body) {
-		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
-		return;
-	}
-	
-	cJSON* scenarios = cJSON_GetObjectItem(body, "scenarios");
-	if (!scenarios || !cJSON_IsArray(scenarios)) {
-		cJSON_Delete(body);
-		ACAP_HTTP_Respond_Error(response, 400, "Missing scenarios array");
-		return;
-	}
-	
-	int scenario_count = cJSON_GetArraySize(scenarios);
-	LOG("Sync counters requested with %d AOA scenarios\n", scenario_count);
-	LOG("Current backend has %d counters before sync\n", g_counter_count);
-	
-	Sync_Counters_With_AOA_List(scenarios);
-	
-	cJSON_Delete(body);
-	
-	// Return current counter count
-	cJSON* result = cJSON_CreateObject();
-	cJSON_AddNumberToObject(result, "removed", -1);  // Will be calculated in sync
-	cJSON_AddNumberToObject(result, "remaining", g_counter_count);
-	cJSON_AddStringToObject(result, "status", "synchronized");
-	
-	ACAP_HTTP_Respond_JSON(response, result);
-	cJSON_Delete(result);
-}
-
-void
-HTTP_Endpoint_set_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
-	const char* method = ACAP_HTTP_Get_Method(request);
-	if (!method || strcmp(method, "POST") != 0) {
-		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
-		return;
-	}
-
-	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
-	if (!body) {
-		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
-		return;
-	}
-
-	cJSON* scenario_json = cJSON_GetObjectItem(body, "scenario");
-	if (!scenario_json || !scenario_json->valuestring || strlen(scenario_json->valuestring) == 0) {
-		cJSON_Delete(body);
-		ACAP_HTTP_Respond_Error(response, 400, "Missing scenario name");
-		return;
-	}
-
-	const char* scenario = scenario_json->valuestring;
-
-	pthread_mutex_lock(&g_counter_mutex);
-
-	// Find the counter for this scenario
-	CounterState* counter = NULL;
-	for (int i = 0; i < g_counter_count; i++) {
-		if (strcmp(g_counters[i].scenario, scenario) == 0) {
-			counter = &g_counters[i];
-			break;
-		}
-	}
-
-	if (!counter) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		cJSON_Delete(body);
-		ACAP_HTTP_Respond_Error(response, 404, "Scenario not found");
-		return;
-	}
-
-	// Update counter values from request
-	cJSON* val;
-	val = cJSON_GetObjectItem(body, "human");
-	if (val && cJSON_IsNumber(val)) counter->internal_human = val->valueint;
-	val = cJSON_GetObjectItem(body, "car");
-	if (val && cJSON_IsNumber(val)) counter->internal_car = val->valueint;
-	val = cJSON_GetObjectItem(body, "bike");
-	if (val && cJSON_IsNumber(val)) counter->internal_bike = val->valueint;
-	val = cJSON_GetObjectItem(body, "bus");
-	if (val && cJSON_IsNumber(val)) counter->internal_bus = val->valueint;
-	val = cJSON_GetObjectItem(body, "truck");
-	if (val && cJSON_IsNumber(val)) counter->internal_truck = val->valueint;
-	val = cJSON_GetObjectItem(body, "other");
-	if (val && cJSON_IsNumber(val)) counter->internal_other = val->valueint;
-
-	// Recalculate total
-	counter->internal_total = counter->internal_human + counter->internal_car +
-	                          counter->internal_bike + counter->internal_bus +
-	                          counter->internal_truck + counter->internal_other;
-
-	// Reset AOA reference so next event calculates delta from current AOA value
-	counter->has_reference = 0;
-
-	LOG("Set counters for %s: human=%d car=%d bike=%d bus=%d truck=%d other=%d total=%d\n",
-	    scenario, counter->internal_human, counter->internal_car, counter->internal_bike,
-	    counter->internal_bus, counter->internal_truck, counter->internal_other,
-	    counter->internal_total);
-
-	pthread_mutex_unlock(&g_counter_mutex);
-	cJSON_Delete(body);
-
-	// Persist to file
-	Save_Counters_To_File();
-
-	ACAP_HTTP_Respond_Text(response, "Counter values updated");
-}
-
-void
 HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
-	pthread_mutex_lock(&g_counter_mutex);
-	pthread_mutex_lock(&g_publish_mutex);
-	
-	// Build class list string
-	char classes[256] = "";
-	int first = 1;
-	if (g_publish_human) {
-		strcat(classes, first ? "human" : ", human");
-		first = 0;
-	}
-	if (g_publish_car) {
-		strcat(classes, first ? "car" : ", car");
-		first = 0;
-	}
-	if (g_publish_bike) {
-		strcat(classes, first ? "bike" : ", bike");
-		first = 0;
-	}
-	if (g_publish_bus) {
-		strcat(classes, first ? "bus" : ", bus");
-		first = 0;
-	}
-	if (g_publish_truck) {
-		strcat(classes, first ? "truck" : ", truck");
-		first = 0;
-	}
-	if (g_publish_other) {
-		strcat(classes, first ? "other" : ", other");
-		first = 0;
-	}
-	
-	// Build JavaScript decoder function
-	char js[8192];
-	int pos = 0;
-	
-	// Build counter names list for documentation
-	char counter_names[256] = "";
-	for (int i = 0; i < g_counter_count; i++) {
-		if (i > 0) strcat(counter_names, ", ");
-		strcat(counter_names, g_counters[i].scenario);
-	}
-	
 	const char* dev_model  = ACAP_DEVICE_Prop("model")  ? ACAP_DEVICE_Prop("model")  : "unknown";
 	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
 	const char* dev_date   = ACAP_DEVICE_Date();
-
-	pos += snprintf(js + pos, sizeof(js) - pos,
+	char js[8192];
+	snprintf(js, sizeof(js),
 		"/**\n"
-		" * AI-B100 Counter Decoder\n"
+		" * AI-B100 Radar Occupancy Decoder\n"
 		" * Device  : %s  (serial %s)\n"
 		" * Generated: %s\n"
-		" * Counters: %s\n"
-		" * Enabled classes: %s\n"
 		" *\n"
 		" * Payload format\n"
 		" * --------------\n"
-		" * The AI-B100 sends raw binary bytes over LoRaWAN.\n"
-		" * Each counter contributes one 16-bit little-endian unsigned integer\n"
-		" * per enabled class, in the order: human, car, bike, bus, truck, other.\n"
-		" * Total payload size = (number of counters) x (number of classes) x 2 bytes.\n"
+		" * byte 0     protocol version, currently 1\n"
+		" * byte 1     mode: 0=Interval peak, 1=Area balance, 2=Presence alert\n"
+		" * bytes 2-3  total occupancy, uint16 little-endian\n"
+		" * bytes 4-5  human occupancy, uint16 little-endian\n"
+		" * bytes 6-7  vehicle occupancy, uint16 little-endian\n"
+		" * bytes 8-9  unknown occupancy, uint16 little-endian, currently always 0\n"
 		" *\n"
-		" * Usage\n"
-		" * -----\n"
-		" * Call decodeCounters(bytes) where 'bytes' is the raw LoRaWAN payload\n"
-		" * as a Buffer or Uint8Array. Returns an object with one key per counter,\n"
-		" * each containing the enabled class counts.\n"
+		" * Mode semantics\n"
+		" * --------------\n"
+		" * Interval peak:   highest count observed during the publish interval.\n"
+		" * Area balance:    current balanced inside-area count from entry/exit transitions.\n"
+		" * Presence alert:  current count when a new detection episode starts; no interval publish.\n"
+		" *\n"
 		" */\n\n"
-		"function decodeCounters(bytes) {\n"
-		"  var result = {};\n"
-		"  var offset = 0;\n\n",
-		dev_model, dev_serial, dev_date, counter_names, classes
+		"function decodeRadarOccupancy(bytes) {\n"
+		"  if (!bytes || bytes.length < 10) {\n"
+		"    throw new Error('Radar occupancy payload must be 10 bytes');\n"
+		"  }\n"
+		"  var modeInfo = {\n"
+		"    0: {\n"
+		"      name: 'maximum',\n"
+		"      label: 'Interval peak',\n"
+		"      description: 'Highest count observed during the publish interval.'\n"
+		"    },\n"
+		"    1: {\n"
+		"      name: 'entry_exit',\n"
+		"      label: 'Area balance',\n"
+		"      description: 'Current balanced inside-area count from entry/exit transitions.'\n"
+		"    },\n"
+		"    2: {\n"
+		"      name: 'alert',\n"
+		"      label: 'Presence alert',\n"
+		"      description: 'Current count when a new detection episode starts; no interval publish.'\n"
+		"    }\n"
+		"  };\n"
+		"  function u16(offset) { return bytes[offset] | (bytes[offset + 1] << 8); }\n"
+		"  var modeCode = bytes[1];\n"
+		"  var mode = modeInfo[modeCode] || {\n"
+		"    name: 'unknown',\n"
+		"    label: 'Unknown',\n"
+		"    description: 'Unknown radar occupancy mode.'\n"
+		"  };\n"
+		"  var occupancy = {\n"
+		"    total: u16(2),\n"
+		"    human: u16(4),\n"
+		"    vehicle: u16(6),\n"
+		"    unknown: u16(8)\n"
+		"  };\n"
+		"  return {\n"
+		"    version: bytes[0],\n"
+		"    modeCode: modeCode,\n"
+		"    mode: mode.name,\n"
+		"    modeLabel: mode.label,\n"
+		"    modeDescription: mode.description,\n"
+		"    total: occupancy.total,\n"
+		"    human: occupancy.human,\n"
+		"    vehicle: occupancy.vehicle,\n"
+		"    unknown: occupancy.unknown,\n"
+		"    occupancy: occupancy,\n"
+		"    layout: {\n"
+		"      byte0: 'protocol version',\n"
+		"      byte1: 'mode: 0=Interval peak, 1=Area balance, 2=Presence alert',\n"
+		"      bytes2to3: 'total occupancy, uint16 little-endian',\n"
+		"      bytes4to5: 'human occupancy, uint16 little-endian',\n"
+		"      bytes6to7: 'vehicle occupancy, uint16 little-endian',\n"
+		"      bytes8to9: 'unknown occupancy, uint16 little-endian'\n"
+		"    }\n"
+		"  };\n"
+		"}\n\n"
+		"function decodeUplink(input) {\n"
+		"  try {\n"
+		"    return { data: decodeRadarOccupancy(input.bytes) };\n"
+		"  } catch (error) {\n"
+		"    return { errors: [error.message] };\n"
+		"  }\n"
+		"}\n",
+		dev_model, dev_serial, dev_date
 	);
-	
-	// Generate decoding for each counter
-	for (int i = 0; i < g_counter_count; i++) {
-		pos += snprintf(js + pos, sizeof(js) - pos,
-			"  // %s\n"
-			"  result['%s'] = {};\n",
-			g_counters[i].scenario, g_counters[i].scenario
-		);
-		
-		if (g_publish_human) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].human = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_car) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].car = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_bike) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].bike = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_bus) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].bus = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_truck) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].truck = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_other) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].other = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		
-		pos += snprintf(js + pos, sizeof(js) - pos, "\n");
-	}
-	
-	// Close the decodeCounters function
-	pos += snprintf(js + pos, sizeof(js) - pos,
-		"  return result;\n"
-		"}\n"
-	);
-	
-	pthread_mutex_unlock(&g_publish_mutex);
-	pthread_mutex_unlock(&g_counter_mutex);
-	
-	// Build filename: aib100-decoder-{model}-{serial}-{date}.js
+
 	char filename[128];
-	snprintf(filename, sizeof(filename), "aib100-decoder-%s-%s-%s.js",
+	snprintf(filename, sizeof(filename), "radar-occupancy-decoder-%s-%s-%s.js",
 	         dev_model, dev_serial, dev_date);
 
-	// Send as downloadable JavaScript file
 	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", strlen(js));
 	ACAP_HTTP_Respond_String(response, "%s", js);
 }
@@ -1878,26 +1847,16 @@ int main(void) {
     // Initialize ACAP
     ACAP_Init(APP_PACKAGE, Settings_Updated_Callback);
     
-    // Load saved counters
-    LOG("Loading saved counters...\n");
-    Load_Counters_From_File();
-    
-    // Setup AOA event subscriptions
-    LOG("Setting up AOA event subscriptions...\n");
-    ACAP_EVENTS_SetCallback(AOA_Event_Callback);
-    eventSubscriptions = ACAP_FILE_Read("settings/subscriptions.json");
-    if (eventSubscriptions) {
-        cJSON* subscription = eventSubscriptions->child;
-        int count = 0;
-        while (subscription) {
-            ACAP_EVENTS_Subscribe(subscription, NULL);
-            count++;
-            subscription = subscription->next;
-        }
-        LOG("Subscribed to %d event topic(s)\n", count);
-    } else {
-        LOG_WARN("No event subscriptions found\n");
-    }
+	LOG("Initializing radar scene subscriber...\n");
+	int radar_status = RadarDetection_Init(Radar_Detections_Callback, Radar_Tracker_Callback);
+	if (radar_status > 0) {
+		g_radar_connected = 1;
+		ACAP_STATUS_SetString("radar", "status", "Subscribed");
+	} else {
+		g_radar_connected = 0;
+		ACAP_STATUS_SetString("radar", "status", "Radar subscriber failed");
+		LOG_WARN("Radar subscriber initialization failed: %d\n", radar_status);
+	}
     
     // Load settings
     cJSON* settings = ACAP_Get_Config("settings");
@@ -1958,8 +1917,7 @@ int main(void) {
             cJSON* interval = cJSON_GetObjectItem(transmission, "intervalMinutes");
             if (interval) {
                 g_publish_interval_minutes = interval->valueint;
-                if (g_publish_interval_minutes < 1) g_publish_interval_minutes = 1;
-                if (g_publish_interval_minutes > 60) g_publish_interval_minutes = 60;
+				g_publish_interval_minutes = Clamp_Int(g_publish_interval_minutes, 5, 60);
             }
             
             cJSON* enabled = cJSON_GetObjectItem(transmission, "enabled");
@@ -1971,18 +1929,44 @@ int main(void) {
             if (classes) {
                 cJSON* human = cJSON_GetObjectItem(classes, "human");
                 if (human) g_publish_human = cJSON_IsTrue(human);
-                cJSON* car = cJSON_GetObjectItem(classes, "car");
-                if (car) g_publish_car = cJSON_IsTrue(car);
-                cJSON* bike = cJSON_GetObjectItem(classes, "bike");
-                if (bike) g_publish_bike = cJSON_IsTrue(bike);
-                cJSON* bus = cJSON_GetObjectItem(classes, "bus");
-                if (bus) g_publish_bus = cJSON_IsTrue(bus);
-                cJSON* truck = cJSON_GetObjectItem(classes, "truck");
-                if (truck) g_publish_truck = cJSON_IsTrue(truck);
-                cJSON* other = cJSON_GetObjectItem(classes, "other");
-                if (other) g_publish_other = cJSON_IsTrue(other);
+				cJSON* vehicle = cJSON_GetObjectItem(classes, "vehicle");
+				if (vehicle) g_publish_vehicle = cJSON_IsTrue(vehicle);
+				cJSON* unknown = cJSON_GetObjectItem(classes, "unknown");
+				if (unknown) g_publish_unknown = cJSON_IsTrue(unknown);
+				if (g_publish_vehicle && !g_publish_human) g_radar_object_class_bucket = 2;
+				else if (g_publish_human && !g_publish_vehicle) g_radar_object_class_bucket = 1;
             }
         }
+
+		cJSON* radar = cJSON_GetObjectItem(settings, "radar");
+		if (radar) {
+			cJSON* mode = cJSON_GetObjectItem(radar, "occupancyMode");
+			if (mode && mode->valuestring) g_radar_mode = Radar_Mode_From_String(mode->valuestring);
+			cJSON* object_class = cJSON_GetObjectItem(radar, "objectClass");
+			if (object_class && object_class->valuestring) g_radar_object_class_bucket = Radar_Class_From_String(object_class->valuestring);
+			cJSON* stale = cJSON_GetObjectItem(radar, "staleTimeoutSeconds");
+			if (stale) g_radar_stale_timeout_seconds = Clamp_Int(stale->valueint, 30, 3600);
+			cJSON* dwell = cJSON_GetObjectItem(radar, "minDwellSeconds");
+			if (dwell) g_radar_min_dwell_seconds = Clamp_Int(dwell->valueint, 0, 300);
+			cJSON* confidence = cJSON_GetObjectItem(radar, "minConfidence");
+			if (confidence) g_radar_min_confidence = Clamp_Int(confidence->valueint, 0, 100);
+			cJSON* aoi = cJSON_GetObjectItem(radar, "aoi");
+			if (aoi) {
+				cJSON* enabled = cJSON_GetObjectItem(aoi, "enabled");
+				if (enabled) g_radar_aoi_enabled = cJSON_IsTrue(enabled);
+				cJSON* x1 = cJSON_GetObjectItem(aoi, "x1");
+				cJSON* x2 = cJSON_GetObjectItem(aoi, "x2");
+				cJSON* y1 = cJSON_GetObjectItem(aoi, "y1");
+				cJSON* y2 = cJSON_GetObjectItem(aoi, "y2");
+				if (x1) g_radar_aoi_x1 = Clamp_Int(x1->valueint, 0, 1000);
+				if (x2) g_radar_aoi_x2 = Clamp_Int(x2->valueint, 0, 1000);
+				if (y1) g_radar_aoi_y1 = Clamp_Int(y1->valueint, 0, 1000);
+				if (y2) g_radar_aoi_y2 = Clamp_Int(y2->valueint, 0, 1000);
+				cJSON* points = cJSON_GetObjectItem(aoi, "points");
+				Radar_Load_Area_Points(points);
+			}
+			Radar_Apply_Config_To_Subscriber();
+		}
     }
     
     // Initialize B100 client
@@ -2001,14 +1985,14 @@ int main(void) {
         {
             const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
             char status_uri[64], receive_uri[64];
-            snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
-            snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+			snprintf(status_uri, sizeof(status_uri), "/local/%s/%s", APP_PACKAGE, B100_STATUS_CALLBACK_NODE);
+			snprintf(receive_uri, sizeof(receive_uri), "/local/%s/%s", APP_PACKAGE, B100_RECEIVE_CALLBACK_NODE);
 			if (B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri,
 										 g_callback_digest_user, g_callback_digest_password)) {
                 g_callbacks_configured = 1;
                 // Configure GPS callback — POST every 60 s to the b100_gps endpoint
                 char gps_uri[64];
-                snprintf(gps_uri, sizeof(gps_uri), "/local/%s/b100_gps", APP_PACKAGE);
+				snprintf(gps_uri, sizeof(gps_uri), "/local/%s/%s", APP_PACKAGE, B100_GPS_CALLBACK_NODE);
                 B100_Configure_GPS_Callback(gps_uri, 60);
                 ACAP_STATUS_SetString("app", "status", "Running");
             } else {
@@ -2030,16 +2014,15 @@ int main(void) {
     ACAP_HTTP_Node("test", HTTP_Endpoint_test);
     ACAP_HTTP_Node("restart", HTTP_Endpoint_restart);
     ACAP_HTTP_Node("send", HTTP_Endpoint_send);
-    ACAP_HTTP_Node("counters", HTTP_Endpoint_counters);
+	ACAP_HTTP_Node("counters", HTTP_Endpoint_counters);
+	ACAP_HTTP_Node("radar", HTTP_Endpoint_radar);
+	ACAP_HTTP_Node("radar_reset", HTTP_Endpoint_radar_reset);
     ACAP_HTTP_Node("publish", HTTP_Endpoint_publish);
     ACAP_HTTP_Node("translator", HTTP_Endpoint_translator);
-    ACAP_HTTP_Node("delete_counter", HTTP_Endpoint_delete_counter);
-    ACAP_HTTP_Node("sync_counters", HTTP_Endpoint_sync_counters);
-    ACAP_HTTP_Node("set_counters", HTTP_Endpoint_set_counters);
     ACAP_HTTP_Node("receive", HTTP_Endpoint_receive);
-    ACAP_HTTP_Node("b100_status", HTTP_Endpoint_B100_Status_Callback);
-    ACAP_HTTP_Node("b100_receive", HTTP_Endpoint_B100_Receive_Callback);
-    ACAP_HTTP_Node("b100_gps", HTTP_Endpoint_B100_GPS_Callback);
+	ACAP_HTTP_Node(B100_STATUS_CALLBACK_NODE, HTTP_Endpoint_B100_Status_Callback);
+	ACAP_HTTP_Node(B100_RECEIVE_CALLBACK_NODE, HTTP_Endpoint_B100_Receive_Callback);
+	ACAP_HTTP_Node(B100_GPS_CALLBACK_NODE, HTTP_Endpoint_B100_GPS_Callback);
     ACAP_HTTP_Node("gps", HTTP_Endpoint_gps);
     ACAP_HTTP_Node("b100_info", HTTP_Endpoint_b100_info);
     ACAP_HTTP_Node("b100_params", HTTP_Endpoint_b100_params);
@@ -2076,16 +2059,8 @@ int main(void) {
 	pthread_join(health_thread, NULL);
 	pthread_join(publish_thread, NULL);
 	
-	// Save counters before exit
-	LOG("Saving counters before shutdown...\n");
-	Save_Counters_To_File();
-	
-	// Cleanup event subscriptions
-	if (eventSubscriptions) {
-		cJSON_Delete(eventSubscriptions);
-		eventSubscriptions = NULL;
-	}
-	
+	RadarDetection_Cleanup();
+
 	B100_Cleanup();
     ACAP_Cleanup();
     
