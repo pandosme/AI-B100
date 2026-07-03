@@ -85,6 +85,7 @@ typedef struct {
     int httpApiEnabled;         // HTTP API enabled
     int mqttEnabled;            // MQTT enabled
     int dhcpEnabled;            // DHCP enabled
+    char callbackStatus[16];    // B100 callback status, e.g. "ok" or "fail"
     char ipAddr[20];            // B100 IP address
     unsigned long timestamp;    // Last update timestamp (local)
     int tamper;                 // Tamper status: 0=normal, 1=tampered

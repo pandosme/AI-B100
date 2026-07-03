@@ -9,7 +9,7 @@
             "embeddedSdkVersion": "3.0",
             "vendorUrl": "https://pandosme.github.io",
             "runMode": "respawn",
-            "version": "1.0.1"
+            "version": "1.1.0"
         },
         "configuration": {
 			"settingPage": "index.html",

@@ -14,8 +14,9 @@
 	<header class="app-header">
 		<div class="app-name" id="app-name">&nbsp;</div>
 		<nav class="nav-bar">
-			<a href="index.html">Counters</a>
-			<a href="aoa.html">AOA</a>
+			<a href="index.html">Publish</a>
+			<a href="aoa.html">Counting</a>
+			<a href="occupancy.html">Occupancy</a>
 			<a href="bridge.html">LoRA Bridge</a>
 			<a href="downlink.html">LoRA Downlink</a>
 			<a href="gps.html">GPS</a>
@@ -25,6 +26,14 @@
 	</header>
 
 	<div class="page-content">
+		<div class="row mb-3">
+			<div class="col-12">
+				<button id="btn-download" class="btn btn-primary">
+					Installation Info
+				</button>
+			</div>
+		</div>
+
 		<div class="row">
 			<div class="col-12 col-md-6">
 				<div class="card mb-3">
@@ -101,17 +110,6 @@
 			</div>
 		</div>
 
-		<div class="row">
-			<div class="col-12">
-				<div class="card">
-					<div class="card-body text-center">
-						<button id="btn-download" class="btn btn-primary btn-lg">
-							<i class="bi bi-download"></i> Download Full Status
-						</button>
-					</div>
-				</div>
-			</div>
-		</div>
 	</div>
 
 <script>
@@ -223,13 +221,232 @@ $(document).ready(function() {
 	// Refresh status every 10 seconds
 	setInterval(loadStatus, 10000);
 
+	function fetchJson(options) {
+		return new Promise(function(resolve) {
+			$.ajax(Object.assign({}, options, {
+				dataType: options.dataType || 'json',
+				cache: false,
+				success: function(data) { resolve({ ok: true, data: data }); },
+				error: function(xhr, status, error) { resolve({ ok: false, error: error || status || 'request failed' }); }
+			}));
+		});
+	}
+
+	function valueText(value) {
+		if (value === undefined || value === null || value === '') return '-';
+		if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+		return String(value);
+	}
+
+	function addSection(lines, title) {
+		lines.push('');
+		lines.push(title);
+		lines.push('-'.repeat(title.length));
+	}
+
+	function addField(lines, label, value) {
+		lines.push(label + ': ' + valueText(value));
+	}
+
+	function selectedClassesText(classes) {
+		if (!classes) return '-';
+		return ['human', 'car', 'bike', 'bus', 'truck', 'other']
+			.filter(function(key) { return classes[key] !== false; })
+			.join(', ') || 'none';
+	}
+
+	function addObjectFields(lines, object, labels) {
+		labels.forEach(function(item) {
+			addField(lines, item[0], object ? object[item[1]] : undefined);
+		});
+	}
+
+	function addScenarioSettings(lines, scenarios) {
+		const names = scenarios ? Object.keys(scenarios) : [];
+		if (names.length === 0) {
+			lines.push('Per-scenario settings: none');
+			return;
+		}
+		lines.push('Per-scenario settings:');
+		names.forEach(function(name) {
+			const config = scenarios[name] || {};
+			lines.push('  ' + name + ':');
+			if (config.value) lines.push('    Value type: ' + config.value);
+			lines.push('    Classes: ' + selectedClassesText(config.classes));
+		});
+	}
+
+	function addCounterState(lines, counters) {
+		if (!counters || counters.length === 0) {
+			lines.push('Configured counters: none reported by app');
+			return;
+		}
+		lines.push('Configured counters:');
+		counters.forEach(function(counter) {
+			lines.push('  ' + valueText(counter.scenario) + ':');
+			lines.push('    Stored total: ' + valueText(counter.total));
+			lines.push('    Stored classes: human=' + valueText(counter.human) + ', car=' + valueText(counter.car) + ', bike=' + valueText(counter.bike) + ', bus=' + valueText(counter.bus) + ', truck=' + valueText(counter.truck) + ', other=' + valueText(counter.other));
+			lines.push('    Publish classes: ' + selectedClassesText(counter.publishClasses));
+		});
+	}
+
+	function addOccupancyState(lines, occupancy) {
+		if (!occupancy || occupancy.length === 0) {
+			lines.push('Configured occupancy areas: none reported by app');
+			return;
+		}
+		lines.push('Configured occupancy areas:');
+		occupancy.forEach(function(area) {
+			lines.push('  ' + valueText(area.scenario) + ':');
+			lines.push('    Has sample: ' + valueText(area.hasSample));
+			lines.push('    Last interval: ' + valueText(area.start) + ' to ' + valueText(area.end));
+			lines.push('    Selected value type: ' + valueText(area.selectedValueType));
+			lines.push('    Publish classes: ' + selectedClassesText(area.publishClasses));
+			lines.push('    Selected values: human=' + valueText(area.selectedHuman) + ', car=' + valueText(area.selectedCar) + ', bike=' + valueText(area.selectedBike) + ', bus=' + valueText(area.selectedBus) + ', truck=' + valueText(area.selectedTruck) + ', other=' + valueText(area.selectedOther));
+		});
+	}
+
+	function addAoaScenarios(lines, aoaConfig, typeName) {
+		const scenarios = (((aoaConfig || {}).data || {}).scenarios || []).filter(function(scenario) {
+			return scenario.type && scenario.type.toLowerCase() === typeName.toLowerCase();
+		});
+		if (scenarios.length === 0) {
+			lines.push('AOA scenarios: none');
+			return;
+		}
+		lines.push('AOA scenarios:');
+		scenarios.forEach(function(scenario) {
+			lines.push('  ' + valueText(scenario.name || ('Scenario ' + scenario.id)) + ' (id ' + valueText(scenario.id) + ', type ' + valueText(scenario.type) + ')');
+			if (scenario.eventInterval) lines.push('    Event interval enabled: ' + valueText(scenario.eventInterval.enabled));
+		});
+	}
+
+	function buildInstallationInfo(report) {
+		const app = report.app || {};
+		const settings = app.settings || {};
+		const status = report.status || {};
+		const counters = report.counters || {};
+		const bridgeInfo = report.bridgeInfo || {};
+		const bridgeParams = report.bridgeParams || {};
+		const transmission = settings.transmission || {};
+		const counting = transmission.counting || {};
+		const occupancy = transmission.occupancy || {};
+		const setup = (((app.manifest || {}).acapPackageConf || {}).setup) || {};
+		const device = app.device || {};
+		const lines = [];
+
+		lines.push('AI-B100 AOA Counter - Installation Info');
+		lines.push('Generated: ' + new Date().toLocaleString());
+		lines.push('Host: ' + location.host);
+
+		addSection(lines, 'Camera Information');
+		addObjectFields(lines, device, [
+			['Model', 'model'], ['Firmware', 'firmware'], ['Serial', 'serial'], ['Platform', 'platform'], ['Chip', 'chip']
+		]);
+		addField(lines, 'ACAP name', setup.friendlyName);
+		addField(lines, 'ACAP package', setup.appName);
+		addField(lines, 'ACAP version', setup.version);
+		addField(lines, 'ACAP vendor', setup.vendor);
+		addField(lines, 'ACAP architecture', setup.architecture || device.chip);
+
+		addSection(lines, 'Bridge Information');
+		addObjectFields(lines, status.bridge, [
+			['Bridge connected', 'connected'], ['Hardware', 'hardware'], ['Hardware version', 'hardwareVersion'], ['Firmware', 'firmwareVersion'], ['IP address', 'ipAddr'], ['Power source', 'powerSource'], ['DevEUI', 'devEUI'], ['DevAddr', 'devAddr'], ['Restart counter', 'restartCounter'], ['Temperature C', 'tempC'], ['HTTP API enabled', 'httpApiEnabled'], ['Callbacks active', 'callbacksActive'], ['Callback status', 'callbackStatus']
+		]);
+		addObjectFields(lines, status.lorawan, [
+			['LoRaWAN connected', 'connected'], ['Joined', 'joined'], ['Status code', 'statusCode'], ['Status text', 'statusText'], ['Frame counter up', 'fcntUp'], ['Frame counter down', 'fcntDown'], ['Data rate', 'dataRate'], ['Max payload', 'maxPayload'], ['RSSI', 'rssi'], ['SNR', 'snr'], ['Link margin', 'margin'], ['Gateway count', 'gwCount'], ['Next upload ms', 'nextUploadMs']
+		]);
+		lines.push('');
+		lines.push('ACAP bridge settings:');
+		addObjectFields(lines, settings.b100, [
+			['Bridge IP', 'ip'], ['Bridge HTTP port', 'port'], ['HTTP timeout seconds', 'timeout'], ['Callback IP', 'callbackIP'], ['Callback port', 'callbackPort'], ['Callback digest user', 'callbackDigestUser']
+		]);
+		lines.push('');
+		lines.push('Bridge LoRa settings:');
+		addObjectFields(lines, settings.lorawan, [
+			['Legacy/default port', 'port'], ['Confirmed', 'confirmed'], ['Data rate', 'dataRate'], ['Auto join', 'autoJoin']
+		]);
+		addObjectFields(lines, bridgeParams, [
+			['ADR enabled', 'adr_enable'], ['Data rate', 'data_rate'], ['DR join', 'dr_join'], ['DR up', 'dr_up'], ['Heartbeat port', 'lora_hb_port'], ['Tamper port', 'tamper_port'], ['MQTT enabled', 'mqtt_enable'], ['Broker address', 'broker_addr']
+		]);
+		if (Object.keys(bridgeInfo).length > 0) {
+			lines.push('');
+			lines.push('Bridge info endpoint:');
+			addObjectFields(lines, bridgeInfo, [
+				['Device EUI', 'dev_eui'], ['Device address', 'dev_addr'], ['Firmware version', 'firmware'], ['Hardware', 'hardware'], ['Callback configured address', 'callback_configured_addr']
+			]);
+		}
+
+		addSection(lines, 'Counting Settings');
+		addField(lines, 'Publish interval minutes', counting.intervalMinutes);
+		addField(lines, 'LoRaWAN port', counting.port);
+		addField(lines, 'Selected default classes', selectedClassesText(counting.classes));
+		addScenarioSettings(lines, counting.scenarios);
+		if (counters.publish && counters.publish.counting) {
+			addField(lines, 'Next publish time', counters.publish.counting.nextPublishTime ? new Date(counters.publish.counting.nextPublishTime * 1000).toLocaleString() : '-');
+			addField(lines, 'Seconds until publish', counters.publish.counting.secondsUntilPublish);
+		}
+		addCounterState(lines, counters.counters || []);
+		addAoaScenarios(lines, report.aoaConfig, 'crosslinecounting');
+
+		addSection(lines, 'Occupancy Settings');
+		addField(lines, 'Publish interval minutes', occupancy.intervalMinutes);
+		addField(lines, 'LoRaWAN port', occupancy.port);
+		addField(lines, 'Default value type', occupancy.value);
+		addField(lines, 'Selected default classes', selectedClassesText(occupancy.classes));
+		addScenarioSettings(lines, occupancy.scenarios);
+		if (counters.publish && counters.publish.occupancy) {
+			addField(lines, 'Next publish time', counters.publish.occupancy.nextPublishTime ? new Date(counters.publish.occupancy.nextPublishTime * 1000).toLocaleString() : '-');
+			addField(lines, 'Seconds until publish', counters.publish.occupancy.secondsUntilPublish);
+		}
+		addOccupancyState(lines, counters.occupancy || []);
+		addAoaScenarios(lines, report.aoaConfig, 'occupancyInArea');
+
+		if (report.errors.length > 0) {
+			addSection(lines, 'Collection Warnings');
+			report.errors.forEach(function(error) { lines.push(error); });
+		}
+
+		return lines.join('\n') + '\n';
+	}
+
+	async function collectInstallationInfo() {
+		const results = await Promise.all([
+			fetchJson({ type: 'GET', url: 'app' }),
+			fetchJson({ type: 'GET', url: 'status' }),
+			fetchJson({ type: 'GET', url: 'counters' }),
+			fetchJson({ type: 'GET', url: 'b100_info' }),
+			fetchJson({ type: 'GET', url: 'b100_params' }),
+			fetchJson({
+				type: 'POST',
+				url: '/local/objectanalytics/control.cgi',
+				contentType: 'application/json',
+				data: JSON.stringify({ apiVersion: '1.6', context: 'aib100', method: 'getConfiguration' })
+			})
+		]);
+		const names = ['app', 'status', 'counters', 'bridgeInfo', 'bridgeParams', 'aoaConfig'];
+		const report = { errors: [] };
+		results.forEach(function(result, index) {
+			if (result.ok) report[names[index]] = result.data;
+			else {
+				report[names[index]] = {};
+				report.errors.push(names[index] + ': ' + result.error);
+			}
+		});
+		return report;
+	}
+
 	// Download button
-	$('#btn-download').on('click', function() {
+	$('#btn-download').on('click', async function() {
+		const $button = $(this);
+		const originalText = $button.text();
+		$button.prop('disabled', true).text('Preparing...');
 		const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-		const filename = `b100-status-${timestamp}.json`;
-		
-		const dataStr = JSON.stringify(fullStatusData, null, 2);
-		const dataBlob = new Blob([dataStr], { type: 'application/json' });
+		const filename = `aib100-installation-info-${timestamp}.txt`;
+
+		const report = await collectInstallationInfo();
+		const dataStr = buildInstallationInfo(report);
+		const dataBlob = new Blob([dataStr], { type: 'text/plain' });
 		const url = URL.createObjectURL(dataBlob);
 		
 		const link = document.createElement('a');
@@ -239,8 +456,9 @@ $(document).ready(function() {
 		link.click();
 		document.body.removeChild(link);
 		URL.revokeObjectURL(url);
-		
-		showToast("Status downloaded: " + filename, 'success');
+		$button.prop('disabled', false).text(originalText);
+
+		showToast("Installation info downloaded: " + filename, 'success');
 	});
 });
 </script>

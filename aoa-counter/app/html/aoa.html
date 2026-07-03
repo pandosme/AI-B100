@@ -21,8 +21,9 @@
 	<header class="app-header">
 		<div class="app-name" id="app-name">&nbsp;</div>
 		<nav class="nav-bar">
-			<a href="index.html">Counters</a>
-			<a href="aoa.html" class="active">AOA</a>
+			<a href="index.html">Publish</a>
+			<a href="aoa.html" class="active">Counting</a>
+			<a href="occupancy.html">Occupancy</a>
 			<a href="bridge.html">LoRA Bridge</a>
 			<a href="downlink.html">LoRA Downlink</a>
 			<a href="gps.html">GPS</a>
@@ -44,8 +45,62 @@
 <script>
 let aoaScenarios = [];
 let counterData = {};
+let publishSettings = {};
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 360;
+const ALL_OBJECT_CLASSIFICATIONS = [
+	{type: "human"},
+	{
+		type: "vehicle",
+		subTypes: [
+			{type: "motorcycle/bicycle"},
+			{type: "car"},
+			{type: "bus"},
+			{type: "truck"},
+			{type: "unknown"}
+		]
+	}
+];
+
+function cloneAllObjectClassifications() {
+	return JSON.parse(JSON.stringify(ALL_OBJECT_CLASSIFICATIONS));
+}
+
+function ensureAllObjectClassifications(predicate) {
+	if (!window.aoaFullConfig || !window.aoaFullConfig.scenarios) return false;
+	let changed = false;
+	window.aoaFullConfig.scenarios.forEach(function(scenario) {
+		if (!predicate(scenario)) return;
+		if (!Array.isArray(scenario.objectClassifications)) {
+			scenario.objectClassifications = [];
+			changed = true;
+		}
+
+		if (!scenario.objectClassifications.some(item => item && item.type === "human")) {
+			scenario.objectClassifications.push({type: "human"});
+			changed = true;
+		}
+
+		let vehicle = scenario.objectClassifications.find(item => item && item.type === "vehicle");
+		if (!vehicle) {
+			vehicle = {type: "vehicle", subTypes: []};
+			scenario.objectClassifications.push(vehicle);
+			changed = true;
+		}
+		if (!Array.isArray(vehicle.subTypes)) {
+			vehicle.subTypes = [];
+			changed = true;
+		}
+
+		ALL_OBJECT_CLASSIFICATIONS[1].subTypes.forEach(function(requiredSubtype) {
+			if (!vehicle.subTypes.some(item => item && item.type === requiredSubtype.type)) {
+				vehicle.subTypes.push({type: requiredSubtype.type});
+				changed = true;
+			}
+		});
+	});
+	return changed;
+}
 
 $(document).ready(function() {
 	$.ajax({
@@ -82,6 +137,84 @@ $(document).ready(function() {
 	$('#btn-add-counter').on('click', addNewCounter);
 });
 
+function defaultClassSelection() {
+	return {human: true, car: true, bike: true, bus: true, truck: true, other: true};
+}
+
+function getCountingPublishSettings(scenarioName) {
+	const transmission = publishSettings.transmission || {};
+	const counting = transmission.counting || {};
+	const scenarios = counting.scenarios || {};
+	const scenarioConfig = scenarios[scenarioName] || {};
+	return {
+		classes: Object.assign(defaultClassSelection(), counting.classes || {}, scenarioConfig.classes || {})
+	};
+}
+
+function classCheckboxes(prefix, classes) {
+	const labels = [
+		['human', 'Humans'],
+		['car', 'Cars'],
+		['bike', 'Bikes'],
+		['bus', 'Buses'],
+		['truck', 'Trucks'],
+		['other', 'Other Vehicles']
+	];
+	return labels.map(function(item) {
+		const key = item[0];
+		const label = item[1];
+		const id = `${prefix}-${key}`;
+		const checked = classes[key] !== false ? 'checked' : '';
+		return `<div class="form-check form-check-inline"><input class="form-check-input publish-class" type="checkbox" id="${id}" data-class="${key}" ${checked}><label class="form-check-label" for="${id}">${label}</label></div>`;
+	}).join('');
+}
+
+function readClassSelection(containerSelector) {
+	const classes = {};
+	$(containerSelector).find('.publish-class').each(function() {
+		classes[$(this).data('class')] = $(this).is(':checked');
+	});
+	return classes;
+}
+
+function loadPublishSettings(callback) {
+	$.ajax({
+		type: "GET",
+		url: 'settings',
+		dataType: 'json',
+		cache: false,
+		success: function(settings) {
+			publishSettings = settings || {};
+			if (callback) callback();
+		},
+		error: function(xhr, status, error) {
+			console.warn('Failed to load publish settings:', error);
+			publishSettings = {};
+			if (callback) callback();
+		}
+	});
+}
+
+function saveCountingPublishSettings(scenarioId) {
+	const scenario = aoaScenarios.find(s => s.id === scenarioId);
+	if (!scenario || !scenario.name) return;
+	const transmission = publishSettings.transmission || {};
+	const counting = transmission.counting || {};
+	counting.scenarios = counting.scenarios || {};
+	counting.scenarios[scenario.name] = counting.scenarios[scenario.name] || {};
+	counting.scenarios[scenario.name].classes = readClassSelection('#publish-classes-' + scenarioId);
+	transmission.counting = counting;
+	publishSettings.transmission = transmission;
+	$.ajax({
+		type: "POST",
+		url: 'settings',
+		data: JSON.stringify({ transmission: transmission }),
+		contentType: 'application/json',
+		success: function() { showToast('Counting publish labels saved', 'success'); },
+		error: function(xhr, status, error) { showToast('Failed to save publish labels: ' + error, 'danger'); }
+	});
+}
+
 // Load AOA scenarios and create cards
 function loadAOAScenarios() {
 	$.ajax({
@@ -97,13 +230,21 @@ function loadAOAScenarios() {
 			if (response && response.data && response.data.scenarios) {
 				// Store COMPLETE configuration including devices array
 				window.aoaFullConfig = response.data;
+				if (ensureAllObjectClassifications(s => s.type === "crosslinecounting")) {
+					saveFullConfiguration(function() {
+						showToast('All AOA labels enabled for Counting scenarios', 'success');
+						loadAOAScenarios();
+					}, 'Failed to enable all AOA labels');
+					return;
+				}
 				
 				// Filter only crosslinecounting scenarios for display
 				aoaScenarios = response.data.scenarios.filter(s => s.type === "crosslinecounting");
-				console.log('Loaded AOA scenarios:', aoaScenarios);
 				
-				renderAllCounters();
-				pollAllCounters();
+				loadPublishSettings(function() {
+					renderAllCounters();
+					pollAllCounters();
+				});
 				
 				// Sync backend counters with AOA scenarios
 				syncBackendCounters();
@@ -143,6 +284,7 @@ function renderAllCounters() {
 function createCounterCard(scenario) {
 	const line = scenario.triggers && scenario.triggers[0] ? scenario.triggers[0] : null;
 	const vertices = line && line.vertices ? line.vertices : [[-0.5, -0.5], [0.5, 0.5]];
+	const publish = getCountingPublishSettings(scenario.name || 'Counter ' + scenario.id);
 	
 	return $(`
 		<div class="col-12 col-lg-6 mb-3" id="counter-card-${scenario.id}">
@@ -157,7 +299,9 @@ function createCounterCard(scenario) {
 					<div class="input-group input-group-sm">
 						<span class="input-group-text">Name</span>
 						<input type="text" class="form-control counter-name" value="${scenario.name || ''}" data-id="${scenario.id}" placeholder="Enter counter name...">
-						<button class="btn btn-outline-success btn-save-name" data-id="${scenario.id}">Save Name</button>
+					</div>
+					<div class="mt-2 text-end">
+						<button class="btn btn-sm btn-outline-success btn-save-name" data-id="${scenario.id}">Save</button>
 					</div>
 				</div>
 				<div class="card-body">
@@ -169,6 +313,13 @@ function createCounterCard(scenario) {
 					
 					<div class="counter-stats mt-3" id="stats-${scenario.id}">
 						<div class="text-center text-muted">Loading counter data...</div>
+					</div>
+
+					<div class="publish-settings mt-3" id="publish-settings-${scenario.id}">
+						<hr>
+						<h6>Labels to Publish</h6>
+						<div id="publish-classes-${scenario.id}">${classCheckboxes('counting-' + scenario.id, publish.classes)}</div>
+						<button class="btn btn-sm btn-outline-success mt-2 btn-save-publish" data-id="${scenario.id}">Save Publish Labels</button>
 					</div>
 					
 					<div class="line-config mt-3" id="config-${scenario.id}" style="display: none;">
@@ -399,6 +550,11 @@ $(document).on('click', '.btn-change-direction', function() {
 	changeCountingDirection(id);
 });
 
+$(document).on('click', '.btn-save-publish', function() {
+	const id = $(this).data('id');
+	saveCountingPublishSettings(id);
+});
+
 // Canvas drag to adjust line
 $(document).on('mousedown', 'canvas[id^="canvas-"]', function(e) {
 	const scenarioId = parseInt($(this).attr('id').replace('canvas-', ''));
@@ -440,6 +596,8 @@ function startDragging(scenarioId, vertexIndex, canvas) {
 	draggingScenario = scenarioId;
 	draggingVertex = vertexIndex;
 	draggingCanvas = canvas;
+	$('#config-' + scenarioId).show();
+	updateLinePositionDisplay(scenarioId);
 	
 	$(document).on('mousemove.drag', onDragMove);
 	$(document).on('mouseup.drag', onDragEnd);
@@ -471,6 +629,34 @@ function onDragEnd() {
 	showToast('Line adjusted. Click "Save Line Position" to apply changes.', 'info');
 }
 
+function saveFullConfiguration(onSuccess, failurePrefix) {
+	ensureAllObjectClassifications(s => s.type === "crosslinecounting");
+	$.ajax({
+		type: "POST",
+		url: "/local/objectanalytics/control.cgi",
+		contentType: 'application/json',
+		data: JSON.stringify({
+			apiVersion: "1.6",
+			context: "aib100",
+			method: "setConfiguration",
+			params: window.aoaFullConfig
+		}),
+		success: function(response) {
+			if (response && response.error) {
+				const message = response.error.message || 'AOA rejected the configuration';
+				console.error(failurePrefix + ':', response.error);
+				showToast(failurePrefix + ': ' + message + ' (' + response.error.code + ')', 'danger');
+				return;
+			}
+			onSuccess(response);
+		},
+		error: function(xhr, status, error) {
+			console.error(failurePrefix + ':', xhr.responseText);
+			showToast(failurePrefix + ': ' + error, 'danger');
+		}
+	});
+}
+
 // Save counter name only
 function saveCounterName(scenarioId) {
 	const scenario = aoaScenarios.find(s => s.id === scenarioId);
@@ -491,28 +677,13 @@ function saveCounterName(scenarioId) {
 		window.aoaFullConfig.scenarios[idx].name = newName;
 	}
 	
-	// Send updated configuration
-	$.ajax({
-		type: "POST",
-		url: "/local/objectanalytics/control.cgi",
-		contentType: 'application/json',
-		data: JSON.stringify({
-			apiVersion: "1.6",
-			context: "aib100",
-			method: "setConfiguration",
-			params: window.aoaFullConfig
-		}),
-		success: function(response) {
-			showToast('Counter name saved: ' + newName, 'success');
-			// Update the card title
-			$('#counter-card-' + scenarioId + ' .card-title').text(newName);
-			// Reload scenarios to ensure sync
-			setTimeout(loadAOAScenarios, 500);
-		},
-		error: function(xhr, status, error) {
-			showToast('Failed to save name: ' + error, 'danger');
-		}
-	});
+	saveFullConfiguration(function() {
+		showToast('Counter name saved: ' + newName, 'success');
+		// Update the card title
+		$('#counter-card-' + scenarioId + ' .card-title').text(newName);
+		// Reload scenarios to ensure sync
+		setTimeout(loadAOAScenarios, 500);
+	}, 'Failed to save');
 }
 
 // Change counting direction
@@ -536,28 +707,12 @@ function changeCountingDirection(scenarioId) {
 	}
 	
 	const directionText = newDirection === 'leftToRight' ? 'Left to Right' : 'Right to Left';
-	console.log('Changing direction for scenario', scenarioId, 'to', newDirection);
 	
-	// Send updated configuration
-	$.ajax({
-		type: "POST",
-		url: "/local/objectanalytics/control.cgi",
-		contentType: 'application/json',
-		data: JSON.stringify({
-			apiVersion: "1.6",
-			context: "aib100",
-			method: "setConfiguration",
-			params: window.aoaFullConfig
-		}),
-		success: function(response) {
-			showToast('Direction changed to: ' + directionText, 'success');
-			// Reload scenarios to ensure sync
-			setTimeout(loadAOAScenarios, 500);
-		},
-		error: function(xhr, status, error) {
-			showToast('Failed to change direction: ' + error, 'danger');
-		}
-	});
+	saveFullConfiguration(function() {
+		showToast('Direction changed to: ' + directionText, 'success');
+		// Reload scenarios to ensure sync
+		setTimeout(loadAOAScenarios, 500);
+	}, 'Failed to change direction');
 }
 
 function updateLinePositionDisplay(scenarioId) {
@@ -582,8 +737,6 @@ function saveLineConfiguration(scenarioId) {
 	const scenario = aoaScenarios.find(s => s.id === scenarioId);
 	if (!scenario || !window.aoaFullConfig) return;
 	
-	console.log('Saving line position:', scenarioId, 'vertices:', scenario.triggers[0].vertices);
-	
 	// Update the scenario in the full config (preserve ALL fields)
 	const idx = window.aoaFullConfig.scenarios.findIndex(s => s.id === scenarioId);
 	if (idx >= 0) {
@@ -591,31 +744,12 @@ function saveLineConfiguration(scenarioId) {
 		window.aoaFullConfig.scenarios[idx].triggers[0].vertices = scenario.triggers[0].vertices;
 	}
 	
-	console.log('Sending full config to AOA');
-	
-	// Send updated configuration with ALL metadata preserved
-	$.ajax({
-		type: "POST",
-		url: "/local/objectanalytics/control.cgi",
-		contentType: 'application/json',
-		data: JSON.stringify({
-			apiVersion: "1.6",
-			context: "aib100",
-			method: "setConfiguration",
-			params: window.aoaFullConfig
-		}),
-		success: function(response) {
-			console.log('AOA update response:', response);
-			showToast('Line position saved!', 'success');
-			$('#config-' + scenarioId).hide();
-			// Reload scenarios to ensure sync
-			setTimeout(loadAOAScenarios, 500);
-		},
-		error: function(xhr, status, error) {
-			console.error('AOA update error:', xhr.responseText);
-			showToast('Failed to save line position: ' + error, 'danger');
-		}
-	});
+	saveFullConfiguration(function(response) {
+		showToast('Line position saved!', 'success');
+		$('#config-' + scenarioId).hide();
+		// Reload scenarios to ensure sync
+		setTimeout(loadAOAScenarios, 500);
+	}, 'Failed to save line position');
 }
 
 // Delete counter
@@ -634,46 +768,25 @@ function deleteCounter(scenarioId) {
 	const scenario = aoaScenarios.find(s => s.id === scenarioId);
 	const scenarioName = scenario ? scenario.name : null;
 	
-	console.log('Deleting scenario:', scenarioId, scenarioName);
-	
-	// Send updated configuration
-	$.ajax({
-		type: "POST",
-		url: "/local/objectanalytics/control.cgi",
-		contentType: 'application/json',
-		data: JSON.stringify({
-			apiVersion: "1.6",
-			context: "aib100",
-			method: "setConfiguration",
-			params: window.aoaFullConfig
-		}),
-		success: function() {
-			showToast('Counter deleted!', 'success');
-			aoaScenarios = aoaScenarios.filter(s => s.id !== scenarioId);
-			$('#counter-card-' + scenarioId).remove();
-			if (aoaScenarios.length === 0) {
-				renderAllCounters();
-			}
-			
-			// Delete from backend if we have the scenario name
-			if (scenarioName) {
-				$.ajax({
-					type: "POST",
-					url: "delete_counter?scenario=" + encodeURIComponent(scenarioName),
-					success: function() {
-						console.log('Backend counter deleted:', scenarioName);
-					},
-					error: function(xhr, status, error) {
-						console.warn('Failed to delete backend counter:', error);
-					}
-				});
-			}
-		},
-		error: function(xhr, status, error) {
-			console.error('Failed to delete counter:', xhr.responseText);
-			showToast('Failed to delete counter: ' + error, 'danger');
+	saveFullConfiguration(function() {
+		showToast('Counter deleted!', 'success');
+		aoaScenarios = aoaScenarios.filter(s => s.id !== scenarioId);
+		$('#counter-card-' + scenarioId).remove();
+		if (aoaScenarios.length === 0) {
+			renderAllCounters();
 		}
-	});
+		
+		// Delete from backend if we have the scenario name
+		if (scenarioName) {
+			$.ajax({
+				type: "POST",
+				url: "delete_counter?scenario=" + encodeURIComponent(scenarioName),
+				error: function(xhr, status, error) {
+					console.warn('Failed to delete backend counter:', error);
+				}
+			});
+		}
+	}, 'Failed to delete counter');
 }
 
 // Add new counter
@@ -705,19 +818,7 @@ function addNewCounter() {
 		devices: [{id: 1}],
 		filters: [],
 		metadataOverlay: null,
-		objectClassifications: [
-			{type: "human"},
-			{
-				type: "vehicle",
-				subTypes: [
-					{type: "motorcycle/bicycle"},
-					{type: "car"},
-					{type: "bus"},
-					{type: "truck"},
-					{type: "unknown"}
-				]
-			}
-		],
+		objectClassifications: cloneAllObjectClassifications(),
 		triggers: [{
 			type: "countingLine",
 			countingDirection: "leftToRight",
@@ -737,41 +838,20 @@ function addNewCounter() {
 	
 	window.aoaFullConfig.scenarios.push(newScenario);
 	
-	console.log('Creating new scenario:', newScenario);
-	
-	// Send updated configuration
-	$.ajax({
-		type: "POST",
-		url: "/local/objectanalytics/control.cgi",
-		contentType: 'application/json',
-		data: JSON.stringify({
-			apiVersion: "1.6",
-			context: "aib100",
-			method: "setConfiguration",
-			params: window.aoaFullConfig
-		}),
-		success: function() {
-			showToast('Counter created!', 'success');
-			loadAOAScenarios();
-		},
-		error: function(xhr, status, error) {
-			console.error('Failed to create counter:', xhr.responseText);
-			showToast('Failed to create counter: ' + error, 'danger');
-		}
-	});
+	saveFullConfiguration(function() {
+		showToast('Counter created!', 'success');
+		loadAOAScenarios();
+	}, 'Failed to create counter');
 }
 
 // Sync backend counters with AOA scenarios
 function syncBackendCounters() {
 	if (!aoaScenarios || aoaScenarios.length === 0) {
-		console.log('No AOA scenarios to sync');
 		return;
 	}
 	
 	// Build list of scenario names
 	const scenarioNames = aoaScenarios.map(s => s.name);
-	
-	console.log('Syncing backend counters with AOA:', scenarioNames);
 	
 	$.ajax({
 		type: "POST",
@@ -780,10 +860,6 @@ function syncBackendCounters() {
 		data: JSON.stringify({
 			scenarios: scenarioNames
 		}),
-		success: function(result) {
-			console.log('Backend counters synchronized:', result);
-			console.log('AOA has ' + scenarioNames.length + ' scenarios, backend has ' + result.remaining + ' counters');
-		},
 		error: function(xhr, status, error) {
 			console.warn('Failed to sync backend counters:', error);
 		}

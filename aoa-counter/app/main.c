@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdint.h>
+#include <math.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -19,6 +20,9 @@
 
 #define APP_PACKAGE	"aib100"
 #define DOWNLINK_LOG_MAX 10
+#define PUBLISH_LOG_MAX 10
+#define MAX_AOA_ITEMS 10
+#define SETTINGS_VERSION 3
 
 #define LOG(fmt, args...)    { syslog(LOG_INFO, fmt, ## args); printf(fmt, ## args);}
 #define LOG_WARN(fmt, args...)    { syslog(LOG_WARNING, fmt, ## args); printf(fmt, ## args);}
@@ -32,17 +36,39 @@ static int running = 1;
 static cJSON* eventSubscriptions = NULL;
 static int g_callbacks_configured = 0;
 static cJSON* g_downlink_log = NULL;
+static cJSON* g_publish_log = NULL;
+static pthread_mutex_t g_publish_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Transmission settings
-static int g_publish_interval_minutes = 15;
-static int g_publish_enabled = 1;
-static int g_publish_human = 1;
-static int g_publish_car = 1;
-static int g_publish_bike = 1;
-static int g_publish_bus = 1;
-static int g_publish_truck = 1;
-static int g_publish_other = 1;
-static time_t g_next_publish_time = 0;
+typedef struct {
+	int human;
+	int car;
+	int bike;
+	int bus;
+	int truck;
+	int other;
+} ClassSelection;
+
+typedef struct {
+	char scenario[64];
+	ClassSelection classes;
+	char value[16];
+} ScenarioPublishConfig;
+
+static int g_counting_interval_minutes = 15;
+static int g_counting_port = 10;
+static ClassSelection g_counting_classes = {1, 1, 1, 1, 1, 1};
+static ScenarioPublishConfig g_counting_publish[MAX_AOA_ITEMS];
+static int g_counting_publish_count = 0;
+static time_t g_next_counting_publish_time = 0;
+
+static int g_occupancy_interval_minutes = 15;
+static int g_occupancy_port = 0;
+static char g_occupancy_value[16] = "average";
+static ClassSelection g_occupancy_classes = {1, 1, 1, 1, 1, 1};
+static ScenarioPublishConfig g_occupancy_publish[MAX_AOA_ITEMS];
+static int g_occupancy_publish_count = 0;
+static time_t g_next_occupancy_publish_time = 0;
 static pthread_mutex_t g_publish_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Counter tracking structures
@@ -65,10 +91,43 @@ typedef struct {
 	int has_reference;
 } CounterState;
 
-static CounterState g_counters[10];
+static CounterState g_counters[MAX_AOA_ITEMS];
 static int g_counter_count = 0;
 static time_t g_last_save_time = 0;
 static pthread_mutex_t g_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+	char scenario[64];
+	char event_topic[128];
+	char start[40];
+	char end[40];
+	int min_human;
+	int min_car;
+	int min_bike;
+	int min_bus;
+	int min_truck;
+	int min_other;
+	int max_human;
+	int max_car;
+	int max_bike;
+	int max_bus;
+	int max_truck;
+	int max_other;
+	double average_human;
+	double average_car;
+	double average_bike;
+	double average_bus;
+	double average_truck;
+	double average_other;
+	time_t last_update;
+	int has_sample;
+} OccupancyState;
+
+static OccupancyState g_occupancy[MAX_AOA_ITEMS];
+static int g_occupancy_count = 0;
+static pthread_mutex_t g_occupancy_mutex = PTHREAD_MUTEX_INITIALIZER;
+static double Occupancy_Class_Value(const OccupancyState* occupancy, const char* occupancy_value, const char* class_name);
+static void Update_Occupancy_ACAP_Status(void);
 
 // Settings cache
 static char g_b100_ip[64] = "192.168.0.3";
@@ -77,7 +136,6 @@ static char g_callback_ip[64] = "192.168.0.2";
 static int g_callback_port = 80;
 static char g_callback_digest_user[32] = "aib100";
 static char g_callback_digest_password[32] = "aib100";
-static int g_lorawan_port = 10;
 static int g_health_check_interval = 60;
 
 // App start time for uptime calculation
@@ -85,11 +143,10 @@ static time_t g_app_start_time = 0;
 
 // Connection health-check state (all protected by g_health_mutex)
 // Every 10th uplink is sent confirmed to validate the link.
-// If no ACK within 4 minutes: send "Hello" on port 7 (up to 3 times).
-// After 3 failures: force a rejoin.
+// If no ACK is observed within 4 minutes, clear the pending confirmation state.
 static int g_unconf_count = 0;        // counts consecutive unconfirmed uplinks
 static int g_awaiting_confirm = 0;    // 1 while waiting for a confirmed ACK
-static int g_conf_trial_count = 0;    // number of Hello-probe retries attempted
+static int g_conf_trial_count = 0;    // reserved for future confirmation retry policy
 static time_t g_conf_sent_time = 0;   // when the last confirmed uplink was sent
 static pthread_mutex_t g_health_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -109,7 +166,7 @@ CounterState* Find_Or_Create_Counter(const char* scenario) {
 	}
 	
 	// Create new counter if space available
-	if (g_counter_count < 10) {
+	if (g_counter_count < MAX_AOA_ITEMS) {
 		CounterState* counter = &g_counters[g_counter_count];
 		memset(counter, 0, sizeof(CounterState));
 		strncpy(counter->scenario, scenario, sizeof(counter->scenario) - 1);
@@ -124,6 +181,434 @@ CounterState* Find_Or_Create_Counter(const char* scenario) {
 	return NULL;
 }
 
+OccupancyState* Find_Or_Create_Occupancy(const char* scenario) {
+	pthread_mutex_lock(&g_occupancy_mutex);
+	
+	for (int i = 0; i < g_occupancy_count; i++) {
+		if (strcmp(g_occupancy[i].scenario, scenario) == 0) {
+			pthread_mutex_unlock(&g_occupancy_mutex);
+			return &g_occupancy[i];
+		}
+	}
+	
+	if (g_occupancy_count < MAX_AOA_ITEMS) {
+		OccupancyState* occupancy = &g_occupancy[g_occupancy_count];
+		memset(occupancy, 0, sizeof(OccupancyState));
+		strncpy(occupancy->scenario, scenario, sizeof(occupancy->scenario) - 1);
+		g_occupancy_count++;
+		LOG("Created new occupancy state for scenario: %s\n", scenario);
+		pthread_mutex_unlock(&g_occupancy_mutex);
+		return occupancy;
+	}
+	
+	pthread_mutex_unlock(&g_occupancy_mutex);
+	LOG_WARN("Too many occupancy scenarios, cannot create for %s\n", scenario);
+	return NULL;
+}
+
+static int JSON_Int(cJSON* object, const char* key) {
+	cJSON* item = cJSON_GetObjectItem(object, key);
+	return item && cJSON_IsNumber(item) ? item->valueint : 0;
+}
+
+static double JSON_Double(cJSON* object, const char* key) {
+	cJSON* item = cJSON_GetObjectItem(object, key);
+	return item && cJSON_IsNumber(item) ? item->valuedouble : 0.0;
+}
+
+static void Copy_JSON_String(cJSON* object, const char* key, char* target, size_t target_size) {
+	cJSON* item = cJSON_GetObjectItem(object, key);
+	if (item && item->valuestring && target && target_size > 0) {
+		strncpy(target, item->valuestring, target_size - 1);
+		target[target_size - 1] = '\0';
+	}
+}
+
+static int String_Ends_With(const char* text, const char* suffix) {
+	if (!text || !suffix) return 0;
+	size_t text_len = strlen(text);
+	size_t suffix_len = strlen(suffix);
+	return text_len >= suffix_len && strcmp(text + text_len - suffix_len, suffix) == 0;
+}
+
+static int Is_Valid_Occupancy_Value(const char* value) {
+	return value &&
+	       (strcmp(value, "min") == 0 || strcmp(value, "max") == 0 || strcmp(value, "average") == 0);
+}
+
+static int Is_Occupancy_Scenario_Type(const char* scenario_type) {
+	return scenario_type &&
+	       (strcmp(scenario_type, "OccupancyInArea") == 0 || strcmp(scenario_type, "occupancyInArea") == 0);
+}
+
+static int Clamp_Publish_Interval(int minutes) {
+	if (minutes < 1) return 1;
+	if (minutes > 60) return 60;
+	return minutes;
+}
+
+static int Clamp_Publish_Port(int port) {
+	if (port < 0) return 0;
+	if (port > 15) return 15;
+	return port;
+}
+
+static int Class_Count(ClassSelection classes) {
+	return classes.human + classes.car + classes.bike + classes.bus + classes.truck + classes.other;
+}
+
+static void Load_Class_Selection(cJSON* classes_json, ClassSelection* classes) {
+	if (!classes_json || !classes) return;
+	cJSON* human = cJSON_GetObjectItem(classes_json, "human");
+	if (human) classes->human = cJSON_IsTrue(human);
+	cJSON* car = cJSON_GetObjectItem(classes_json, "car");
+	if (car) classes->car = cJSON_IsTrue(car);
+	cJSON* bike = cJSON_GetObjectItem(classes_json, "bike");
+	if (bike) classes->bike = cJSON_IsTrue(bike);
+	cJSON* bus = cJSON_GetObjectItem(classes_json, "bus");
+	if (bus) classes->bus = cJSON_IsTrue(bus);
+	cJSON* truck = cJSON_GetObjectItem(classes_json, "truck");
+	if (truck) classes->truck = cJSON_IsTrue(truck);
+	cJSON* other = cJSON_GetObjectItem(classes_json, "other");
+	if (other) classes->other = cJSON_IsTrue(other);
+}
+
+static void Load_Scenario_Publish_Config(cJSON* scenarios_json, ScenarioPublishConfig* configs, int* count, ClassSelection default_classes, const char* default_value) {
+	if (!configs || !count) return;
+	*count = 0;
+	if (!scenarios_json || !cJSON_IsObject(scenarios_json)) return;
+
+	cJSON* item = scenarios_json->child;
+	while (item && *count < MAX_AOA_ITEMS) {
+		if (item->string && cJSON_IsObject(item)) {
+			ScenarioPublishConfig* config = &configs[*count];
+			memset(config, 0, sizeof(ScenarioPublishConfig));
+			strncpy(config->scenario, item->string, sizeof(config->scenario) - 1);
+			config->classes = default_classes;
+			strncpy(config->value, default_value && Is_Valid_Occupancy_Value(default_value) ? default_value : "average", sizeof(config->value) - 1);
+			Load_Class_Selection(cJSON_GetObjectItem(item, "classes"), &config->classes);
+			cJSON* value = cJSON_GetObjectItem(item, "value");
+			if (value && value->valuestring && Is_Valid_Occupancy_Value(value->valuestring)) {
+				strncpy(config->value, value->valuestring, sizeof(config->value) - 1);
+				config->value[sizeof(config->value) - 1] = '\0';
+			}
+			(*count)++;
+		}
+		item = item->next;
+	}
+}
+
+static ScenarioPublishConfig* Find_Scenario_Config(ScenarioPublishConfig* configs, int count, const char* scenario) {
+	if (!configs || !scenario) return NULL;
+	for (int i = 0; i < count; i++) {
+		if (strcmp(configs[i].scenario, scenario) == 0) return &configs[i];
+	}
+	return NULL;
+}
+
+static ClassSelection Counting_Classes_For_Scenario(const char* scenario) {
+	ScenarioPublishConfig* config = Find_Scenario_Config(g_counting_publish, g_counting_publish_count, scenario);
+	return config ? config->classes : g_counting_classes;
+}
+
+static ScenarioPublishConfig Occupancy_Config_For_Scenario(const char* scenario) {
+	ScenarioPublishConfig result;
+	memset(&result, 0, sizeof(result));
+	if (scenario) strncpy(result.scenario, scenario, sizeof(result.scenario) - 1);
+	result.classes = g_occupancy_classes;
+	snprintf(result.value, sizeof(result.value), "%s", g_occupancy_value);
+	ScenarioPublishConfig* config = Find_Scenario_Config(g_occupancy_publish, g_occupancy_publish_count, scenario);
+	if (config) result = *config;
+	return result;
+}
+
+static void Add_Occupancy_Status_Label(cJSON* labels, const char* key, const char* label, double value) {
+	cJSON* item = cJSON_CreateObject();
+	cJSON_AddStringToObject(item, "key", key);
+	cJSON_AddStringToObject(item, "label", label);
+	cJSON_AddNumberToObject(item, "value", value);
+	cJSON_AddItemToArray(labels, item);
+}
+
+static void Add_Selected_Occupancy_Status_Labels(cJSON* labels, const OccupancyState* occupancy, ScenarioPublishConfig publish_config) {
+	if (publish_config.classes.human) Add_Occupancy_Status_Label(labels, "human", "Humans", Occupancy_Class_Value(occupancy, publish_config.value, "human"));
+	if (publish_config.classes.car) Add_Occupancy_Status_Label(labels, "car", "Cars", Occupancy_Class_Value(occupancy, publish_config.value, "car"));
+	if (publish_config.classes.bike) Add_Occupancy_Status_Label(labels, "bike", "Bikes", Occupancy_Class_Value(occupancy, publish_config.value, "bike"));
+	if (publish_config.classes.bus) Add_Occupancy_Status_Label(labels, "bus", "Buses", Occupancy_Class_Value(occupancy, publish_config.value, "bus"));
+	if (publish_config.classes.truck) Add_Occupancy_Status_Label(labels, "truck", "Trucks", Occupancy_Class_Value(occupancy, publish_config.value, "truck"));
+	if (publish_config.classes.other) Add_Occupancy_Status_Label(labels, "other", "Other", Occupancy_Class_Value(occupancy, publish_config.value, "other"));
+}
+
+static void Update_Occupancy_ACAP_Status(void) {
+	cJSON* areas = cJSON_CreateArray();
+	if (!areas) return;
+
+	pthread_mutex_lock(&g_publish_mutex);
+	pthread_mutex_lock(&g_occupancy_mutex);
+	for (int i = 0; i < g_occupancy_count; i++) {
+		OccupancyState* occupancy = &g_occupancy[i];
+		ScenarioPublishConfig publish_config = Occupancy_Config_For_Scenario(occupancy->scenario);
+		cJSON* area = cJSON_CreateObject();
+		cJSON_AddStringToObject(area, "scenario", occupancy->scenario);
+		cJSON_AddStringToObject(area, "event", occupancy->event_topic);
+		cJSON_AddBoolToObject(area, "hasSample", occupancy->has_sample);
+		cJSON_AddStringToObject(area, "timestamp", occupancy->end);
+		cJSON_AddStringToObject(area, "valueType", publish_config.value);
+		cJSON* labels = cJSON_CreateArray();
+		if (occupancy->has_sample) {
+			Add_Selected_Occupancy_Status_Labels(labels, occupancy, publish_config);
+		}
+		cJSON_AddItemToObject(area, "labels", labels);
+		cJSON_AddItemToArray(areas, area);
+	}
+	pthread_mutex_unlock(&g_occupancy_mutex);
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	ACAP_STATUS_SetObject("occupancy", "areas", areas);
+	cJSON_Delete(areas);
+}
+
+static void Load_Counting_Publish_Config(cJSON* config) {
+	if (!config) return;
+	cJSON* interval = cJSON_GetObjectItem(config, "intervalMinutes");
+	if (interval) g_counting_interval_minutes = Clamp_Publish_Interval(interval->valueint);
+	cJSON* port = cJSON_GetObjectItem(config, "port");
+	if (port) g_counting_port = Clamp_Publish_Port(port->valueint);
+	Load_Class_Selection(cJSON_GetObjectItem(config, "classes"), &g_counting_classes);
+	Load_Scenario_Publish_Config(cJSON_GetObjectItem(config, "scenarios"), g_counting_publish, &g_counting_publish_count, g_counting_classes, "average");
+}
+
+static void Load_Occupancy_Publish_Config(cJSON* config) {
+	if (!config) return;
+	cJSON* interval = cJSON_GetObjectItem(config, "intervalMinutes");
+	if (interval) g_occupancy_interval_minutes = Clamp_Publish_Interval(interval->valueint);
+	cJSON* port = cJSON_GetObjectItem(config, "port");
+	if (port) g_occupancy_port = Clamp_Publish_Port(port->valueint);
+	cJSON* value = cJSON_GetObjectItem(config, "value");
+	if (value && value->valuestring && Is_Valid_Occupancy_Value(value->valuestring)) {
+		strncpy(g_occupancy_value, value->valuestring, sizeof(g_occupancy_value) - 1);
+		g_occupancy_value[sizeof(g_occupancy_value) - 1] = '\0';
+	}
+	Load_Class_Selection(cJSON_GetObjectItem(config, "classes"), &g_occupancy_classes);
+	Load_Scenario_Publish_Config(cJSON_GetObjectItem(config, "scenarios"), g_occupancy_publish, &g_occupancy_publish_count, g_occupancy_classes, g_occupancy_value);
+}
+
+static cJSON* Ensure_Object(cJSON* parent, const char* key) {
+	cJSON* object = cJSON_GetObjectItem(parent, key);
+	if (!object || !cJSON_IsObject(object)) {
+		cJSON* replacement = cJSON_CreateObject();
+		if (object) cJSON_ReplaceItemInObject(parent, key, replacement);
+		else cJSON_AddItemToObject(parent, key, replacement);
+		object = replacement;
+	}
+	return object;
+}
+
+static void Set_Number(cJSON* parent, const char* key, int value) {
+	cJSON* item = cJSON_GetObjectItem(parent, key);
+	if (item) cJSON_ReplaceItemInObject(parent, key, cJSON_CreateNumber(value));
+	else cJSON_AddNumberToObject(parent, key, value);
+}
+
+static void Set_String(cJSON* parent, const char* key, const char* value) {
+	cJSON* item = cJSON_GetObjectItem(parent, key);
+	if (item) cJSON_ReplaceItemInObject(parent, key, cJSON_CreateString(value));
+	else cJSON_AddStringToObject(parent, key, value);
+}
+
+static void Set_Object_Duplicate(cJSON* parent, const char* key, cJSON* source) {
+	if (!source) return;
+	cJSON* copy = cJSON_Duplicate(source, 1);
+	if (!copy) return;
+	cJSON* item = cJSON_GetObjectItem(parent, key);
+	if (item) cJSON_ReplaceItemInObject(parent, key, copy);
+	else cJSON_AddItemToObject(parent, key, copy);
+}
+
+static cJSON* Class_Array_JSON(ClassSelection classes) {
+	cJSON* array = cJSON_CreateArray();
+	if (classes.human) cJSON_AddItemToArray(array, cJSON_CreateString("human"));
+	if (classes.car) cJSON_AddItemToArray(array, cJSON_CreateString("car"));
+	if (classes.bike) cJSON_AddItemToArray(array, cJSON_CreateString("bike"));
+	if (classes.bus) cJSON_AddItemToArray(array, cJSON_CreateString("bus"));
+	if (classes.truck) cJSON_AddItemToArray(array, cJSON_CreateString("truck"));
+	if (classes.other) cJSON_AddItemToArray(array, cJSON_CreateString("other"));
+	return array;
+}
+
+static int Definition_Array_Has_Name(cJSON* array, const char* name) {
+	if (!array || !name) return 0;
+	cJSON* item = NULL;
+	cJSON_ArrayForEach(item, array) {
+		cJSON* item_name = cJSON_GetObjectItem(item, "name");
+		if (item_name && item_name->valuestring && strcmp(item_name->valuestring, name) == 0) return 1;
+	}
+	return 0;
+}
+
+static void Reset_Publish_Schedule_Locked(void) {
+	time_t now = time(NULL);
+	g_next_counting_publish_time = g_counting_port > 0 ? now + (g_counting_interval_minutes * 60) : 0;
+	g_next_occupancy_publish_time = g_occupancy_port > 0 ? now + (g_occupancy_interval_minutes * 60) : 0;
+}
+
+static void Add_Decoder_Definition(cJSON* definitions, const char* name, const char* event, int port, const char* value, int value_type_code, ClassSelection classes) {
+	if (!definitions || !name) return;
+	cJSON* item = cJSON_CreateObject();
+	if (!item) return;
+	cJSON_AddStringToObject(item, "name", name);
+	if (event) cJSON_AddStringToObject(item, "event", event);
+	cJSON_AddNumberToObject(item, "port", port);
+	if (value) {
+		cJSON_AddStringToObject(item, "value", value);
+		cJSON_AddNumberToObject(item, "valueTypeCode", value_type_code);
+	}
+	cJSON_AddItemToObject(item, "classes", Class_Array_JSON(classes));
+	cJSON_AddItemToArray(definitions, item);
+}
+
+static void Migrate_Settings(cJSON* settings) {
+	if (!settings) return;
+
+	cJSON* saved = ACAP_FILE_Read("localdata/settings.json");
+	cJSON* saved_version_json = saved ? cJSON_GetObjectItem(saved, "settingsVersion") : NULL;
+	int saved_version = saved_version_json ? saved_version_json->valueint : (saved ? 1 : SETTINGS_VERSION);
+
+	if (saved_version >= SETTINGS_VERSION) {
+		Set_Number(settings, "settingsVersion", SETTINGS_VERSION);
+		cJSON* transmission = Ensure_Object(settings, "transmission");
+		Ensure_Object(Ensure_Object(transmission, "counting"), "scenarios");
+		Ensure_Object(Ensure_Object(transmission, "occupancy"), "scenarios");
+		if (saved) cJSON_Delete(saved);
+		return;
+	}
+
+	if (saved_version == 2) {
+		LOG("Migrating settings from version 2 to %d\n", SETTINGS_VERSION);
+		cJSON* transmission = Ensure_Object(settings, "transmission");
+		Ensure_Object(Ensure_Object(transmission, "counting"), "scenarios");
+		Ensure_Object(Ensure_Object(transmission, "occupancy"), "scenarios");
+		Set_Number(settings, "settingsVersion", SETTINGS_VERSION);
+		ACAP_FILE_Write("localdata/settings.json", settings);
+		if (saved) cJSON_Delete(saved);
+		return;
+	}
+
+	LOG("Migrating settings from version %d to %d\n", saved_version, SETTINGS_VERSION);
+
+	cJSON* transmission = Ensure_Object(settings, "transmission");
+	cJSON* counting = Ensure_Object(transmission, "counting");
+	cJSON* occupancy = Ensure_Object(transmission, "occupancy");
+	cJSON* old_transmission = saved ? cJSON_GetObjectItem(saved, "transmission") : NULL;
+	cJSON* old_lorawan = saved ? cJSON_GetObjectItem(saved, "lorawan") : NULL;
+
+	int interval = 15;
+	int enabled = 1;
+	int old_port = 10;
+	const char* occupancy_value = "average";
+	cJSON* old_classes = NULL;
+
+	if (old_transmission) {
+		cJSON* interval_json = cJSON_GetObjectItem(old_transmission, "intervalMinutes");
+		if (interval_json) interval = Clamp_Publish_Interval(interval_json->valueint);
+		cJSON* enabled_json = cJSON_GetObjectItem(old_transmission, "enabled");
+		if (enabled_json) enabled = cJSON_IsTrue(enabled_json);
+		cJSON* old_value = cJSON_GetObjectItem(old_transmission, "occupancyValue");
+		if (old_value && old_value->valuestring && Is_Valid_Occupancy_Value(old_value->valuestring)) occupancy_value = old_value->valuestring;
+		old_classes = cJSON_GetObjectItem(old_transmission, "classes");
+	}
+	if (old_lorawan) {
+		cJSON* port_json = cJSON_GetObjectItem(old_lorawan, "port");
+		if (port_json) old_port = Clamp_Publish_Port(port_json->valueint);
+	}
+
+	Set_Number(counting, "intervalMinutes", interval);
+	Set_Number(counting, "port", enabled ? old_port : 0);
+	if (old_classes) Set_Object_Duplicate(counting, "classes", old_classes);
+	Ensure_Object(counting, "scenarios");
+
+	Set_Number(occupancy, "intervalMinutes", interval);
+	Set_Number(occupancy, "port", 0);
+	Set_String(occupancy, "value", occupancy_value);
+	if (old_classes) Set_Object_Duplicate(occupancy, "classes", old_classes);
+	Ensure_Object(occupancy, "scenarios");
+
+	Set_Number(settings, "settingsVersion", SETTINGS_VERSION);
+	ACAP_FILE_Write("localdata/settings.json", settings);
+
+	if (saved) cJSON_Delete(saved);
+}
+
+static void Process_Occupancy_Event(cJSON* event) {
+	cJSON* scenario_type = cJSON_GetObjectItem(event, "scenarioType");
+	if (!scenario_type || !scenario_type->valuestring || !Is_Occupancy_Scenario_Type(scenario_type->valuestring)) {
+		return;
+	}
+
+	cJSON* scenario_name = cJSON_GetObjectItem(event, "scenario");
+	if (!scenario_name || !scenario_name->valuestring) {
+		LOG_WARN("OccupancyInArea event missing scenario name\n");
+		return;
+	}
+	cJSON* event_topic = cJSON_GetObjectItem(event, "event");
+	if (!event_topic || !event_topic->valuestring || !String_Ends_With(event_topic->valuestring, "EventInterval")) {
+		return;
+	}
+
+	char* event_json = cJSON_PrintUnformatted(event);
+	if (event_json) {
+		LOG("OccupancyInArea raw event: %s\n", event_json);
+		free(event_json);
+	}
+
+	cJSON* end = cJSON_GetObjectItem(event, "end");
+	if (!end || !end->valuestring) {
+		LOG_WARN("OccupancyInArea event for %s missing end timestamp - ignored\n", scenario_name->valuestring);
+		return;
+	}
+	
+	OccupancyState* occupancy = Find_Or_Create_Occupancy(scenario_name->valuestring);
+	if (!occupancy) {
+		return;
+	}
+	
+	pthread_mutex_lock(&g_occupancy_mutex);
+	
+	Copy_JSON_String(event, "start", occupancy->start, sizeof(occupancy->start));
+	Copy_JSON_String(event, "end", occupancy->end, sizeof(occupancy->end));
+	Copy_JSON_String(event, "event", occupancy->event_topic, sizeof(occupancy->event_topic));
+	
+	occupancy->min_human = JSON_Int(event, "minHuman");
+	occupancy->min_car = JSON_Int(event, "minCar");
+	occupancy->min_bike = JSON_Int(event, "minBike");
+	occupancy->min_bus = JSON_Int(event, "minBus");
+	occupancy->min_truck = JSON_Int(event, "minTruck");
+	occupancy->min_other = JSON_Int(event, "minOtherVehicle");
+	occupancy->max_human = JSON_Int(event, "maxHuman");
+	occupancy->max_car = JSON_Int(event, "maxCar");
+	occupancy->max_bike = JSON_Int(event, "maxBike");
+	occupancy->max_bus = JSON_Int(event, "maxBus");
+	occupancy->max_truck = JSON_Int(event, "maxTruck");
+	occupancy->max_other = JSON_Int(event, "maxOtherVehicle");
+	occupancy->average_human = JSON_Double(event, "averageHuman");
+	occupancy->average_car = JSON_Double(event, "averageCar");
+	occupancy->average_bike = JSON_Double(event, "averageBike");
+	occupancy->average_bus = JSON_Double(event, "averageBus");
+	occupancy->average_truck = JSON_Double(event, "averageTruck");
+	occupancy->average_other = JSON_Double(event, "averageOtherVehicle");
+	occupancy->last_update = time(NULL);
+	occupancy->has_sample = 1;
+	
+	LOG("Occupancy %s event end=%s: car min=%d max=%d avg=%.2f, human min=%d max=%d avg=%.2f\n",
+	    occupancy->scenario,
+	    occupancy->end,
+	    occupancy->min_car, occupancy->max_car, occupancy->average_car,
+	    occupancy->min_human, occupancy->max_human, occupancy->average_human);
+	
+	pthread_mutex_unlock(&g_occupancy_mutex);
+	Update_Occupancy_ACAP_Status();
+}
+
 void Load_Counters_From_File() {
 	pthread_mutex_lock(&g_counter_mutex);
 	
@@ -136,7 +621,7 @@ void Load_Counters_From_File() {
 	
 	g_counter_count = 0;
 	cJSON* counter_item = data->child;
-	while (counter_item && g_counter_count < 10) {
+	while (counter_item && g_counter_count < MAX_AOA_ITEMS) {
 		CounterState* counter = &g_counters[g_counter_count];
 		memset(counter, 0, sizeof(CounterState));
 		
@@ -309,11 +794,19 @@ void Sync_Counters_With_AOA_List(cJSON* scenario_array) {
 void
 AOA_Event_Callback(cJSON *event, void* userdata) {
 
-	// Only process CrosslineCounting events
 	cJSON* scenarioType = cJSON_GetObjectItem(event, "scenarioType");
-	if (!scenarioType || !scenarioType->valuestring || 
-	    strcmp(scenarioType->valuestring, "CrosslineCounting") != 0) {
-		return;  // Ignore non-counter events
+	if (!scenarioType || !scenarioType->valuestring) {
+		return;
+	}
+
+	if (Is_Occupancy_Scenario_Type(scenarioType->valuestring)) {
+		Process_Occupancy_Event(event);
+		return;
+	}
+
+	// Only process CrosslineCounting events below
+	if (strcmp(scenarioType->valuestring, "CrosslineCounting") != 0) {
+		return;
 	}
 	
 	// Extract scenario name
@@ -485,48 +978,29 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 		g_callbacks_configured = 0;
 	}
 
-	if (strcmp(service, "lorawan") == 0) {
-		cJSON* port = cJSON_GetObjectItem(data, "port");
-		if (port) {
-			g_lorawan_port = port->valueint;
-			if (g_lorawan_port < 1) g_lorawan_port = 1;
-			if (g_lorawan_port > 223) g_lorawan_port = 223;
-			LOG("Settings: LoRaWAN port updated to %d\n", g_lorawan_port);
-		}
-	}
-
 	if (strcmp(service, "transmission") == 0) {
-		cJSON* interval = cJSON_GetObjectItem(data, "intervalMinutes");
-		if (interval) {
-			pthread_mutex_lock(&g_publish_mutex);
-			g_publish_interval_minutes = interval->valueint;
-			if (g_publish_interval_minutes < 1) g_publish_interval_minutes = 1;
-			if (g_publish_interval_minutes > 60) g_publish_interval_minutes = 60;
-			pthread_mutex_unlock(&g_publish_mutex);
+		int refresh_occupancy_status = 0;
+		pthread_mutex_lock(&g_publish_mutex);
+		cJSON* counting = cJSON_GetObjectItem(data, "counting");
+		cJSON* occupancy = cJSON_GetObjectItem(data, "occupancy");
+		if (counting || occupancy) {
+			Load_Counting_Publish_Config(counting);
+			Load_Occupancy_Publish_Config(occupancy);
+			refresh_occupancy_status = occupancy != NULL;
+		} else {
+			Load_Counting_Publish_Config(data);
+			cJSON* old_enabled = cJSON_GetObjectItem(data, "enabled");
+			if (old_enabled && !cJSON_IsTrue(old_enabled)) g_counting_port = 0;
+			cJSON* old_value = cJSON_GetObjectItem(data, "occupancyValue");
+			if (old_value && old_value->valuestring && Is_Valid_Occupancy_Value(old_value->valuestring)) {
+				strncpy(g_occupancy_value, old_value->valuestring, sizeof(g_occupancy_value) - 1);
+				g_occupancy_value[sizeof(g_occupancy_value) - 1] = '\0';
+				refresh_occupancy_status = 1;
+			}
 		}
-		cJSON* enabled = cJSON_GetObjectItem(data, "enabled");
-		if (enabled) {
-			pthread_mutex_lock(&g_publish_mutex);
-			g_publish_enabled = cJSON_IsTrue(enabled);
-			pthread_mutex_unlock(&g_publish_mutex);
-		}
-		cJSON* classes = cJSON_GetObjectItem(data, "classes");
-		if (classes) {
-			pthread_mutex_lock(&g_publish_mutex);
-			cJSON* human = cJSON_GetObjectItem(classes, "human");
-			if (human) g_publish_human = cJSON_IsTrue(human);
-			cJSON* car = cJSON_GetObjectItem(classes, "car");
-			if (car) g_publish_car = cJSON_IsTrue(car);
-			cJSON* bike = cJSON_GetObjectItem(classes, "bike");
-			if (bike) g_publish_bike = cJSON_IsTrue(bike);
-			cJSON* bus = cJSON_GetObjectItem(classes, "bus");
-			if (bus) g_publish_bus = cJSON_IsTrue(bus);
-			cJSON* truck = cJSON_GetObjectItem(classes, "truck");
-			if (truck) g_publish_truck = cJSON_IsTrue(truck);
-			cJSON* other = cJSON_GetObjectItem(classes, "other");
-			if (other) g_publish_other = cJSON_IsTrue(other);
-			pthread_mutex_unlock(&g_publish_mutex);
-		}
+		Reset_Publish_Schedule_Locked();
+		pthread_mutex_unlock(&g_publish_mutex);
+		if (refresh_occupancy_status) Update_Occupancy_ACAP_Status();
 	}
 
 	if (strcmp(service, "polling") == 0) {
@@ -686,14 +1160,15 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 					int minutes = value;
 					if (minutes < 5)  minutes = 5;
 					if (minutes > 60) minutes = 60;
-					LOG("Downlink: Set publish interval to %d minutes\n", minutes);
+					LOG("Downlink: Set counting publish interval to %d minutes\n", minutes);
 					pthread_mutex_lock(&g_publish_mutex);
-					g_publish_interval_minutes = minutes;
+					g_counting_interval_minutes = minutes;
 					pthread_mutex_unlock(&g_publish_mutex);
 					if (settings_obj) {
 						cJSON* trans = cJSON_GetObjectItem(settings_obj, "transmission");
 						if (trans) {
-							cJSON* iv = cJSON_GetObjectItem(trans, "intervalMinutes");
+							cJSON* counting = cJSON_GetObjectItem(trans, "counting");
+							cJSON* iv = counting ? cJSON_GetObjectItem(counting, "intervalMinutes") : cJSON_GetObjectItem(trans, "intervalMinutes");
 							if (iv) { iv->valueint = minutes; iv->valuedouble = minutes; }
 							ACAP_FILE_Write("localdata/settings.json", settings_obj);
 						}
@@ -778,16 +1253,14 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				break;
 			}
 			case 0x03: {
-				// Signal quality snapshot → reply on port 7
 				B100_Status* s = B100_Get_Status();
 				char info[128] = {0};
 				snprintf(info, sizeof(info), "DR%d,%dB,%.0fdBm,%.1fdB,%uup,%udn",
 				         s->dataRate, s->maxPayload,
 				         s->rssi, s->snr,
 				         s->fcntUp, s->fcntDown);
-				LOG("Downlink: Signal Quality reply: %s\n", info);
-				if (!B100_Send(info, 7, 0))
-					LOG_WARN("Downlink: Signal Quality send failed: %s\n", B100_Get_Last_Error());
+				LOG("Downlink: Signal Quality requested: %s\n", info);
+				ACAP_STATUS_SetString("lorawan", "signalQuality", info);
 				break;
 			}
 			default:
@@ -819,6 +1292,8 @@ Update_Bridge_ACAP_Status(B100_Status* status) {
 	ACAP_STATUS_SetBool("bridge", "dhcpEnabled", status->dhcpEnabled);
 	ACAP_STATUS_SetBool("bridge", "mqttEnabled", status->mqttEnabled);
 	ACAP_STATUS_SetBool("bridge", "httpApiEnabled", status->httpApiEnabled);
+	if (status->callbackStatus[0])
+		ACAP_STATUS_SetString("bridge", "callbackStatus", status->callbackStatus);
 	if (status->devEUI[0])
 		ACAP_STATUS_SetString("bridge", "devEUI", status->devEUI);
 	if (status->devAddr != 0) {
@@ -878,6 +1353,27 @@ B100_Status_Handler(B100_Status* status) {
 	ACAP_STATUS_SetBool("bridge", "callbacksActive", g_callbacks_configured);
 }
 
+static int
+Configure_B100_Callbacks(void) {
+	const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
+	char status_uri[64], receive_uri[64], gps_uri[64];
+	snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
+	snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
+	snprintf(gps_uri, sizeof(gps_uri), "/local/%s/b100_gps", APP_PACKAGE);
+
+	if (!B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri,
+	                             g_callback_digest_user, g_callback_digest_password)) {
+		g_callbacks_configured = 0;
+		return 0;
+	}
+
+	g_callbacks_configured = 1;
+	B100_Configure_GPS_Callback(gps_uri, 60);
+	ACAP_STATUS_SetString("app", "status", "Running");
+	ACAP_STATUS_SetBool("bridge", "callbacksActive", 1);
+	return 1;
+}
+
 // ==================================================================
 // Background Threads
 // ==================================================================
@@ -890,6 +1386,11 @@ Health_Monitor_Thread(void* arg) {
 		// Refresh device info periodically via /info (always available)
 		B100_Fetch_Device_Info();
 		B100_Status* status = B100_Get_Status();
+		int callback_failed = strcmp(status->callbackStatus, "fail") == 0;
+		time_t now = time(NULL);
+		int stale_threshold = g_health_check_interval * 2;
+		if (stale_threshold < 180) stale_threshold = 180;
+		int callback_stale = status->timestamp == 0 || (now - (time_t)status->timestamp) > stale_threshold;
 
 		if (status->connected != B100_CONNECTED) {
 			LOG_WARN("Health check: B100 not reachable\n");
@@ -905,25 +1406,15 @@ Health_Monitor_Thread(void* arg) {
 		ACAP_STATUS_SetBool("bridge", "callbacksActive", g_callbacks_configured);
 		ACAP_STATUS_SetBool("lorawan", "connected", 1);
 
-		// If callbacks are not yet configured, or if B100 reports http_api_enable=0
-		// (e.g. after a B100 restart or external reconfiguration), reapply.
-		if (!g_callbacks_configured || !status->httpApiEnabled) {
+		// If callbacks are not yet configured, if B100 reports http_api_enable=0,
+		// or if callback delivery has failed and no callback has arrived recently,
+		// reapply the callback configuration.
+		if (!g_callbacks_configured || !status->httpApiEnabled || (callback_failed && callback_stale)) {
 			if (g_callbacks_configured && !status->httpApiEnabled)
 				LOG_WARN("B100 http_api_enable is 0 — reapplying callback configuration\n");
-			g_callbacks_configured = 0;
-			const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
-			char status_uri[64], receive_uri[64];
-			snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
-			snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
-			if (B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri,
-			                           g_callback_digest_user, g_callback_digest_password)) {
-				g_callbacks_configured = 1;
-				// Also re-apply GPS callback so GPS push stays active
-				char gps_uri[64];
-				snprintf(gps_uri, sizeof(gps_uri), "/local/%s/b100_gps", APP_PACKAGE);
-				B100_Configure_GPS_Callback(gps_uri, 60);
-				ACAP_STATUS_SetString("app", "status", "Running");
-			} else {
+			if (callback_failed && callback_stale)
+				LOG_WARN("B100 callback delivery failed — reapplying callback configuration\n");
+			if (!Configure_B100_Callbacks()) {
 				LOG_WARN("Failed to configure B100 callbacks\n");
 			}
 		}
@@ -982,32 +1473,18 @@ Health_Monitor_Thread(void* arg) {
 			goto sleep_and_continue;
 		}
 
-		// Confirmation timeout: if a confirmed uplink got no ACK within 4 minutes,
-		// probe with "Hello" on port 7 (up to 3 retries), then force a rejoin.
+		// Confirmation timeout: do not send probe traffic; just stop waiting for this ACK.
 		pthread_mutex_lock(&g_health_mutex);
 		int waiting = g_awaiting_confirm;
-		int trials  = g_conf_trial_count;
 		time_t sent = g_conf_sent_time;
 		pthread_mutex_unlock(&g_health_mutex);
 
 		if (waiting && (time(NULL) - sent) > 240) {
-			if (trials < 3) {
-				LOG("Confirmation timeout - sending Hello probe %d/3 on port 7\n", trials + 1);
-				B100_Send("Hello", 7, 1);
-				pthread_mutex_lock(&g_health_mutex);
-				g_conf_trial_count++;
-				g_conf_sent_time = time(NULL);
-				pthread_mutex_unlock(&g_health_mutex);
-			} else {
-				LOG("3 confirmation failures - forcing rejoin\n");
-				ACAP_STATUS_SetString("lorawan", "statusText", "Link lost - rejoining");
-				B100_Join_Auto();
-				pthread_mutex_lock(&g_health_mutex);
-				g_awaiting_confirm = 0;
-				g_conf_trial_count = 0;
-				g_unconf_count = 0;
-				pthread_mutex_unlock(&g_health_mutex);
-			}
+			LOG("LoRa: Confirmed uplink ACK not observed within timeout\n");
+			pthread_mutex_lock(&g_health_mutex);
+			g_awaiting_confirm = 0;
+			g_conf_trial_count = 0;
+			pthread_mutex_unlock(&g_health_mutex);
 		}
 
 	sleep_and_continue:
@@ -1139,6 +1616,7 @@ HTTP_Endpoint_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Reques
 	for (int i = 0; i < g_counter_count; i++) {
 		CounterState* counter = &g_counters[i];
 		cJSON* item = cJSON_CreateObject();
+		ClassSelection classes = Counting_Classes_For_Scenario(counter->scenario);
 		
 		cJSON_AddStringToObject(item, "scenario", counter->scenario);
 		cJSON_AddNumberToObject(item, "total", counter->internal_total);
@@ -1148,22 +1626,96 @@ HTTP_Endpoint_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Reques
 		cJSON_AddNumberToObject(item, "bus", counter->internal_bus);
 		cJSON_AddNumberToObject(item, "truck", counter->internal_truck);
 		cJSON_AddNumberToObject(item, "other", counter->internal_other);
+		cJSON* publish_classes = cJSON_CreateObject();
+		cJSON_AddBoolToObject(publish_classes, "human", classes.human);
+		cJSON_AddBoolToObject(publish_classes, "car", classes.car);
+		cJSON_AddBoolToObject(publish_classes, "bike", classes.bike);
+		cJSON_AddBoolToObject(publish_classes, "bus", classes.bus);
+		cJSON_AddBoolToObject(publish_classes, "truck", classes.truck);
+		cJSON_AddBoolToObject(publish_classes, "other", classes.other);
+		cJSON_AddItemToObject(item, "publishClasses", publish_classes);
 		
 		cJSON_AddItemToArray(counters_array, item);
 	}
 	
 	pthread_mutex_unlock(&g_counter_mutex);
+
+	pthread_mutex_lock(&g_occupancy_mutex);
+	cJSON* occupancy_array = cJSON_CreateArray();
+	for (int i = 0; i < g_occupancy_count; i++) {
+		OccupancyState* occupancy = &g_occupancy[i];
+		cJSON* item = cJSON_CreateObject();
+		ScenarioPublishConfig publish_config = Occupancy_Config_For_Scenario(occupancy->scenario);
+		
+		cJSON_AddStringToObject(item, "scenario", occupancy->scenario);
+		cJSON_AddStringToObject(item, "start", occupancy->start);
+		cJSON_AddStringToObject(item, "end", occupancy->end);
+		cJSON_AddNumberToObject(item, "lastUpdate", (double)occupancy->last_update);
+		cJSON_AddBoolToObject(item, "hasSample", occupancy->has_sample);
+		cJSON_AddNumberToObject(item, "minHuman", occupancy->min_human);
+		cJSON_AddNumberToObject(item, "minCar", occupancy->min_car);
+		cJSON_AddNumberToObject(item, "minBike", occupancy->min_bike);
+		cJSON_AddNumberToObject(item, "minBus", occupancy->min_bus);
+		cJSON_AddNumberToObject(item, "minTruck", occupancy->min_truck);
+		cJSON_AddNumberToObject(item, "minOther", occupancy->min_other);
+		cJSON_AddNumberToObject(item, "maxHuman", occupancy->max_human);
+		cJSON_AddNumberToObject(item, "maxCar", occupancy->max_car);
+		cJSON_AddNumberToObject(item, "maxBike", occupancy->max_bike);
+		cJSON_AddNumberToObject(item, "maxBus", occupancy->max_bus);
+		cJSON_AddNumberToObject(item, "maxTruck", occupancy->max_truck);
+		cJSON_AddNumberToObject(item, "maxOther", occupancy->max_other);
+		cJSON_AddNumberToObject(item, "averageHuman", occupancy->average_human);
+		cJSON_AddNumberToObject(item, "averageCar", occupancy->average_car);
+		cJSON_AddNumberToObject(item, "averageBike", occupancy->average_bike);
+		cJSON_AddNumberToObject(item, "averageBus", occupancy->average_bus);
+		cJSON_AddNumberToObject(item, "averageTruck", occupancy->average_truck);
+		cJSON_AddNumberToObject(item, "averageOther", occupancy->average_other);
+		cJSON_AddStringToObject(item, "selectedValueType", publish_config.value);
+		cJSON_AddNumberToObject(item, "selectedHuman", Occupancy_Class_Value(occupancy, publish_config.value, "human"));
+		cJSON_AddNumberToObject(item, "selectedCar", Occupancy_Class_Value(occupancy, publish_config.value, "car"));
+		cJSON_AddNumberToObject(item, "selectedBike", Occupancy_Class_Value(occupancy, publish_config.value, "bike"));
+		cJSON_AddNumberToObject(item, "selectedBus", Occupancy_Class_Value(occupancy, publish_config.value, "bus"));
+		cJSON_AddNumberToObject(item, "selectedTruck", Occupancy_Class_Value(occupancy, publish_config.value, "truck"));
+		cJSON_AddNumberToObject(item, "selectedOther", Occupancy_Class_Value(occupancy, publish_config.value, "other"));
+		cJSON* publish_classes = cJSON_CreateObject();
+		cJSON_AddBoolToObject(publish_classes, "human", publish_config.classes.human);
+		cJSON_AddBoolToObject(publish_classes, "car", publish_config.classes.car);
+		cJSON_AddBoolToObject(publish_classes, "bike", publish_config.classes.bike);
+		cJSON_AddBoolToObject(publish_classes, "bus", publish_config.classes.bus);
+		cJSON_AddBoolToObject(publish_classes, "truck", publish_config.classes.truck);
+		cJSON_AddBoolToObject(publish_classes, "other", publish_config.classes.other);
+		cJSON_AddItemToObject(item, "publishClasses", publish_classes);
+		
+		cJSON_AddItemToArray(occupancy_array, item);
+	}
+	pthread_mutex_unlock(&g_occupancy_mutex);
 	
 	// Add publishing info
 	pthread_mutex_lock(&g_publish_mutex);
 	cJSON_AddItemToObject(root, "counters", counters_array);
-	cJSON_AddBoolToObject(root, "publishEnabled", g_publish_enabled);
-	cJSON_AddNumberToObject(root, "publishInterval", g_publish_interval_minutes);
-	cJSON_AddNumberToObject(root, "nextPublishTime", (double)g_next_publish_time);
+	cJSON_AddItemToObject(root, "occupancy", occupancy_array);
 	time_t now = time(NULL);
-	int seconds_until_publish = g_next_publish_time > now ? (int)(g_next_publish_time - now) : 0;
-	cJSON_AddNumberToObject(root, "secondsUntilPublish", seconds_until_publish);
+	cJSON* publish = cJSON_CreateObject();
+	cJSON* counting = cJSON_CreateObject();
+	cJSON* occupancy = cJSON_CreateObject();
+	cJSON_AddNumberToObject(counting, "port", g_counting_port);
+	cJSON_AddNumberToObject(counting, "intervalMinutes", g_counting_interval_minutes);
+	cJSON_AddNumberToObject(counting, "nextPublishTime", (double)g_next_counting_publish_time);
+	cJSON_AddNumberToObject(counting, "secondsUntilPublish", g_counting_port > 0 && g_next_counting_publish_time > now ? (int)(g_next_counting_publish_time - now) : 0);
+	cJSON_AddNumberToObject(occupancy, "port", g_occupancy_port);
+	cJSON_AddNumberToObject(occupancy, "intervalMinutes", g_occupancy_interval_minutes);
+	cJSON_AddStringToObject(occupancy, "value", g_occupancy_value);
+	cJSON_AddNumberToObject(occupancy, "nextPublishTime", (double)g_next_occupancy_publish_time);
+	cJSON_AddNumberToObject(occupancy, "secondsUntilPublish", g_occupancy_port > 0 && g_next_occupancy_publish_time > now ? (int)(g_next_occupancy_publish_time - now) : 0);
+	cJSON_AddItemToObject(publish, "counting", counting);
+	cJSON_AddItemToObject(publish, "occupancy", occupancy);
+	cJSON_AddItemToObject(root, "publish", publish);
 	pthread_mutex_unlock(&g_publish_mutex);
+
+	pthread_mutex_lock(&g_publish_log_mutex);
+	cJSON* publish_log = g_publish_log ? cJSON_Duplicate(g_publish_log, 1) : cJSON_CreateArray();
+	cJSON_AddItemToObject(root, "publishLog", publish_log ? publish_log : cJSON_CreateArray());
+	pthread_mutex_unlock(&g_publish_log_mutex);
 	
 	ACAP_HTTP_Respond_JSON(response, root);
 	cJSON_Delete(root);
@@ -1173,82 +1725,123 @@ HTTP_Endpoint_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Reques
 // LoRa Publishing — sends binary counter data directly via byte array
 // ==================================================================
 
-int Publish_Counters_To_LoRa() {
-	pthread_mutex_lock(&g_counter_mutex);
-	
-	// Check if we have counters
-	if (g_counter_count == 0) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("No counters to publish\n");
-		return 0;
+static void Append_U16(unsigned char* buffer, size_t* offset, uint16_t value) {
+	buffer[(*offset)++] = value & 0xFF;
+	buffer[(*offset)++] = (value >> 8) & 0xFF;
+}
+
+static void Append_U8(unsigned char* buffer, size_t* offset, uint8_t value) {
+	buffer[(*offset)++] = value;
+}
+
+static char* Bytes_To_Hex_String(const unsigned char* data, size_t length) {
+	if (!data && length > 0) return NULL;
+	char* hex = malloc((length * 2) + 1);
+	if (!hex) return NULL;
+	for (size_t i = 0; i < length; i++) {
+		snprintf(hex + (i * 2), 3, "%02X", data[i]);
 	}
-	
-	// Count how many classes are enabled
-	pthread_mutex_lock(&g_publish_mutex);
-	int class_count = g_publish_human + g_publish_car + g_publish_bike + 
-	                  g_publish_bus + g_publish_truck + g_publish_other;
-	pthread_mutex_unlock(&g_publish_mutex);
-	
-	if (class_count == 0) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("No classes selected for publishing\n");
-		return 0;
+	hex[length * 2] = '\0';
+	return hex;
+}
+
+static void Record_Publish_Log(int port, const unsigned char* data, size_t length) {
+	char* hex = Bytes_To_Hex_String(data, length);
+	if (!hex) return;
+
+	time_t now = time(NULL);
+	struct tm local_time;
+	localtime_r(&now, &local_time);
+	char date_text[16];
+	char time_text[16];
+	strftime(date_text, sizeof(date_text), "%Y-%m-%d", &local_time);
+	strftime(time_text, sizeof(time_text), "%H:%M:%S", &local_time);
+
+	cJSON* entry = cJSON_CreateObject();
+	if (!entry) {
+		free(hex);
+		return;
 	}
-	
-	// Calculate buffer size: counter_count * class_count * 2 bytes
-	size_t buffer_size = g_counter_count * class_count * 2;
-	unsigned char* buffer = malloc(buffer_size);
-	if (!buffer) {
-		pthread_mutex_unlock(&g_counter_mutex);
-		LOG_WARN("Failed to allocate buffer\n");
-		return 0;
+	cJSON_AddStringToObject(entry, "date", date_text);
+	cJSON_AddStringToObject(entry, "time", time_text);
+	cJSON_AddNumberToObject(entry, "port", port);
+	cJSON_AddStringToObject(entry, "payload", hex);
+	free(hex);
+
+	pthread_mutex_lock(&g_publish_log_mutex);
+	if (!g_publish_log) g_publish_log = cJSON_CreateArray();
+	if (!g_publish_log) {
+		pthread_mutex_unlock(&g_publish_log_mutex);
+		cJSON_Delete(entry);
+		return;
 	}
-	
-	// Fill buffer with counter values (16-bit unsigned, little-endian)
-	size_t offset = 0;
-	for (int i = 0; i < g_counter_count; i++) {
-		CounterState* counter = &g_counters[i];
-		
-		pthread_mutex_lock(&g_publish_mutex);
-		if (g_publish_human) {
-			uint16_t val = counter->internal_human & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_car) {
-			uint16_t val = counter->internal_car & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_bike) {
-			uint16_t val = counter->internal_bike & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_bus) {
-			uint16_t val = counter->internal_bus & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_truck) {
-			uint16_t val = counter->internal_truck & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		if (g_publish_other) {
-			uint16_t val = counter->internal_other & 0xFFFF;
-			buffer[offset++] = val & 0xFF;
-			buffer[offset++] = (val >> 8) & 0xFF;
-		}
-		pthread_mutex_unlock(&g_publish_mutex);
+	cJSON_InsertItemInArray(g_publish_log, 0, entry);
+	while (cJSON_GetArraySize(g_publish_log) > PUBLISH_LOG_MAX) {
+		cJSON_DeleteItemFromArray(g_publish_log, cJSON_GetArraySize(g_publish_log) - 1);
 	}
-	
-	pthread_mutex_unlock(&g_counter_mutex);
-	
-	// Decide confirmed/unconfirmed: every 10th uplink is confirmed for link health.
+	pthread_mutex_unlock(&g_publish_log_mutex);
+}
+
+static uint16_t Wrap_U16_Int(int value) {
+	if (value < 0) return 0;
+	return (uint16_t)(value & 0xFFFF);
+}
+
+static uint8_t Encode_Occupancy_U8(double value) {
+	double rounded = round(value);
+	if (rounded < 0.0) return 0;
+	if (rounded > 255.0) return 255;
+	return (uint8_t)rounded;
+}
+
+static uint8_t Occupancy_Value_Type_Code(const char* value_type) {
+	if (value_type && strcmp(value_type, "min") == 0) return 1;
+	if (value_type && strcmp(value_type, "average") == 0) return 2;
+	return 0;
+}
+
+static double Occupancy_Class_Value(const OccupancyState* occupancy, const char* occupancy_value, const char* class_name) {
+	if (!occupancy || !occupancy_value || !class_name) return 0.0;
+
+	if (strcmp(class_name, "human") == 0) {
+		if (strcmp(occupancy_value, "min") == 0) return occupancy->min_human;
+		if (strcmp(occupancy_value, "max") == 0) return occupancy->max_human;
+		return occupancy->average_human;
+	}
+	if (strcmp(class_name, "car") == 0) {
+		if (strcmp(occupancy_value, "min") == 0) return occupancy->min_car;
+		if (strcmp(occupancy_value, "max") == 0) return occupancy->max_car;
+		return occupancy->average_car;
+	}
+	if (strcmp(class_name, "bike") == 0) {
+		if (strcmp(occupancy_value, "min") == 0) return occupancy->min_bike;
+		if (strcmp(occupancy_value, "max") == 0) return occupancy->max_bike;
+		return occupancy->average_bike;
+	}
+	if (strcmp(class_name, "bus") == 0) {
+		if (strcmp(occupancy_value, "min") == 0) return occupancy->min_bus;
+		if (strcmp(occupancy_value, "max") == 0) return occupancy->max_bus;
+		return occupancy->average_bus;
+	}
+	if (strcmp(class_name, "truck") == 0) {
+		if (strcmp(occupancy_value, "min") == 0) return occupancy->min_truck;
+		if (strcmp(occupancy_value, "max") == 0) return occupancy->max_truck;
+		return occupancy->average_truck;
+	}
+	if (strcmp(class_name, "other") == 0) {
+		if (strcmp(occupancy_value, "min") == 0) return occupancy->min_other;
+		if (strcmp(occupancy_value, "max") == 0) return occupancy->max_other;
+		return occupancy->average_other;
+	}
+
+	return 0.0;
+}
+
+static int Next_Confirmed_Flag(void) {
+	int use_confirmed = 0;
 	pthread_mutex_lock(&g_health_mutex);
 	g_unconf_count++;
-	int use_confirmed = (g_unconf_count >= 10) ? 1 : 0;
+	use_confirmed = (g_unconf_count >= 10) ? 1 : 0;
 	if (use_confirmed) {
 		g_unconf_count = 0;
 		g_awaiting_confirm = 1;
@@ -1257,21 +1850,168 @@ int Publish_Counters_To_LoRa() {
 		LOG("LoRa: Sending health-check confirmed uplink\n");
 	}
 	pthread_mutex_unlock(&g_health_mutex);
+	return use_confirmed;
+}
 
-	// Send raw bytes directly via the B100 POST API (no base64 needed)
-	LOG("LoRa: Publishing %zu bytes (%d counters, %d classes) on port %d%s\n", 
-	    buffer_size, g_counter_count, class_count, g_lorawan_port,
-	    use_confirmed ? " [confirmed]" : "");
-
-	int success = B100_Send_Bytes(buffer, (int)buffer_size, g_lorawan_port, use_confirmed);
+int Publish_Counters_To_LoRa() {
+	pthread_mutex_lock(&g_publish_mutex);
+	int port = g_counting_port;
+	pthread_mutex_unlock(&g_publish_mutex);
 	
+	if (port == 0) {
+		LOG("Counting publish disabled (port 0)\n");
+		return 0;
+	}
+	
+	pthread_mutex_lock(&g_counter_mutex);
+	
+	if (g_counter_count == 0) {
+		pthread_mutex_unlock(&g_counter_mutex);
+		LOG_WARN("No counters to publish\n");
+		return 0;
+	}
+	
+	int published_counter_count = 0;
+	int total_class_count = 0;
+	for (int i = 0; i < g_counter_count; i++) {
+		ClassSelection classes = Counting_Classes_For_Scenario(g_counters[i].scenario);
+		int class_count = Class_Count(classes);
+		if (class_count == 0) continue;
+		if (!g_counters[i].has_reference) {
+			pthread_mutex_unlock(&g_counter_mutex);
+			LOG_WARN("%s: No current AOA counter values available yet; skipping counting publish\n", g_counters[i].scenario);
+			return 0;
+		}
+		published_counter_count++;
+		total_class_count += class_count;
+	}
+	if (total_class_count == 0) {
+		pthread_mutex_unlock(&g_counter_mutex);
+		LOG_WARN("No classes selected for counting publish\n");
+		return 0;
+	}
+
+	size_t buffer_size = total_class_count * 2;
+	unsigned char* buffer = malloc(buffer_size);
+	if (!buffer) {
+		pthread_mutex_unlock(&g_counter_mutex);
+		LOG_WARN("Failed to allocate buffer\n");
+		return 0;
+	}
+	
+	size_t offset = 0;
+	for (int i = 0; i < g_counter_count; i++) {
+		CounterState* counter = &g_counters[i];
+		ClassSelection classes = Counting_Classes_For_Scenario(counter->scenario);
+		if (classes.human) Append_U16(buffer, &offset, Wrap_U16_Int(counter->aoa_reference_human));
+		if (classes.car) Append_U16(buffer, &offset, Wrap_U16_Int(counter->aoa_reference_car));
+		if (classes.bike) Append_U16(buffer, &offset, Wrap_U16_Int(counter->aoa_reference_bike));
+		if (classes.bus) Append_U16(buffer, &offset, Wrap_U16_Int(counter->aoa_reference_bus));
+		if (classes.truck) Append_U16(buffer, &offset, Wrap_U16_Int(counter->aoa_reference_truck));
+		if (classes.other) Append_U16(buffer, &offset, Wrap_U16_Int(counter->aoa_reference_other));
+	}
+	pthread_mutex_unlock(&g_counter_mutex);
+	
+	int use_confirmed = Next_Confirmed_Flag();
+	LOG("LoRa: Publishing %zu counting bytes (%d counters, %d selected classes) on port %d%s\n",
+	    buffer_size, published_counter_count, total_class_count, port, use_confirmed ? " [confirmed]" : "");
+
+	int success = B100_Send_Bytes(buffer, (int)buffer_size, port, use_confirmed);
 	if (success) {
-		LOG("LoRa: Publish accepted\n");
+		LOG("LoRa: Counting publish accepted\n");
+		Record_Publish_Log(port, buffer, buffer_size);
 		pthread_mutex_lock(&g_publish_mutex);
-		g_next_publish_time = time(NULL) + (g_publish_interval_minutes * 60);
+		g_next_counting_publish_time = time(NULL) + (g_counting_interval_minutes * 60);
 		pthread_mutex_unlock(&g_publish_mutex);
 	} else {
-		LOG_WARN("LoRa: Publish failed - %s\n", B100_Get_Last_Error());
+		LOG_WARN("LoRa: Counting publish failed - %s\n", B100_Get_Last_Error());
+	}
+	
+	free(buffer);
+	return success;
+}
+
+static int Publish_Occupancy_To_LoRa() {
+	pthread_mutex_lock(&g_publish_mutex);
+	int port = g_occupancy_port;
+	pthread_mutex_unlock(&g_publish_mutex);
+	
+	if (port == 0) {
+		LOG("Occupancy publish disabled (port 0)\n");
+		return 0;
+	}
+	cJSON* status_areas = ACAP_STATUS_Object("occupancy", "areas");
+	cJSON* areas = status_areas ? cJSON_Duplicate(status_areas, 1) : NULL;
+	if (!areas) {
+		LOG_WARN("No occupancy status available to publish\n");
+		return 0;
+	}
+
+	int occupancy_sample_count = 0;
+	int total_class_count = 0;
+	int total_header_bytes = 0;
+	cJSON* area = NULL;
+	cJSON_ArrayForEach(area, areas) {
+		cJSON* has_sample = cJSON_GetObjectItem(area, "hasSample");
+		if (!cJSON_IsTrue(has_sample)) continue;
+		cJSON* labels = cJSON_GetObjectItem(area, "labels");
+		int class_count = labels && cJSON_IsArray(labels) ? cJSON_GetArraySize(labels) : 0;
+		if (class_count <= 0) continue;
+		occupancy_sample_count++;
+		total_class_count += class_count;
+		total_header_bytes += 2;
+	}
+	if (occupancy_sample_count == 0) {
+		cJSON_Delete(areas);
+		LOG_WARN("No occupancy samples/classes to publish\n");
+		return 0;
+	}
+	
+	size_t buffer_size = total_header_bytes + total_class_count;
+	unsigned char* buffer = malloc(buffer_size);
+	if (!buffer) {
+		cJSON_Delete(areas);
+		LOG_WARN("Failed to allocate buffer\n");
+		return 0;
+	}
+	
+	size_t offset = 0;
+	cJSON_ArrayForEach(area, areas) {
+		cJSON* has_sample = cJSON_GetObjectItem(area, "hasSample");
+		if (!cJSON_IsTrue(has_sample)) continue;
+		cJSON* labels = cJSON_GetObjectItem(area, "labels");
+		if (!labels || !cJSON_IsArray(labels)) continue;
+		int label_count = cJSON_GetArraySize(labels);
+		if (label_count <= 0) continue;
+		if (label_count > 255) label_count = 255;
+		cJSON* value_type = cJSON_GetObjectItem(area, "valueType");
+		Append_U8(buffer, &offset, (uint8_t)label_count);
+		Append_U8(buffer, &offset, Occupancy_Value_Type_Code(value_type && cJSON_IsString(value_type) ? value_type->valuestring : NULL));
+		cJSON* label = NULL;
+		int written = 0;
+		cJSON_ArrayForEach(label, labels) {
+			if (written >= label_count) break;
+			cJSON* value = cJSON_GetObjectItem(label, "value");
+			Append_U8(buffer, &offset, Encode_Occupancy_U8(value && cJSON_IsNumber(value) ? value->valuedouble : 0.0));
+			written++;
+		}
+	}
+	cJSON_Delete(areas);
+	
+	int use_confirmed = Next_Confirmed_Flag();
+	LOG("LoRa: Publishing %zu occupancy bytes (%d scenarios, %d selected labels) on port %d%s\n",
+	    buffer_size, occupancy_sample_count, total_class_count, port, use_confirmed ? " [confirmed]" : "");
+
+	int success = B100_Send_Bytes(buffer, (int)buffer_size, port, use_confirmed);
+	
+	if (success) {
+		LOG("LoRa: Occupancy publish accepted\n");
+		Record_Publish_Log(port, buffer, buffer_size);
+		pthread_mutex_lock(&g_publish_mutex);
+		g_next_occupancy_publish_time = time(NULL) + (g_occupancy_interval_minutes * 60);
+		pthread_mutex_unlock(&g_publish_mutex);
+	} else {
+		LOG_WARN("LoRa: Occupancy publish failed - %s\n", B100_Get_Last_Error());
 	}
 	
 	free(buffer);
@@ -1282,23 +2022,25 @@ void*
 Publish_Thread(void* arg) {
 	LOG("Publish thread started\n");
 	
-	// Set initial next publish time
+	// Set initial next publish times
 	pthread_mutex_lock(&g_publish_mutex);
-	g_next_publish_time = time(NULL) + (g_publish_interval_minutes * 60);
+	Reset_Publish_Schedule_Locked();
 	pthread_mutex_unlock(&g_publish_mutex);
 	
 	while (running) {
 		pthread_mutex_lock(&g_publish_mutex);
-		int enabled = g_publish_enabled;
-		time_t next_time = g_next_publish_time;
+		int counting_enabled = g_counting_port > 0;
+		int occupancy_enabled = g_occupancy_port > 0;
+		time_t next_counting_time = g_next_counting_publish_time;
+		time_t next_occupancy_time = g_next_occupancy_publish_time;
 		pthread_mutex_unlock(&g_publish_mutex);
 		
-		if (enabled) {
-			time_t now = time(NULL);
-			if (now >= next_time) {
-				// Time to publish
-				Publish_Counters_To_LoRa();
-			}
+		time_t now = time(NULL);
+		if (counting_enabled && now >= next_counting_time) {
+			Publish_Counters_To_LoRa();
+		}
+		if (occupancy_enabled && now >= next_occupancy_time) {
+			Publish_Occupancy_To_LoRa();
 		}
 		
 		// Sleep for 10 seconds before checking again
@@ -1320,11 +2062,38 @@ HTTP_Endpoint_publish(const ACAP_HTTP_Response response, const ACAP_HTTP_Request
 	}
 	
 	LOG("Manual publish requested\n");
+	char* stream = ACAP_HTTP_Request_Param(request, "stream");
+	int request_counting = !stream || strcmp(stream, "counting") == 0 || strcmp(stream, "all") == 0;
+	int request_occupancy = !stream || strcmp(stream, "occupancy") == 0 || strcmp(stream, "all") == 0;
+	if (!request_counting && !request_occupancy) {
+		if (stream) free(stream);
+		ACAP_HTTP_Respond_Error(response, 400, "Invalid publish stream");
+		return;
+	}
+
+	int attempted = 0;
+	int success = 0;
+	pthread_mutex_lock(&g_publish_mutex);
+	int counting_enabled = g_counting_port > 0;
+	int occupancy_enabled = g_occupancy_port > 0;
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	if (request_counting && counting_enabled) {
+		attempted++;
+		if (Publish_Counters_To_LoRa()) success++;
+	}
+	if (request_occupancy && occupancy_enabled) {
+		attempted++;
+		if (Publish_Occupancy_To_LoRa()) success++;
+	}
+	if (stream) free(stream);
 	
-	if (Publish_Counters_To_LoRa()) {
-		ACAP_HTTP_Respond_Text(response, "Counters published");
+	if (attempted > 0 && success > 0) {
+		ACAP_HTTP_Respond_Text(response, "Publish request sent");
+	} else if (attempted == 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Selected publish stream is disabled");
 	} else {
-		ACAP_HTTP_Respond_Error(response, 500, "Failed to publish counters");
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to publish selected stream");
 	}
 }
 
@@ -1338,6 +2107,10 @@ HTTP_Endpoint_receive(const ACAP_HTTP_Response response, const ACAP_HTTP_Request
 	}
 	
 	LOG("Manual linkcheck requested\n");
+	if (!Configure_B100_Callbacks()) {
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to configure B100 callbacks");
+		return;
+	}
 	
 	if (B100_Link_Check()) {
 		ACAP_HTTP_Respond_Text(response, "Linkcheck request sent");
@@ -1355,16 +2128,10 @@ HTTP_Endpoint_b100_request_status(const ACAP_HTTP_Response response, const ACAP_
 	}
 
 	// Ensure B100 has http_api_enable=1 and correct callback URIs configured
-	const char* cam_ip = g_callback_ip[0] ? g_callback_ip : ACAP_DEVICE_Prop("IPv4");
-	char status_uri[64], receive_uri[64];
-	snprintf(status_uri, sizeof(status_uri), "/local/%s/b100_status", APP_PACKAGE);
-	snprintf(receive_uri, sizeof(receive_uri), "/local/%s/b100_receive", APP_PACKAGE);
-	if (!B100_Configure_Callbacks(cam_ip, g_callback_port, status_uri, receive_uri,
-	                            g_callback_digest_user, g_callback_digest_password)) {
+	if (!Configure_B100_Callbacks()) {
 		ACAP_HTTP_Respond_Error(response, 500, "Failed to configure B100 callbacks");
 		return;
 	}
-	g_callbacks_configured = 1;
 
 	if (B100_Request_Status()) {
 		ACAP_HTTP_Respond_Text(response, "Status request sent");
@@ -1494,6 +2261,12 @@ HTTP_Endpoint_gps(const ACAP_HTTP_Response response, const ACAP_HTTP_Request req
 
 void
 HTTP_Endpoint_b100_info(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	B100_Fetch_Device_Info();
+	B100_Status* status = B100_Get_Status();
+	Update_Bridge_ACAP_Status(status);
+	Update_Lorawan_ACAP_Status(status);
+	ACAP_STATUS_SetBool("bridge", "callbacksActive", g_callbacks_configured);
+
 	cJSON* info = B100_Get_Info();
 	if (info) {
 		// Add current callback config
@@ -1550,6 +2323,11 @@ HTTP_Endpoint_linkcheck(const ACAP_HTTP_Response response, const ACAP_HTTP_Reque
 	const char* method = ACAP_HTTP_Get_Method(request);
 	if (!method || strcmp(method, "POST") != 0) {
 		ACAP_HTTP_Respond_Error(response, 400, "Method must be POST");
+		return;
+	}
+
+	if (!Configure_B100_Callbacks()) {
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to configure B100 callbacks");
 		return;
 	}
 	
@@ -1702,47 +2480,39 @@ HTTP_Endpoint_set_counters(const ACAP_HTTP_Response response, const ACAP_HTTP_Re
 
 void
 HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
-	pthread_mutex_lock(&g_counter_mutex);
+	(void)request;
+
 	pthread_mutex_lock(&g_publish_mutex);
+	pthread_mutex_lock(&g_counter_mutex);
+	pthread_mutex_lock(&g_occupancy_mutex);
 	
-	// Build class list string
-	char classes[256] = "";
-	int first = 1;
-	if (g_publish_human) {
-		strcat(classes, first ? "human" : ", human");
-		first = 0;
-	}
-	if (g_publish_car) {
-		strcat(classes, first ? "car" : ", car");
-		first = 0;
-	}
-	if (g_publish_bike) {
-		strcat(classes, first ? "bike" : ", bike");
-		first = 0;
-	}
-	if (g_publish_bus) {
-		strcat(classes, first ? "bus" : ", bus");
-		first = 0;
-	}
-	if (g_publish_truck) {
-		strcat(classes, first ? "truck" : ", truck");
-		first = 0;
-	}
-	if (g_publish_other) {
-		strcat(classes, first ? "other" : ", other");
-		first = 0;
-	}
+	int counting_port = g_counting_port;
+	int occupancy_port = g_occupancy_port;
+	cJSON* counter_defs = cJSON_CreateArray();
+	cJSON* occupancy_defs = cJSON_CreateArray();
 	
-	// Build JavaScript decoder function
-	char js[8192];
-	int pos = 0;
-	
-	// Build counter names list for documentation
-	char counter_names[256] = "";
 	for (int i = 0; i < g_counter_count; i++) {
-		if (i > 0) strcat(counter_names, ", ");
-		strcat(counter_names, g_counters[i].scenario);
+		ClassSelection classes = Counting_Classes_For_Scenario(g_counters[i].scenario);
+		Add_Decoder_Definition(counter_defs, g_counters[i].scenario, NULL, counting_port, NULL, 0, classes);
 	}
+
+	for (int i = 0; i < g_occupancy_count; i++) {
+		ScenarioPublishConfig publish_config = Occupancy_Config_For_Scenario(g_occupancy[i].scenario);
+		Add_Decoder_Definition(occupancy_defs, g_occupancy[i].scenario, g_occupancy[i].event_topic, occupancy_port, publish_config.value, Occupancy_Value_Type_Code(publish_config.value), publish_config.classes);
+	}
+
+	for (int i = 0; i < g_occupancy_publish_count; i++) {
+		ScenarioPublishConfig* publish_config = &g_occupancy_publish[i];
+		if (Definition_Array_Has_Name(occupancy_defs, publish_config->scenario)) continue;
+		Add_Decoder_Definition(occupancy_defs, publish_config->scenario, "", occupancy_port, publish_config->value, Occupancy_Value_Type_Code(publish_config->value), publish_config->classes);
+	}
+	char* js_counter_defs = cJSON_PrintUnformatted(counter_defs);
+	char* js_occupancy_defs = cJSON_PrintUnformatted(occupancy_defs);
+	if (!js_counter_defs) js_counter_defs = strdup("[]");
+	if (!js_occupancy_defs) js_occupancy_defs = strdup("[]");
+
+	char js[24576];
+	int pos = 0;
 	
 	const char* dev_model  = ACAP_DEVICE_Prop("model")  ? ACAP_DEVICE_Prop("model")  : "unknown";
 	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
@@ -1750,93 +2520,151 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 
 	pos += snprintf(js + pos, sizeof(js) - pos,
 		"/**\n"
-		" * AI-B100 Counter Decoder\n"
+		" * AI-B100 JavaScript Decoder\n"
 		" * Device  : %s  (serial %s)\n"
 		" * Generated: %s\n"
-		" * Counters: %s\n"
-		" * Enabled classes: %s\n"
+		" * Counting port: %d\n"
+		" * Occupancy port: %d\n"
 		" *\n"
-		" * Payload format\n"
-		" * --------------\n"
-		" * The AI-B100 sends raw binary bytes over LoRaWAN.\n"
-		" * Each counter contributes one 16-bit little-endian unsigned integer\n"
-		" * per enabled class, in the order: human, car, bike, bus, truck, other.\n"
-		" * Total payload size = (number of counters) x (number of classes) x 2 bytes.\n"
-		" *\n"
-		" * Usage\n"
-		" * -----\n"
-		" * Call decodeCounters(bytes) where 'bytes' is the raw LoRaWAN payload\n"
-		" * as a Buffer or Uint8Array. Returns an object with one key per counter,\n"
-		" * each containing the enabled class counts.\n"
-		" */\n\n"
-		"function decodeCounters(bytes) {\n"
-		"  var result = {};\n"
-		"  var offset = 0;\n\n",
-		dev_model, dev_serial, dev_date, counter_names, classes
-	);
-	
-	// Generate decoding for each counter
-	for (int i = 0; i < g_counter_count; i++) {
-		pos += snprintf(js + pos, sizeof(js) - pos,
-			"  // %s\n"
-			"  result['%s'] = {};\n",
-			g_counters[i].scenario, g_counters[i].scenario
-		);
-		
-		if (g_publish_human) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].human = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_car) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].car = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_bike) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].bike = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_bus) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].bus = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_truck) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].truck = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		if (g_publish_other) {
-			pos += snprintf(js + pos, sizeof(js) - pos,
-				"  result['%s'].other = bytes[offset] | (bytes[offset + 1] << 8);\n"
-				"  offset += 2;\n",
-				g_counters[i].scenario
-			);
-		}
-		
-		pos += snprintf(js + pos, sizeof(js) - pos, "\n");
-	}
-	
-	// Close the decodeCounters function
+		" * This decoder is generated from the current app settings. Download a new decoder after changing ports, labels, areas, or value types.\n"
+		" */\n\n",
+		dev_model, dev_serial, dev_date,
+		counting_port, occupancy_port);
+
 	pos += snprintf(js + pos, sizeof(js) - pos,
-		"  return result;\n"
-		"}\n"
-	);
+		"function safeKey(name) {\n"
+		"  var key = String(name == null ? '' : name).trim().replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');\n"
+		"  if (!key) key = 'unnamed';\n"
+		"  if (/^[0-9]/.test(key)) key = '_' + key;\n"
+		"  return key;\n"
+		"}\n\n"
+		"function normalizeType(value) {\n"
+		"  return value === 'average' ? 'avg' : value;\n"
+		"}\n\n"
+		"function readU16(bytes, offset) {\n"
+		"  return (bytes[offset] | (bytes[offset + 1] << 8)) >>> 0;\n"
+		"}\n\n"
+		"var countingPort = %d;\n"
+		"var counterScenarios = %s;\n"
+		"var occupancyPort = %d;\n"
+		"var occupancyScenarios = %s;\n"
+		"var occupancyValueTypes = { 0: 'max', 1: 'min', 2: 'avg' };\n\n",
+		counting_port, js_counter_defs, occupancy_port, js_occupancy_defs);
+
+	pos += snprintf(js + pos, sizeof(js) - pos,
+			"/**\n"
+			" * Counting decoder\n"
+			" *\n"
+			" * Input:\n"
+			" *   bytes - LoRaWAN payload bytes from the Counting port.\n"
+			" *\n"
+			" * Buffer data structure:\n"
+			" *   The payload contains one uint16 little-endian value per selected label.\n"
+			" *   Labels are encoded in this fixed order when enabled: human, car, bike, bus, truck, other.\n"
+			" *   Values are repeated per configured counter in the order shown in counterScenarios below.\n"
+			" *   Each value is the current AOA accumulated counter value modulo 65536.\n"
+			" *   Consumers that maintain continuous counters must detect uint16 wrap-around and add the wrapped delta.\n"
+			" *   Immediately after an app/camera restart, Counting publish waits until fresh AOA counter values have been received.\n"
+			" *\n"
+			" * Output:\n"
+			" *   An object keyed by sanitized counter name. Each counter contains one property per selected label.\n"
+			" *\n"
+			" * Example output:\n"
+			" *   {\n"
+			" *     \"Left\":  { \"human\": 2219, \"car\": 61223, \"bike\": 1425, \"bus\": 1576, \"truck\": 9646, \"other\": 142 },\n"
+			" *     \"Right\": { \"human\": 2820, \"car\": 64687, \"bike\": 1004, \"bus\": 676,  \"truck\": 7118, \"other\": 123 }\n"
+			" *   }\n"
+			" */\n"
+			"function decodeCounting(bytes) {\n"
+			"  var result = {};\n"
+			"  var offset = 0;\n\n"
+			"  for (var i = 0; i < counterScenarios.length; i++) {\n"
+			"    var counter = counterScenarios[i];\n"
+			"    var counterKey = safeKey(counter.name);\n"
+			"    result[counterKey] = {};\n"
+			"    for (var c = 0; c < counter.classes.length; c++) {\n"
+			"      if (offset + 2 > bytes.length) {\n"
+			"        result[counterKey].error = 'Payload ended before all counting values were read';\n"
+			"        return result;\n"
+			"      }\n"
+			"      var classKey = safeKey(counter.classes[c]);\n"
+			"      result[counterKey][classKey] = readU16(bytes, offset);\n"
+			"      offset += 2;\n"
+			"    }\n"
+			"  }\n\n"
+			"  return result;\n"
+			"}\n\n");
+
+	pos += snprintf(js + pos, sizeof(js) - pos,
+			"/**\n"
+			" * Occupancy decoder\n"
+			" *\n"
+			" * Input:\n"
+			" *   bytes - LoRaWAN payload bytes from the Occupancy port.\n"
+			" *\n"
+			" * Buffer data structure:\n"
+			" *   The payload is repeated per configured occupancy area in the order shown in occupancyScenarios below.\n"
+			" *   Each area block starts with a two-byte header followed by one uint8 value per selected label:\n"
+			" *     byte 0: labelCount, the number of following label values for this area.\n"
+			" *     byte 1: valueType, where 0=max, 1=min, 2=avg.\n"
+			" *     bytes 2..N: labelCount uint8 values in the selected label order.\n"
+			" *   Labels use this fixed order when enabled: human, car, bike, bus, truck, other.\n"
+			" *   Values are unscaled uint8 OccupancyInArea EventInterval values, rounded and clamped to 0..255.\n"
+			" *\n"
+			" * Output:\n"
+			" *   An object keyed by sanitized area name. Each area contains type plus one property per selected label.\n"
+			" *\n"
+			" * Example output:\n"
+			" *   {\n"
+			" *     \"Area_1\": { \"type\": \"max\", \"human\": 0 },\n"
+			" *     \"Area_2\": { \"type\": \"max\", \"car\": 1 }\n"
+			" *   }\n"
+			" */\n"
+			"function decodeOccupancy(bytes) {\n"
+			"  var result = {};\n"
+			"  var offset = 0;\n\n"
+			"  for (var o = 0; o < occupancyScenarios.length; o++) {\n"
+			"    var occupancy = occupancyScenarios[o];\n"
+			"    var areaKey = safeKey(occupancy.name);\n"
+			"    result[areaKey] = {};\n"
+			"    if (offset + 2 > bytes.length) {\n"
+			"      result[areaKey].error = 'Missing occupancy header';\n"
+			"      result[areaKey].expectedType = normalizeType(occupancy.value);\n"
+			"      break;\n"
+			"    }\n"
+			"    var labelCount = bytes[offset++];\n"
+			"    var valueTypeCode = bytes[offset++];\n"
+			"    var valueType = occupancyValueTypes[valueTypeCode] || ('unknown_' + valueTypeCode);\n"
+			"    result[areaKey].type = valueType;\n"
+			"    for (var oc = 0; oc < labelCount; oc++) {\n"
+			"      if (offset >= bytes.length) {\n"
+			"        result[areaKey].error = 'Payload ended before all occupancy values were read';\n"
+			"        break;\n"
+			"      }\n"
+			"      var occupancyClass = safeKey(occupancy.classes[oc] || ('unknown_' + oc));\n"
+			"      result[areaKey][occupancyClass] = bytes[offset++];\n"
+			"    }\n"
+			"    var expectedType = normalizeType(occupancy.value);\n"
+			"    if (valueType !== expectedType) result[areaKey].expectedType = expectedType;\n"
+			"    if (labelCount !== occupancy.classes.length) result[areaKey].expectedLabelCount = occupancy.classes.length;\n"
+			"  }\n\n"
+			"  return result;\n"
+			"}\n\n");
+
+	pos += snprintf(js + pos, sizeof(js) - pos, "function decodeByPort(port, bytes) {\n");
+	pos += snprintf(js + pos, sizeof(js) - pos, "  if (port === countingPort) return decodeCounting(bytes);\n");
+	pos += snprintf(js + pos, sizeof(js) - pos, "  if (port === occupancyPort) return decodeOccupancy(bytes);\n");
+	pos += snprintf(js + pos, sizeof(js) - pos,
+		"  return { error: 'Unsupported port ' + port, port: port };\n"
+		"}\n");
+	free(js_counter_defs);
+	free(js_occupancy_defs);
+	cJSON_Delete(counter_defs);
+	cJSON_Delete(occupancy_defs);
 	
-	pthread_mutex_unlock(&g_publish_mutex);
+	pthread_mutex_unlock(&g_occupancy_mutex);
 	pthread_mutex_unlock(&g_counter_mutex);
+	pthread_mutex_unlock(&g_publish_mutex);
 	
 	// Build filename: aib100-decoder-{model}-{serial}-{date}.js
 	char filename[128];
@@ -1876,7 +2704,8 @@ int main(void) {
     g_app_start_time = time(NULL);
 
     // Initialize ACAP
-    ACAP_Init(APP_PACKAGE, Settings_Updated_Callback);
+	cJSON* initial_settings = ACAP_Init(APP_PACKAGE, Settings_Updated_Callback);
+	Migrate_Settings(initial_settings);
     
     // Load saved counters
     LOG("Loading saved counters...\n");
@@ -1933,11 +2762,6 @@ int main(void) {
         
         cJSON* lorawan = cJSON_GetObjectItem(settings, "lorawan");
         if (lorawan) {
-            cJSON* port = cJSON_GetObjectItem(lorawan, "port");
-            if (port) {
-                g_lorawan_port = port->valueint;
-            }
-            
             cJSON* confirmed = cJSON_GetObjectItem(lorawan, "confirmed");
             if (confirmed) {
                 // confirmed mode is managed automatically; ignore the stored setting
@@ -1955,33 +2779,21 @@ int main(void) {
         // Load transmission settings
         cJSON* transmission = cJSON_GetObjectItem(settings, "transmission");
         if (transmission) {
-            cJSON* interval = cJSON_GetObjectItem(transmission, "intervalMinutes");
-            if (interval) {
-                g_publish_interval_minutes = interval->valueint;
-                if (g_publish_interval_minutes < 1) g_publish_interval_minutes = 1;
-                if (g_publish_interval_minutes > 60) g_publish_interval_minutes = 60;
-            }
-            
-            cJSON* enabled = cJSON_GetObjectItem(transmission, "enabled");
-            if (enabled) {
-                g_publish_enabled = cJSON_IsTrue(enabled);
-            }
-            
-            cJSON* classes = cJSON_GetObjectItem(transmission, "classes");
-            if (classes) {
-                cJSON* human = cJSON_GetObjectItem(classes, "human");
-                if (human) g_publish_human = cJSON_IsTrue(human);
-                cJSON* car = cJSON_GetObjectItem(classes, "car");
-                if (car) g_publish_car = cJSON_IsTrue(car);
-                cJSON* bike = cJSON_GetObjectItem(classes, "bike");
-                if (bike) g_publish_bike = cJSON_IsTrue(bike);
-                cJSON* bus = cJSON_GetObjectItem(classes, "bus");
-                if (bus) g_publish_bus = cJSON_IsTrue(bus);
-                cJSON* truck = cJSON_GetObjectItem(classes, "truck");
-                if (truck) g_publish_truck = cJSON_IsTrue(truck);
-                cJSON* other = cJSON_GetObjectItem(classes, "other");
-                if (other) g_publish_other = cJSON_IsTrue(other);
-            }
+			cJSON* counting = cJSON_GetObjectItem(transmission, "counting");
+			cJSON* occupancy = cJSON_GetObjectItem(transmission, "occupancy");
+			if (counting || occupancy) {
+				Load_Counting_Publish_Config(counting);
+				Load_Occupancy_Publish_Config(occupancy);
+			} else {
+				Load_Counting_Publish_Config(transmission);
+				cJSON* old_enabled = cJSON_GetObjectItem(transmission, "enabled");
+				if (old_enabled && !cJSON_IsTrue(old_enabled)) g_counting_port = 0;
+				cJSON* old_value = cJSON_GetObjectItem(transmission, "occupancyValue");
+				if (old_value && old_value->valuestring && Is_Valid_Occupancy_Value(old_value->valuestring)) {
+					strncpy(g_occupancy_value, old_value->valuestring, sizeof(g_occupancy_value) - 1);
+					g_occupancy_value[sizeof(g_occupancy_value) - 1] = '\0';
+				}
+			}
         }
     }
     
@@ -2046,9 +2858,10 @@ int main(void) {
     ACAP_HTTP_Node("b100_request_status", HTTP_Endpoint_b100_request_status);
     ACAP_HTTP_Node("linkcheck", HTTP_Endpoint_linkcheck);
     
-    // Initialize next publish time
+	// Initialize next publish times
     pthread_mutex_lock(&g_publish_mutex);
-    g_next_publish_time = time(NULL) + (g_publish_interval_minutes * 60);
+	g_next_counting_publish_time = time(NULL) + (g_counting_interval_minutes * 60);
+	g_next_occupancy_publish_time = time(NULL) + (g_occupancy_interval_minutes * 60);
     pthread_mutex_unlock(&g_publish_mutex);
     
     // Start background threads

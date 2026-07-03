@@ -14,8 +14,9 @@
 <header class="app-header">
 <div class="app-name" id="app-name">&nbsp;</div>
 <nav class="nav-bar">
-<a href="index.html">Counters</a>
-<a href="aoa.html">AOA</a>
+<a href="index.html">Publish</a>
+<a href="aoa.html">Counting</a>
+<a href="occupancy.html">Occupancy</a>
 <a href="bridge.html" class="active">LoRA Bridge</a>
 <a href="downlink.html">LoRA Downlink</a>
 <a href="gps.html">GPS</a>
@@ -75,7 +76,6 @@
 <div class="card-footer">
 <button id="btn-join" class="btn btn-primary btn-sm">Join Network</button>
 <button id="btn-linkcheck" class="btn btn-info btn-sm">Link Check</button>
-<button id="btn-test" class="btn btn-secondary btn-sm">Send Test</button>
 <button id="btn-restart" class="btn btn-warning btn-sm">Restart Bridge</button>
 </div>
 </div>
@@ -300,7 +300,10 @@ $('#d-deveui').text(br.devEUI || '-');
 $('#d-restarts').text(br.restartCounter != null ? br.restartCounter : '-');
 $('#d-mqtt').text(br.mqttEnabled ? 'Enabled' : 'Disabled');
 $('#d-httpapi').text(br.httpApiEnabled ? 'Enabled' : 'Disabled');
-$('#s-callbacks').text(br.callbacksActive ? 'Active' : 'Not configured').css('color', br.callbacksActive ? 'green' : 'orange');
+const callbackFailed = br.callbackStatus === 'fail';
+const callbacksConfigured = !!br.callbacksActive;
+$('#s-callbacks').text(callbacksConfigured ? 'Active' : (callbackFailed ? 'B100 reports fail' : 'Not configured'))
+.css('color', callbacksConfigured ? 'green' : (callbackFailed ? '#fd7e14' : 'orange'));
 if (br.tUnix && br.tUnix > 0) {
 $('#d-time').text(new Date(br.tUnix * 1000).toLocaleString());
 } else {
@@ -332,10 +335,13 @@ $('#s-maxpayload').text(lw.maxPayload != null ? lw.maxPayload + ' bytes' : '-');
 $('#s-fcntup').text(lw.fcntUp != null ? lw.fcntUp : '-');
 $('#s-fcntdown').text(lw.fcntDown != null ? lw.fcntDown : '-');
 
-if (lw.rssi || lw.snr) {
+if (lw.rssi != null || lw.snr != null) {
 const rq = signalQuality(lw.rssi, lw.snr);
 $('#s-rssi').text(lw.rssi + ' dBm \u2014 ' + rq.rssi);
 $('#s-snr').text(lw.snr + ' dB \u2014 ' + rq.snr);
+} else {
+$('#s-rssi').text('-');
+$('#s-snr').text('-');
 }
 
 if (lw.nextUploadMs > 0) {
@@ -348,10 +354,14 @@ if (lw.tUnix && lw.tUnix > 0)
 $('#s-uplink-time').text(new Date(lw.tUnix * 1000).toLocaleString());
 if (lw.downlinkTUnix && lw.downlinkTUnix > 0)
 $('#s-downlink-time').text(new Date(lw.downlinkTUnix * 1000).toLocaleString());
-if (lw.margin != null)
+if (lw.margin != null && lw.margin !== 0)
 $('#s-margin').text(lw.margin + ' dB');
+else
+$('#s-margin').text('-');
 if (lw.gwCount != null && lw.gwCount > 0)
 $('#s-gwcount').text(lw.gwCount);
+else
+$('#s-gwcount').text('-');
 
 } else {
 badge.text('Disconnected').removeClass('bg-success bg-warning bg-secondary').addClass('bg-danger');
@@ -387,8 +397,9 @@ $('#d-deveui').text(info.dev_eui || '-');
 $('#d-restarts').text(info.restart_counter != null ? info.restart_counter : '-');
 $('#d-mqtt').text(info.mqtt_enable ? 'Enabled' : 'Disabled');
 $('#d-httpapi').text(info.http_api_enable ? 'Enabled' : 'Disabled');
-$('#s-callbacks').text(info.callbacks_active ? 'Active' : (info.callback === 'fail' ? 'Fail' : 'Not configured'))
-.css('color', info.callbacks_active ? 'green' : 'red');
+const infoCallbackFailed = info.callback === 'fail';
+$('#s-callbacks').text(info.callbacks_active ? 'Active' : (infoCallbackFailed ? 'B100 reports fail' : 'Not configured'))
+.css('color', info.callbacks_active ? 'green' : (infoCallbackFailed ? '#fd7e14' : 'orange'));
 if (info.tUnix && info.tUnix > 0) {
 $('#d-time').text(new Date(info.tUnix * 1000).toLocaleString());
 } else {
@@ -487,21 +498,19 @@ complete: function() { $('#btn-join').prop('disabled', false).text('Join Network
 });
 });
 
-$('#btn-test').on('click', function() {
-$(this).prop('disabled', true).text('Sending...');
-$.ajax({
-type: "POST", url: "test",
-success: function() { showToast("Connection test OK", 'success'); loadB100Info(); },
-error: function(xhr) { showToast("Test failed: " + xhr.responseText, 'danger'); },
-complete: function() { $('#btn-test').prop('disabled', false).text('Send Test'); }
-});
-});
-
 $('#btn-linkcheck').on('click', function() {
 $(this).prop('disabled', true).text('Checking...');
 $.ajax({
 type: "POST", url: "linkcheck",
-success: function() { showToast("Linkcheck request sent", 'success'); setTimeout(loadBridgeStatus, 5000); },
+success: function() {
+showToast("Linkcheck request sent", 'success');
+let checksRemaining = 10;
+const checkTimer = setInterval(function() {
+loadBridgeStatus();
+checksRemaining--;
+if (checksRemaining <= 0) clearInterval(checkTimer);
+}, 3000);
+},
 error: function(xhr) { showToast("Linkcheck failed: " + xhr.responseText, 'danger'); },
 complete: function() { setTimeout(function() { $('#btn-linkcheck').prop('disabled', false).text('Link Check'); }, 3000); }
 });

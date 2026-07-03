@@ -36,8 +36,9 @@
 	<header class="app-header">
 		<div class="app-name" id="app-name">&nbsp;</div>
 		<nav class="nav-bar">
-			<a href="index.html">Counters</a>
-			<a href="aoa.html">AOA</a>
+			<a href="index.html">Publish</a>
+			<a href="aoa.html">Counting</a>
+			<a href="occupancy.html">Occupancy</a>
 			<a href="bridge.html">LoRA Bridge</a>
 			<a href="downlink.html" class="active">LoRA Downlink</a>
 			<a href="gps.html">GPS</a>
@@ -121,7 +122,7 @@ const DEFAULT_COMMANDS = [
 	// Port 12 — Information requests
 	{ enabled: true,  port: 12, byte: '0x01', message: 'Camera Info',   action: 'Reply on port 5: model, serial, firmware, uptime hours, CPU %, ACAP version' },
 	{ enabled: true,  port: 12, byte: '0x02', message: 'Bridge Info',   action: 'Reply on port 6: hardware, firmware, power source, temperature, restart count, DevAddr' },
-	{ enabled: true,  port: 12, byte: '0x03', message: 'Signal Quality',action: 'Reply on port 7: data rate, max payload, RSSI, SNR, frame counters up/down' }
+	{ enabled: true,  port: 12, byte: '0x03', message: 'Signal Quality',action: 'Update local status with data rate, max payload, RSSI, SNR, frame counters up/down' }
 ];
 
 $(document).ready(function() {

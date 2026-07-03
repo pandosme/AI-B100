@@ -30,14 +30,19 @@
 			float: right;
 			font-weight: bold;
 		}
+		.publish-log-table code {
+			white-space: normal;
+			word-break: break-all;
+		}
 	</style>
 </head>
 <body>
 	<header class="app-header">
 		<div class="app-name" id="app-name">&nbsp;</div>
 		<nav class="nav-bar">
-			<a href="index.html" class="active">Counters</a>
-			<a href="aoa.html">AOA</a>
+			<a href="index.html" class="active">Publish</a>
+			<a href="aoa.html">Counting</a>
+			<a href="occupancy.html">Occupancy</a>
 			<a href="bridge.html">LoRA Bridge</a>
 			<a href="downlink.html">LoRA Downlink</a>
 			<a href="gps.html">GPS</a>
@@ -47,93 +52,94 @@
 	</header>
 
 	<div class="page-content">
-		<!-- Transmission Settings -->
 		<div class="row mb-4">
-			<div class="col-12">
-				<div class="card">
+			<div class="col-12 col-lg-6 mb-3 d-flex">
+				<div class="card w-100">
 					<div class="card-header">
-						<h5 class="card-title mb-0">LoRa Uplink</h5>
+						<h5 class="card-title mb-0">Counting</h5>
 					</div>
 					<div class="card-body">
 						<div class="row">
-							<div class="col-md-6">
+							<div class="col-12">
 								<div class="form-group mb-3">
-									<label>Active</label>
-									<div class="form-check form-switch">
-										<input class="form-check-input" type="checkbox" id="publishEnabled">
-									</div>
-								</div>
-								
-								<div class="form-group mb-3">
-									<label for="publishInterval">Interval: <strong id="intervalValue">15</strong> m</label>
-									<input type="range" class="form-range" id="publishInterval" min="1" max="60" value="15">
+									<label for="countingInterval">Publish Interval: <strong id="countingIntervalValue">15</strong> m</label>
+									<input type="range" class="form-range" id="countingInterval" min="1" max="60" value="15">
 								</div>
 								<div class="form-group mb-3">
-									<label for="lorawanPort" class="form-label">Port (1-223)</label>
-									<input type="number" class="form-control" id="lorawanPort" min="1" max="223" value="10">
+									<label for="countingPort" class="form-label">Port</label>
+									<select class="form-select" id="countingPort"></select>
 								</div>
-								<small class="text-muted">Uplinks are sent unconfirmed. A confirmed health-check is sent automatically every 10th message.</small>
 								<div class="form-group mb-3">
 									<label>Next Publish</label>
-									<div id="nextPublishTimer" class="text-muted">--</div>
+									<div id="countingNextPublishTimer" class="text-muted">--</div>
 								</div>
-							</div>
-							
-							<div class="col-md-6">
-								<label>Object Classes to Publish</label>
-								<div class="form-check">
-									<input class="form-check-input class-checkbox" type="checkbox" id="classHuman" checked>
-									<label class="form-check-label" for="classHuman">👤 Humans</label>
-								</div>
-								<div class="form-check">
-									<input class="form-check-input class-checkbox" type="checkbox" id="classCar" checked>
-									<label class="form-check-label" for="classCar">🚗 Cars</label>
-								</div>
-								<div class="form-check">
-									<input class="form-check-input class-checkbox" type="checkbox" id="classBike" checked>
-									<label class="form-check-label" for="classBike">🚲 Bikes</label>
-								</div>
-								<div class="form-check">
-									<input class="form-check-input class-checkbox" type="checkbox" id="classBus" checked>
-									<label class="form-check-label" for="classBus">🚌 Buses</label>
-								</div>
-								<div class="form-check">
-									<input class="form-check-input class-checkbox" type="checkbox" id="classTruck" checked>
-									<label class="form-check-label" for="classTruck">🚚 Trucks</label>
-								</div>
-								<div class="form-check">
-									<input class="form-check-input class-checkbox" type="checkbox" id="classOther" checked>
-									<label class="form-check-label" for="classOther">🚙 Other Vehicles</label>
-								</div>
-								
-								<hr class="my-3">
-							<small class="text-muted">Uplinks are sent unconfirmed. A confirmed health-check is sent automatically every 10th message.</small>
 							</div>
 						</div>
-						
-						<div class="row mt-3">
-							<div class="col-12">
-								<button id="saveSettings" class="btn btn-primary">Save Settings</button>
-								<button id="publishNow" class="btn btn-success ms-2">Publish Now</button>
-								<button id="downloadTranslator" class="btn btn-secondary ms-2">Download JavaScript Translator</button>
-							</div>
+						<div class="mt-3 d-flex flex-wrap gap-2">
+							<button id="saveCountingSettings" class="btn btn-primary">Save Settings</button>
+							<button id="publishCountingNow" class="btn btn-success">Publish Now</button>
 						</div>
+						<div class="text-muted mt-2">Port 0 disables Counting publishing. Uplinks are sent unconfirmed; every 10th message is confirmed for link health.</div>
 					</div>
 				</div>
 			</div>
+
+			<div class="col-12 col-lg-6 mb-3 d-flex">
+				<div class="card w-100">
+					<div class="card-header">
+						<h5 class="card-title mb-0">Occupancy</h5>
+					</div>
+					<div class="card-body">
+						<div class="row">
+							<div class="col-12">
+								<div class="form-group mb-3">
+									<label for="occupancyInterval">Publish Interval: <strong id="occupancyIntervalValue">15</strong> m</label>
+									<input type="range" class="form-range" id="occupancyInterval" min="1" max="60" value="15">
+								</div>
+								<div class="form-group mb-3">
+									<label for="occupancyPort" class="form-label">Port</label>
+									<select class="form-select" id="occupancyPort"></select>
+								</div>
+								<div class="form-group mb-3">
+									<label>Next Publish</label>
+									<div id="occupancyNextPublishTimer" class="text-muted">--</div>
+								</div>
+							</div>
+						</div>
+						<div class="mt-3 d-flex flex-wrap gap-2">
+							<button id="saveOccupancySettings" class="btn btn-primary">Save Settings</button>
+							<button id="publishOccupancyNow" class="btn btn-success">Publish Now</button>
+						</div>
+						<div class="text-muted mt-2">Port 0 disables Occupancy publishing. Uplinks are sent unconfirmed; every 10th message is confirmed for link health.</div>
+					</div>
+				</div>
+			</div>
+
 		</div>
 
-		<div id="counters-container" class="row">
-			<!-- Counter cards will be dynamically added here -->
-		</div>
-		
-		<div id="no-counters" style="display: none;">
+		<div class="row mb-4">
 			<div class="col-12">
-				<div class="card">
-					<div class="card-body text-center text-muted">
-						<p>No active counters yet.</p>
-						<p>Counters will appear here when objects are detected by AOA trip-wire scenarios.</p>
-						<p>Visit the <a href="aoa.html">AOA page</a> to configure trip-wire lines.</p>
+				<div class="card w-100">
+					<div class="card-header d-flex justify-content-between align-items-center">
+						<h5 class="card-title mb-0">Last 10 LoRaWAN Publishes</h5>
+						<button id="downloadTranslator" class="btn btn-sm btn-secondary">Download JavaScript Translator</button>
+					</div>
+					<div class="card-body">
+						<div class="table-responsive">
+							<table class="table table-sm table-striped align-middle publish-log-table mb-0">
+								<thead>
+									<tr>
+										<th>Date</th>
+										<th>Time</th>
+										<th>Port</th>
+										<th>Payload</th>
+									</tr>
+								</thead>
+								<tbody id="publishLogBody">
+									<tr><td colspan="4" class="text-muted text-center">No publish data yet.</td></tr>
+								</tbody>
+							</table>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -142,8 +148,21 @@
 
 <script>
 let timerInterval = null;
+let currentSettings = {};
+
+function populatePortSelects() {
+	['#countingPort', '#occupancyPort'].forEach(function(selector) {
+		const select = $(selector);
+		select.empty();
+		for (let port = 0; port <= 15; port++) {
+			select.append(`<option value="${port}">${port}</option>`);
+		}
+	});
+}
 
 $(document).ready(function() {
+	populatePortSelects();
+
 	$.ajax({
 		type: "GET",
 		url: 'app',
@@ -153,15 +172,8 @@ $(document).ready(function() {
 			document.title = app.manifest.acapPackageConf.setup.friendlyName;
 			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
 			
-			// Sync backend counters with AOA first, then load
-			syncBackendCounters(function() {
-				loadSettings();
-				loadCounters();
-				// Refresh counters every 2 seconds
-				setInterval(loadCounters, 2000);
-				// Update timer every second
-				timerInterval = setInterval(updateTimer, 1000);
-			});
+			loadSettings();
+			timerInterval = setInterval(updateTimer, 1000);
 		},
 		error: function(response) {
 			showToast("Failed to load application: " + response.statusText, 'danger');
@@ -169,12 +181,16 @@ $(document).ready(function() {
 	});
 	
 	// Event handlers
-	$('#publishInterval').on('input', function() {
-		$('#intervalValue').text($(this).val());
+	$('#countingInterval').on('input', function() {
+		$('#countingIntervalValue').text($(this).val());
+	});
+	$('#occupancyInterval').on('input', function() {
+		$('#occupancyIntervalValue').text($(this).val());
 	});
 	
-	$('#saveSettings').on('click', saveSettings);
-	$('#publishNow').on('click', publishNow);
+	$('#saveCountingSettings, #saveOccupancySettings').on('click', saveSettings);
+	$('#publishCountingNow').on('click', function() { publishNow('counting', this); });
+	$('#publishOccupancyNow').on('click', function() { publishNow('occupancy', this); });
 	$('#downloadTranslator').on('click', downloadTranslator);
 
 	// LoRa nav dot
@@ -201,24 +217,18 @@ function loadSettings() {
 		dataType: 'json',
 		cache: false,
 		success: function(settings) {
-			if (settings.transmission) {
-				$('#publishEnabled').prop('checked', settings.transmission.enabled);
-				$('#publishInterval').val(settings.transmission.intervalMinutes);
-				$('#intervalValue').text(settings.transmission.intervalMinutes);
-				
-				if (settings.transmission.classes) {
-					$('#classHuman').prop('checked', settings.transmission.classes.human);
-					$('#classCar').prop('checked', settings.transmission.classes.car);
-					$('#classBike').prop('checked', settings.transmission.classes.bike);
-					$('#classBus').prop('checked', settings.transmission.classes.bus);
-					$('#classTruck').prop('checked', settings.transmission.classes.truck);
-					$('#classOther').prop('checked', settings.transmission.classes.other);
-				}
-			}
-			
-			if (settings.lorawan) {
-				$('#lorawanPort').val(settings.lorawan.port || 10);
-			}
+			currentSettings = settings || {};
+			const transmission = settings.transmission || {};
+			const counting = transmission.counting || transmission;
+			const occupancy = transmission.occupancy || {};
+
+			$('#countingInterval').val(counting.intervalMinutes || 15);
+			$('#countingIntervalValue').text(counting.intervalMinutes || 15);
+			$('#countingPort').val(counting.port !== undefined ? counting.port : (settings.lorawan?.port || 10));
+
+			$('#occupancyInterval').val(occupancy.intervalMinutes || counting.intervalMinutes || 15);
+			$('#occupancyIntervalValue').text(occupancy.intervalMinutes || counting.intervalMinutes || 15);
+			$('#occupancyPort').val(occupancy.port !== undefined ? occupancy.port : 0);
 		},
 		error: function(xhr, status, error) {
 			console.error('Failed to load settings:', error);
@@ -227,22 +237,17 @@ function loadSettings() {
 }
 
 function saveSettings() {
+	const transmission = currentSettings.transmission || {};
+	const counting = transmission.counting || {};
+	const occupancy = transmission.occupancy || {};
+	counting.intervalMinutes = parseInt($('#countingInterval').val());
+	counting.port = parseInt($('#countingPort').val());
+	occupancy.intervalMinutes = parseInt($('#occupancyInterval').val());
+	occupancy.port = parseInt($('#occupancyPort').val());
+	transmission.counting = counting;
+	transmission.occupancy = occupancy;
 	const settings = {
-		transmission: {
-			enabled: $('#publishEnabled').is(':checked'),
-			intervalMinutes: parseInt($('#publishInterval').val()),
-			classes: {
-				human: $('#classHuman').is(':checked'),
-				car: $('#classCar').is(':checked'),
-				bike: $('#classBike').is(':checked'),
-				bus: $('#classBus').is(':checked'),
-				truck: $('#classTruck').is(':checked'),
-				other: $('#classOther').is(':checked')
-			}
-		},
-		lorawan: {
-			port: parseInt($('#lorawanPort').val())
-		}
+		transmission: transmission
 	};
 	
 	$.ajax({
@@ -251,7 +256,9 @@ function saveSettings() {
 		data: JSON.stringify(settings),
 		contentType: 'application/json',
 		success: function() {
+			currentSettings.transmission = transmission;
 			showToast("Settings saved successfully", 'success');
+				updateTimer();
 		},
 		error: function(xhr, status, error) {
 			showToast("Failed to save settings: " + error, 'danger');
@@ -259,20 +266,22 @@ function saveSettings() {
 	});
 }
 
-function publishNow() {
-	$('#publishNow').prop('disabled', true).text('Publishing...');
+function publishNow(stream, button) {
+	const $button = $(button);
+	const originalText = $button.text();
+	$button.prop('disabled', true).text('Publishing...');
 	
 	$.ajax({
 		type: "POST",
-		url: 'publish',
-		success: function(response) {
-			showToast("Published to LoRa successfully", 'success');
-			$('#publishNow').prop('disabled', false).text('Publish Now');
-			loadCounters(); // Refresh to get new next publish time
+		url: 'publish?stream=' + encodeURIComponent(stream),
+			success: function(response) {
+			showToast(stream === 'occupancy' ? "Occupancy published to LoRa successfully" : "Counting published to LoRa successfully", 'success');
+			$button.prop('disabled', false).text(originalText);
+			updateTimer();
 		},
 		error: function(xhr, status, error) {
 			showToast("Failed to publish: " + error, 'danger');
-			$('#publishNow').prop('disabled', false).text('Publish Now');
+			$button.prop('disabled', false).text(originalText);
 		}
 	});
 }
@@ -281,7 +290,7 @@ function downloadTranslator() {
 	// Create a temporary link and trigger download
 	var link = document.createElement('a');
 	link.href = 'translator';
-	link.download = 'ttn-decoder.js';
+	link.download = 'aib100-decoder.js';
 	document.body.appendChild(link);
 	link.click();
 	document.body.removeChild(link);
@@ -296,145 +305,51 @@ function updateTimer() {
 		dataType: 'json',
 		cache: false,
 		success: function(data) {
-			if (data.secondsUntilPublish !== undefined) {
-				const seconds = data.secondsUntilPublish;
-				if (seconds > 0) {
-					const minutes = Math.floor(seconds / 60);
-					const secs = seconds % 60;
-					$('#nextPublishTimer').text(`${minutes}m ${secs}s`);
-				} else {
-					$('#nextPublishTimer').text('Publishing...');
-				}
-			}
+			updateTimerLabel('#countingNextPublishTimer', data.publish?.counting);
+			updateTimerLabel('#occupancyNextPublishTimer', data.publish?.occupancy);
+			renderPublishLog(data.publishLog || []);
 		}
 	});
 }
 
-function loadCounters() {
-	$.ajax({
-		type: "GET",
-		url: 'counters',
-		dataType: 'json',
-		cache: false,
-		success: function(data) {
-			renderCounters(data.counters || []);
-		},
-		error: function(xhr, status, error) {
-			console.error('Failed to load counters:', error);
-		}
-	});
+function escapeHtml(value) {
+	return $('<div>').text(value == null ? '' : String(value)).html();
 }
 
-function renderCounters(counters) {
-	const container = $('#counters-container');
-	
-	if (!counters || counters.length === 0) {
-		container.empty();
-		$('#no-counters').show();
+function renderPublishLog(entries) {
+	const body = $('#publishLogBody');
+	body.empty();
+	if (!entries || entries.length === 0) {
+		body.html('<tr><td colspan="4" class="text-muted text-center">No publish data yet.</td></tr>');
 		return;
 	}
-	
-	$('#no-counters').hide();
-	container.empty();
-	
-	counters.forEach(function(counter) {
-		const card = createCounterCard(counter);
-		container.append(card);
+	entries.slice(0, 10).forEach(function(entry) {
+		body.append(`
+			<tr>
+				<td>${escapeHtml(entry.date)}</td>
+				<td>${escapeHtml(entry.time)}</td>
+				<td>${escapeHtml(entry.port)}</td>
+				<td><code>${escapeHtml(entry.payload)}</code></td>
+			</tr>
+		`);
 	});
 }
 
-function createCounterCard(counter) {
-	const classes = [
-		{ id: 'classHuman', key: 'human',  label: '👤 Humans' },
-		{ id: 'classCar',   key: 'car',    label: '🚗 Cars' },
-		{ id: 'classBike',  key: 'bike',   label: '🚲 Bikes' },
-		{ id: 'classBus',   key: 'bus',    label: '🚌 Buses' },
-		{ id: 'classTruck', key: 'truck',  label: '🚚 Trucks' },
-		{ id: 'classOther', key: 'other',  label: '🚙 Other Vehicles' },
-	];
-	const enabled = classes.filter(c => $('#' + c.id).is(':checked'));
-
-	let total = 0;
-	enabled.forEach(c => { total += (counter[c.key] || 0); });
-
-	let rows = '';
-	enabled.forEach(function(c, i) {
-		const style = i === enabled.length - 1 ? ' style="border-bottom:none;"' : '';
-		rows += `<div class="breakdown-item"${style}><span>${c.label}</span><span class="breakdown-value">${(counter[c.key] || 0).toLocaleString()}</span></div>`;
-	});
-
-	const breakdown = enabled.length > 1
-		? `<hr><div class="breakdown"><h6 class="mb-3">Breakdown by Object Type</h6>${rows}</div>`
-		: '';
-
-	return $(`
-		<div class="col-12 col-lg-6 counter-card">
-			<div class="card">
-				<div class="card-header">
-					<h5 class="card-title mb-0">${counter.scenario}</h5>
-				</div>
-				<div class="card-body">
-					<div class="text-center mb-3">
-						<div class="counter-value">${total.toLocaleString()}</div>
-						<div class="counter-label">Total Objects</div>
-					</div>
-					${breakdown}
-				</div>
-			</div>
-		</div>
-	`);
+function updateTimerLabel(selector, publish) {
+	if (!publish || publish.port === 0) {
+		$(selector).text('Disabled');
+		return;
+	}
+	const seconds = publish.secondsUntilPublish || 0;
+	if (seconds > 0) {
+		const minutes = Math.floor(seconds / 60);
+		const secs = seconds % 60;
+		$(selector).text(`${minutes}m ${secs}s`);
+	} else {
+		$(selector).text('Publishing...');
+	}
 }
 
-// Sync backend counters with AOA scenarios
-function syncBackendCounters(callback) {
-	$.ajax({
-		type: "POST",
-		url: "/local/objectanalytics/control.cgi",
-		contentType: 'application/json',
-		data: JSON.stringify({
-			apiVersion: "1.6",
-			context: "aib100",
-			method: "getConfiguration"
-		}),
-		success: function(response) {
-			if (response && response.data && response.data.scenarios) {
-				// Filter only crosslinecounting scenarios
-				const aoaScenarios = response.data.scenarios.filter(s => s.type === "crosslinecounting");
-				const scenarioNames = aoaScenarios.map(s => s.name);
-				
-				console.log('Syncing backend counters with AOA:', scenarioNames);
-				
-				// Send to backend for sync
-				$.ajax({
-					type: "POST",
-					url: "sync_counters",
-					contentType: 'application/json',
-					data: JSON.stringify({
-						scenarios: scenarioNames
-					}),
-					success: function(result) {
-						console.log('Backend counters synchronized:', result);
-						console.log('AOA has ' + scenarioNames.length + ' scenarios, backend has ' + result.remaining + ' counters');
-						if (callback) callback();
-					},
-					error: function(xhr, status, error) {
-						console.warn('Failed to sync backend counters:', error);
-						// Continue anyway
-						if (callback) callback();
-					}
-				});
-			} else {
-				// No scenarios found, continue anyway
-				if (callback) callback();
-			}
-		},
-		error: function(xhr, status, error) {
-			console.error('Failed to load AOA configuration:', error);
-			// Continue anyway
-			if (callback) callback();
-		}
-	});
-}
 </script>
 </body>
 </html>

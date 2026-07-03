@@ -1,172 +1,318 @@
 # AI-B100 AOA Counter
 
-An [ACAP](https://www.axis.com/developer-community/acap) for Axis cameras that reads **Axis Object Analytics (AOA)** CrosslineCounting events and publishes aggregated people and vehicle counts over **LoRaWAN** via an [AI-B100 bridge](https://www.ai-embedded.se).
+An Axis ACAP application that reads Axis Object Analytics (AOA) Counting and Occupancy scenarios on an Axis camera and publishes compact numeric payloads over LoRaWAN through an AI-B100 bridge.
 
-The camera performs all inference locally. Only numeric counts leave the device — no images, no video, no internet connection required at the camera site.
+The camera performs all analytics locally. The ACAP sends only numeric Counting and Occupancy data to the bridge; no images or video leave the camera.
 
 ---
 
-## Why This Exists
+## What It Does
 
-Standard IP-connected cameras require internet access or a cloud subscription to forward data off-site. In many deployments — remote field sites, smart city installations, GDPR-sensitive locations — that is either unavailable, undesirable, or prohibited.
-
-This solution replaces the IP backhaul entirely:
-
-- The camera runs AOA locally and counts objects in the scene
-- The ACAP reads those counts and forwards them over the local LAN to the AI-B100 bridge
-- The AI-B100 transmits compact binary payloads via LoRaWAN radio to any standard network server (TTN, Chirpstack, private LNS)
-- Only numeric counters leave the device
+- Reads AOA `CrosslineCounting` scenarios and publishes the accumulated counts shown by the AOA GUI.
+- Creates, manages, and reads AOA `OccupancyInArea` scenarios.
+- Publishes Counting and Occupancy independently, each with its own interval, LoRaWAN port, enabled scenarios, and enabled object classes.
+- Generates a combined JavaScript decoder/translator for both Counting and Occupancy payloads.
+- Receives AI-B100 status, downlink, GPS, and link-check callbacks.
+- Provides web pages for Publish, Counting, Occupancy, LoRA Bridge, LoRA Downlink, GPS, and About.
+- Provides a plain-text Installation Info report for field documentation.
 
 ---
 
 ## System Overview
 
+```text
+Axis camera with AOA + ACAP
+                            |
+                            | HTTP on local LAN
+                            v
+AI-B100 LoRaWAN bridge
+                            |
+                            | LoRaWAN uplink/downlink
+                            v
+LoRaWAN gateway / network server
+                            |
+                            v
+Backend, dashboard, Node-RED, TTN, ChirpStack, or private LNS
 ```
-┌─────────────────────────────────────────────┐
-│  Local LAN (PoE Switch)                     │
-│                                             │
-│  ┌────────────┐   HTTP/REST   ┌──────────┐  │
-│  │ Axis Camera│◄─────────────►│ AI-B100  │  │
-│  │ (AOA+ACAP) │               │ Bridge   │  │
-│  └────────────┘               └────┬─────┘  │
-│                                    │ LoRa   │
-└────────────────────────────────────┼────────┘
-                                     │
-                              LoRaWAN Gateway
-                                     │
-                        LoRaWAN Network Server
-                        (TTN / Chirpstack / etc.)
-                                     │
-                          Your backend / dashboard
-```
-
----
-
-## Typical Use Cases
-
-| Scenario | Why LoRaWAN |
-|----------|-------------|
-| Smart city traffic / pedestrian counting | Existing city LoRaWAN network; no IP backhaul at poles |
-| Retail / public space footfall | Aggregated counts only; GDPR-friendly |
-| Remote site monitoring | LoRaWAN is the only available connectivity |
-| GDPR-sensitive deployments | Only numeric counters transmitted; no images |
 
 ---
 
 ## Required Hardware
 
 | Component | Description |
-|-----------|-------------|
-| **Axis camera** | Any model supporting ACAP v4+ and Axis Object Analytics |
-| **[AI-B100 LoRaWAN bridge](https://www.ai-embedded.se)** | Ethernet-to-LoRaWAN bridge by AI Embedded Nordic AB |
-| **PoE switch** | Powers camera and PoE splitter |
-| **PoE splitter (ETH + USB-C 5V)** | Splits PoE into Ethernet data and USB-C power for the AI-B100 |
-
-**AI-B100 variants:** AI-B100-POE (PoE-powered), AI-B100-ANT (external antenna), AI-B100-POE-ANT (both).
+| --- | --- |
+| Axis camera | Axis camera supporting ACAP and Axis Object Analytics |
+| AI-B100 bridge | Ethernet-to-LoRaWAN bridge by AI Embedded Nordic AB |
+| Local network | Camera and bridge must be reachable from each other on the LAN |
+| LoRaWAN network | Gateway and network server for OTAA join and payload routing |
 
 ---
 
-## Quick Start
+## User Interface
 
-1. Connect camera and AI-B100 to the same PoE switch
-2. Configure AOA CrosslineCounting scenarios on the camera
-3. Register the AI-B100 on your LoRaWAN network server (TTN, Chirpstack, etc.)
-4. Install the ACAP `.eap` file on the camera
-5. Open the ACAP UI, set the AI-B100 IP, and verify LoRaWAN join
-
-For complete step-by-step instructions, see **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+| Page | Purpose |
+| --- | --- |
+| Publish | Configure Counting and Occupancy publish intervals/ports, publish manually, and view the last 10 LoRaWAN publishes |
+| Counting | View AOA accumulated counts, select classes and scenarios for Counting payloads, and synchronize/reset counter state |
+| Occupancy | Create/edit/delete OccupancyInArea scenarios, select classes and areas for Occupancy payloads, and view current occupancy status |
+| LoRA Bridge | Configure bridge IP/callbacks, join/restart the bridge, request status, and run link checks |
+| LoRA Downlink | View downlink messages and enable/disable supported downlink commands |
+| GPS | View GPS callback data from the bridge |
+| About | View app/device information, download the combined decoder, and download the Installation Info text report |
 
 ---
 
-## Features
+## Settings Model
 
-- **Automatic AOA discovery** — detects all CrosslineCounting scenarios automatically
-- **6 object classes** — human, car, bike, bus, truck, other (individually enable/disable)
-- **Configurable interval** — 5–60 minutes between LoRaWAN transmissions
-- **Downlink commands** — remotely reset counters, change interval, request device info
-- **Auto-join** — automatically rejoins LoRaWAN if connection is lost
-- **Persistent counters** — survive app and camera restarts
-- **Web UI** — live counters, bridge status, downlink log, AOA scenarios
+The current settings schema is version 3. Counting and Occupancy publish configuration is separated under `transmission.counting` and `transmission.occupancy`.
+
+```json
+{
+       "settingsVersion": 3,
+       "transmission": {
+              "counting": {
+                     "intervalMinutes": 15,
+                     "port": 10,
+                     "classes": {
+                            "human": true,
+                            "car": true,
+                            "bike": true,
+                            "bus": true,
+                            "truck": true,
+                            "other": true
+                     },
+                     "scenarios": {}
+              },
+              "occupancy": {
+                     "intervalMinutes": 15,
+                     "port": 0,
+                     "value": "average",
+                     "classes": {
+                            "human": true,
+                            "car": true,
+                            "bike": true,
+                            "bus": true,
+                            "truck": true,
+                            "other": true
+                     },
+                     "scenarios": {}
+              }
+       }
+}
+```
+
+Port `0` disables publishing for that payload type. Enabled classes are encoded in the fixed order `human`, `car`, `bike`, `bus`, `truck`, `other`.
+
+---
+
+## Uplink Payloads
+
+Counting and Occupancy use independent LoRaWAN ports. The generated decoder knows the configured ports, enabled scenarios, enabled labels, and Occupancy value type.
+
+### Counting Payload
+
+Counting payloads use the AOA accumulated counts as the source of truth. Each selected label is encoded as a little-endian unsigned 16-bit value and wraps modulo 65536.
+
+```text
+counter 1 human: low byte, high byte
+counter 1 car:   low byte, high byte
+...
+counter N label: low byte, high byte
+```
+
+Example bytes for two uint16 values:
+
+```text
+[0x2C, 0x01, 0x05, 0x00] => 300, 5
+```
+
+### Occupancy Payload
+
+Occupancy payloads repeat one block per configured OccupancyInArea scenario.
+
+```text
+byte 0: labelCount, number of following label values for this area
+byte 1: valueType, 0=max, 1=min, 2=avg
+byte 2..N: labelCount uint8 values in selected label order
+```
+
+Occupancy values are unscaled EventInterval values rounded and clamped to `0..255`.
+
+Example payload:
+
+```text
+[0x01, 0x00, 0x00, 0x01, 0x00, 0x01]
+```
+
+Example decoded JSON:
+
+```json
+{
+       "Area_1": { "type": "max", "human": 0 },
+       "Area_2": { "type": "max", "car": 1 }
+}
+```
+
+---
+
+## Decoder / Translator
+
+The app generates one JavaScript decoder for both Counting and Occupancy. Download it from the Publish page or from the About page.
+
+The decoder includes:
+
+- configured Counting and Occupancy ports
+- configured scenario names
+- enabled classes per scenario
+- buffer layout comments
+- example decoded JSON output
+- a `decodeByPort(port, bytes)` dispatcher
+
+The repository also contains [translator.js](translator.js) as a standalone decoder reference.
 
 ---
 
 ## Downlink Commands
 
-Commands are short binary payloads sent from your LoRaWAN network server.
+Commands are short binary payloads sent from the LoRaWAN network server to the bridge. Individual commands can be enabled or disabled in the LoRA Downlink page.
 
-### Port 10 — Actions
+### Port 10 - Actions
 
 | Byte | Action |
-|------|--------|
+| --- | --- |
 | `0x01` | Restart the AI-B100 bridge |
 | `0x02` | Initiate a new LoRaWAN OTAA join |
-| `0x03` | Reset all counters to zero and publish immediately |
+| `0x03` | Reset AOA and internal counters |
 
-### Port 11 — Configuration (2 bytes: `[command, value]`)
+### Port 11 - Configuration
+
+Two-byte payloads use `[command, value]`.
 
 | Byte 0 | Byte 1 | Action |
-|--------|--------|--------|
-| `0x01` | `5–60` | Set transmission interval in minutes |
-| `0x02` | `0–5`  | Set fixed data rate (DR0=SF12 … DR5=SF7) |
-| `0x03` | `0/1`  | Disable/enable Adaptive Data Rate (ADR) |
+| --- | --- | --- |
+| `0x01` | `5..60` | Set publish interval in minutes |
+| `0x02` | `0..5` | Set fixed data rate, DR0..DR5 |
+| `0x03` | `0` or `1` | Disable or enable ADR |
 
-### Port 12 — Information Requests
-
-| Byte | Reply port | Response payload |
-|------|-----------|-----------------|
-| `0x01` | 5 | Camera info: `model,serial,firmware,uptime_days` |
-| `0x02` | 6 | Bridge info: `hw_version,sw_version[,DR,maxPayload]` |
-
-### Port 13 — Test
+### Port 12 - Information Requests
 
 | Byte | Action |
-|------|--------|
-| `0x01` | Send `Hello` test message on port 7 |
+| --- | --- |
+| `0x01` | Reply on port 5 with camera information |
+| `0x02` | Reply on port 6 with bridge information |
+| `0x03` | Update local signal quality status from bridge/link data |
+
+The app no longer sends automatic text test payloads on port 7.
 
 ---
 
-## Uplink Payload
+## Bridge Integration
 
-Counters are encoded as compact binary. A JavaScript payload decoder is provided:
+The ACAP configures AI-B100 callback endpoints for status, downlink receive, and GPS updates:
 
-- [`translator.js`](translator.js) — TTN Payload Formatter / Node-RED Function node
+- `/local/aib100/b100_status`
+- `/local/aib100/b100_receive`
+- `/local/aib100/b100_gps`
 
-The decoder is also downloadable from the ACAP web UI (**About** page).
+The B100 API accepts commands such as join, send, status request, and link check asynchronously. The UI therefore uses callbacks and recent status data when showing bridge health.
+
+Every 10th uplink is sent confirmed for link-health observation. If the confirmed ACK is not observed within the timeout, the app records the timeout and clears the waiting state without sending extra application payloads.
 
 ---
 
-## Building from Source
+## Installation Info Report
+
+The About page includes an `Installation Info` button at the top of the page. It downloads a plain-text report instead of raw JSON.
+
+The report includes:
+
+- Camera information: model, serial, firmware, network, uptime, and app version
+- Bridge information: connection/callback status, LoRaWAN state, signal quality, GPS, and AI-B100 parameters
+- Counting settings: publish interval, port, classes, selected scenarios, current counter state, and AOA Counting scenarios
+- Occupancy settings: publish interval, port, value type, classes, selected areas, current Occupancy status, and AOA OccupancyInArea scenarios
+- Collection warnings if one of the source endpoints cannot be read
+
+---
+
+## Building
+
+Docker is required. The build script creates packages for both supported architectures.
 
 ```bash
-# Requires Docker and the Axis ACAP SDK image
-cd aoa-counter
 ./build.sh
 ```
 
 Output:
+
 - `AI-B100_AOA_Counter_<version>_aarch64.eap`
 - `AI-B100_AOA_Counter_<version>_armv7hf.eap`
 
 ---
 
-## Documentation
+## Installing
 
-| Document | Description |
-|----------|-------------|
-| **[DEPLOYMENT.md](DEPLOYMENT.md)** | Complete field deployment guide — hardware setup, configuration, best practices |
-| **[Customization.md](Customization.md)** | How to clone this ACAP and adapt it for a different detection/publishing use case |
-| [AI-B100 Integration Guide](../http_api.md) | AI-B100 device HTTP API reference |
+Install the matching `.eap` package from the camera web UI under Apps, or upload it to the Axis application upload endpoint with digest authentication.
+
+```bash
+curl --digest -u '<user>:<password>' \
+       -F 'packfil=@AI-B100_AOA_Counter_1_1_0_aarch64.eap;type=application/octet-stream' \
+       'http://<camera-host>/axis-cgi/applications/upload.cgi'
+```
+
+---
+
+## Repository Layout
+
+| Path | Description |
+| --- | --- |
+| [app/main.c](app/main.c) | ACAP backend, settings migration, AOA events, LoRaWAN publishing, HTTP endpoints, decoder generation |
+| [app/B100.c](app/B100.c) | AI-B100 HTTP client and callback parsing |
+| [app/html/index.html](app/html/index.html) | Publish page |
+| [app/html/aoa.html](app/html/aoa.html) | Counting page |
+| [app/html/occupancy.html](app/html/occupancy.html) | Occupancy page |
+| [app/html/bridge.html](app/html/bridge.html) | LoRA Bridge page |
+| [app/html/downlink.html](app/html/downlink.html) | LoRA Downlink page |
+| [app/html/about.html](app/html/about.html) | About page and Installation Info report |
+| [app/settings/settings.json](app/settings/settings.json) | Default settings |
+| [translator.js](translator.js) | Standalone decoder reference |
+
+---
+
+# History
+
+## 1.1.0 - Occupancy Branch
+
+- Renamed the original AOA/Counters UI flow to Counting.
+- Added an Occupancy tab for AOA OccupancyInArea setup and current status.
+- Added independent Counting and Occupancy publishing with separate intervals, LoRaWAN ports, enabled classes, and enabled scenarios.
+- Migrated settings to schema version 3 with `transmission.counting` and `transmission.occupancy`.
+- Changed Counting LoRaWAN payload generation to use AOA accumulated counts as the source of truth.
+- Encoded Counting values as little-endian uint16 with modulo-65536 wrapping.
+- Added compact Occupancy payloads using per-area label count, value type, and uint8 label values.
+- Added a combined JavaScript decoder/translator for Counting and Occupancy with detailed payload comments and JSON examples.
+- Reworked the Publish page to show Counting and Occupancy controls side by side and moved the Last 10 LoRaWAN Publishes to its own row.
+- Added callback-driven bridge status handling, GPS callbacks, and link-check status handling.
+- Removed the Bridge page Send Test control.
+- Removed automatic text payload sends on LoRaWAN port 7.
+- Updated downlink Signal Quality handling to update local status instead of replying with a port 7 text message.
+- Added the About page Installation Info text report for field documentation.
+
+## 1.0.1 - Baseline
+
+- CrosslineCounting support for AOA counters.
+- AI-B100 bridge integration for LoRaWAN publishing.
+- Basic bridge configuration, downlink log, and decoder support.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](app/LICENSE).
+MIT - see [app/LICENSE](app/LICENSE).
 
 ---
 
 ## Credits & Contact
 
-- **ACAP:** Fred Juhlin
-- **AI-B100 hardware:** [AI Embedded Nordic AB](https://www.ai-embedded.se) — ai-b100@ai-embedded.se
-- **Axis Object Analytics:** [Axis Communications](https://www.axis.com)
+- ACAP: Fred Juhlin
+- AI-B100 hardware: AI Embedded Nordic AB, ai-b100@ai-embedded.se
+- Axis Object Analytics: Axis Communications

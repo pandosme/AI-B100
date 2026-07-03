@@ -1,4 +1,5 @@
 {
+  "settingsVersion": 3,
   "b100": {
     "ip": "192.168.0.3",
     "port": 80,
@@ -15,15 +16,32 @@
     "autoJoin": true
   },
   "transmission": {
-    "intervalMinutes": 15,
-    "enabled": true,
-    "classes": {
-      "human": true,
-      "car": true,
-      "bike": true,
-      "bus": true,
-      "truck": true,
-      "other": true
+    "counting": {
+      "intervalMinutes": 15,
+      "port": 10,
+      "classes": {
+        "human": true,
+        "car": true,
+        "bike": true,
+        "bus": true,
+        "truck": true,
+        "other": true
+      },
+      "scenarios": {}
+    },
+    "occupancy": {
+      "intervalMinutes": 15,
+      "port": 0,
+      "value": "average",
+      "classes": {
+        "human": true,
+        "car": true,
+        "bike": true,
+        "bus": true,
+        "truck": true,
+        "other": true
+      },
+      "scenarios": {}
     }
   },
   "polling": {
@@ -31,14 +49,14 @@
   },
   "lines": [],
   "downlinkCommands": [
-    { "port": 10, "byte": 1, "enabled": true  },
-    { "port": 10, "byte": 2, "enabled": true  },
-    { "port": 10, "byte": 3, "enabled": true  },
-    { "port": 11, "byte": 1, "enabled": true  },
-    { "port": 11, "byte": 2, "enabled": true  },
-    { "port": 11, "byte": 3, "enabled": true  },
-    { "port": 12, "byte": 1, "enabled": true  },
-    { "port": 12, "byte": 2, "enabled": true  },
-    { "port": 12, "byte": 3, "enabled": true  }
+    { "port": 20, "byte": 1, "enabled": true  },
+    { "port": 20, "byte": 2, "enabled": true  },
+    { "port": 20, "byte": 3, "enabled": true  },
+    { "port": 21, "byte": 1, "enabled": true  },
+    { "port": 21, "byte": 2, "enabled": true  },
+    { "port": 21, "byte": 3, "enabled": true  },
+    { "port": 22, "byte": 1, "enabled": true  },
+    { "port": 22, "byte": 2, "enabled": true  },
+    { "port": 22, "byte": 3, "enabled": true  }
   ]
 }

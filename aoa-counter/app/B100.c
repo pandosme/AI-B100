@@ -328,6 +328,8 @@ static void parse_info_json(cJSON* json) {
         g_status.mqttEnabled = item->valueint;
     if ((item = cJSON_GetObjectItem(json, "http_api_enable")))
         g_status.httpApiEnabled = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "callback")) && item->valuestring)
+        strncpy(g_status.callbackStatus, item->valuestring, sizeof(g_status.callbackStatus) - 1);
     if ((item = cJSON_GetObjectItem(json, "tUnix")))
         g_status.tUnix = (unsigned long)item->valuedouble;
     if ((item = cJSON_GetObjectItem(json, "TempC")))

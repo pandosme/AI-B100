@@ -133,7 +133,6 @@ function parseSOAPResponse(xmlString) {
     // Start traversing from <wstop:TopicSet>
     traverseTopics(topicSet);
 
-    console.log("Parsed events:", result);
     return result;
 }
 
