@@ -5,9 +5,6 @@
 **/localdata/counters.json
 **/settings/state.json
 
-# Internal development files
-AGENTS.md
-
 # Editor / OS
 .vscode/
 *.swp
