@@ -88,7 +88,7 @@ If using the **AI-B100-POE** variant, connect it directly to the PoE switch — 
 
 | Directory | ACAP | Description |
 |-----------|------|-------------|
-| [`aoa-counter/`](aoa-counter/) | **AI-B100 AOA Counter** | Reads Axis Object Analytics CrosslineCounting events and publishes aggregated people/vehicle counts over LoRaWAN |
+| [`aoa/`](aoa/) | **AI-B100 AOA Counter** | Reads Axis Object Analytics CrosslineCounting events and publishes aggregated people/vehicle counts over LoRaWAN |
 
 More ACAPs may be added here in the future, each in their own subdirectory with their own README.
 
@@ -96,4 +96,4 @@ More ACAPs may be added here in the future, each in their own subdirectory with 
 
 ## License
 
-MIT — see [aoa-counter/app/LICENSE](aoa-counter/app/LICENSE).
+MIT — see [aoa/app/LICENSE](aoa/app/LICENSE).

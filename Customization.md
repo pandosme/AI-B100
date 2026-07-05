@@ -24,8 +24,8 @@ To create a customized version, you clone the repository and modify `main.c`, `m
 ## Step 1: Clone and Rename
 
 ```bash
-# Copy the entire aoa-counter directory
-cp -r aoa-counter my-counter
+# Copy the entire aoa directory
+cp -r aoa my-counter
 
 cd my-counter
 ```

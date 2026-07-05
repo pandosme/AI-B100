@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/media-stream-player.min.js"></script>
+	<script src="js/polygonselect.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		#video-view { width: 100%; max-width: 960px; aspect-ratio: 16 / 9; background: #000; position: relative; overflow: hidden; }
+		#video { position: absolute; inset: 0; width: 100%; height: 100%; }
+		#settings-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 10; pointer-events: auto; }
+	</style>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html">Publish</a>
+			<a href="occupancy.html" class="active">Occupancy</a>
+			<a href="alert.html">Detection Alert</a>
+			<a href="aoa.html">Radar</a>
+			<a href="bridge.html">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
+			<a href="about.html">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="card mb-4">
+			<div class="card-header"><h5 class="card-title mb-0">Occupancy</h5></div>
+			<div class="card-body">
+				<div class="row g-3 align-items-end">
+					<div class="col-12 col-md-3">
+						<label for="occupancyType" class="form-label">Occupancy Type</label>
+						<select id="occupancyType" class="form-select">
+							<option value="maximum">Interval Maximum</option>
+							<option value="areaBalance">Area Balance</option>
+						</select>
+					</div>
+					<div class="col-12 col-md-3">
+						<label class="form-label d-block">Detection Label</label>
+						<div class="btn-group" role="group" aria-label="Occupancy detection label">
+							<input type="radio" class="btn-check" name="occupancyLabel" id="occupancyHuman" value="human" autocomplete="off">
+							<label class="btn btn-outline-primary" for="occupancyHuman">Humans</label>
+							<input type="radio" class="btn-check" name="occupancyLabel" id="occupancyVehicle" value="vehicle" autocomplete="off">
+							<label class="btn btn-outline-primary" for="occupancyVehicle">Vehicles</label>
+						</div>
+					</div>
+					<div class="col-12 col-md-3">
+						<label for="occupancyInterval" class="form-label">Publish Frequency: <strong id="occupancyIntervalValue">15</strong> min</label>
+						<input type="range" class="form-range" id="occupancyInterval" min="1" max="60" value="15">
+					</div>
+				</div>
+				<div class="row g-3 mt-2">
+					<div class="col-12 col-md-3" id="intervalMaximumWrap"><div>Interval Maximum: <strong id="intervalMaximumValue">0</strong></div></div>
+					<div class="col-12 col-md-3 area-balance-value"><div>Entering: <strong id="occupancyEntering">0</strong></div></div>
+					<div class="col-12 col-md-3 area-balance-value"><div>Exiting: <strong id="occupancyExiting">0</strong></div></div>
+					<div class="col-12">
+						<div class="form-check form-switch">
+							<input class="form-check-input" type="checkbox" id="aoiEnabled">
+							<label class="form-check-label" for="aoiEnabled">Area of Interest</label>
+						</div>
+					</div>
+				</div>
+				<div class="mt-3">
+					<div id="video-view">
+						<div id="video"></div>
+						<canvas id="settings-canvas" width="1000" height="1000"></canvas>
+					</div>
+				</div>
+				<div class="mt-3">
+					<button id="saveOccupancy" class="btn btn-primary">Save</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<script>
+let currentSettings = {};
+let polygonSelector = null;
+
+$(document).ready(function() {
+	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+			playVideo(app.device && app.device.aspect ? app.device.aspect : '16:9');
+			loadSettings();
+		},
+		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
+	});
+	$('#occupancyInterval').on('input', function() { $('#occupancyIntervalValue').text($(this).val()); });
+	$('#occupancyType').on('change', updateModeControls);
+	$('#aoiEnabled').on('change', function() { if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked')); });
+	$('#saveOccupancy').on('click', saveOccupancy);
+	setInterval(updateOccupancyStatus, 3000);
+	setInterval(pollLoraStatus, 10000);
+	pollLoraStatus();
+});
+
+function playVideo(aspect) {
+	let videoWidth = 1280;
+	let videoHeight = 720;
+	let ratio = '16 / 9';
+	if (aspect === '4:3') { videoWidth = 800; videoHeight = 600; ratio = '4 / 3'; }
+	else if (aspect === '1:1') { videoWidth = 640; videoHeight = 640; ratio = '1 / 1'; }
+	else if (aspect === '16:10') { videoWidth = 800; videoHeight = 500; ratio = '16 / 10'; }
+	$('#video-view').css('aspect-ratio', ratio);
+	initPolygonSelector();
+	const secureConnection = location.protocol === 'https:' ? ' secure=true' : '';
+	const player = '<media-stream-player hostname="' + window.location.hostname + '"' + secureConnection + ' format="RTP_H264" compression="40" audio="0" resolution="' + videoWidth + 'x' + videoHeight + '" variant="basic" autoplay></media-stream-player>';
+	$('#video').empty().append(player);
+}
+
+function initPolygonSelector() {
+	if (polygonSelector) return;
+	polygonSelector = new PolygonSelector('settings-canvas', { minPoints: 3, maxPoints: 8, enabled: $('#aoiEnabled').is(':checked'), onchange: function() {} });
+}
+
+function loadSettings() {
+	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
+		success: function(settings) {
+			currentSettings = settings || {};
+			const occupancy = ((currentSettings.transmission || {}).occupancy || {});
+			$('#occupancyType').val(normalizeOccupancyType(occupancy.type));
+			$('input[name="occupancyLabel"][value="' + (occupancy.label === 'vehicle' ? 'vehicle' : 'human') + '"]').prop('checked', true);
+			$('#occupancyInterval').val(occupancy.intervalMinutes || 15);
+			$('#occupancyIntervalValue').text(occupancy.intervalMinutes || 15);
+			const aoi = occupancy.aoi || {};
+			$('#aoiEnabled').prop('checked', !!aoi.enabled);
+			setPolygonPoints(aoi.points || [
+				{ x: aoi.x1 ?? 0, y: aoi.y1 ?? 0 },
+				{ x: aoi.x2 ?? 1000, y: aoi.y1 ?? 0 },
+				{ x: aoi.x2 ?? 1000, y: aoi.y2 ?? 1000 },
+				{ x: aoi.x1 ?? 0, y: aoi.y2 ?? 1000 }
+			]);
+			updateModeControls();
+			updateOccupancyStatus();
+		}
+	});
+}
+
+function normalizeOccupancyType(value) {
+	return value === 'areaBalance' || value === 'area-balance' ? 'areaBalance' : 'maximum';
+}
+
+function updateModeControls() {
+	const areaBalance = $('#occupancyType').val() === 'areaBalance';
+	$('.area-balance-value').toggle(areaBalance);
+	$('#intervalMaximumWrap').toggle(!areaBalance);
+	if (areaBalance) $('#aoiEnabled').prop('checked', true).prop('disabled', true);
+	else $('#aoiEnabled').prop('disabled', false);
+	if (polygonSelector) polygonSelector.setEnabled($('#aoiEnabled').is(':checked'));
+}
+
+function setPolygonPoints(points) {
+	if (!polygonSelector) initPolygonSelector();
+	if (polygonSelector) { polygonSelector.setEnabled($('#aoiEnabled').is(':checked')); polygonSelector.setPoints(points); }
+}
+
+function readPolygonPoints() {
+	if (!polygonSelector) initPolygonSelector();
+	return polygonSelector ? polygonSelector.getPoints() : [];
+}
+
+function polygonBounds(points) {
+	let x1 = 1000, y1 = 1000, x2 = 0, y2 = 0;
+	points.forEach(function(point) { x1 = Math.min(x1, point.x); y1 = Math.min(y1, point.y); x2 = Math.max(x2, point.x); y2 = Math.max(y2, point.y); });
+	return { x1, y1, x2, y2 };
+}
+
+function saveOccupancy() {
+	const transmission = currentSettings.transmission || {};
+	const existingOccupancy = transmission.occupancy || {};
+	const type = normalizeOccupancyType($('#occupancyType').val());
+	const points = readPolygonPoints();
+	if (type === 'areaBalance' && points.length < 3) {
+		showToast('Area Balance requires an area of interest', 'warning');
+		return;
+	}
+	const bounds = polygonBounds(points);
+	const aoiEnabled = type === 'areaBalance' || $('#aoiEnabled').is(':checked');
+	transmission.occupancy = Object.assign({ port: 2, enabled: false }, existingOccupancy, {
+		type: type,
+		label: $('input[name="occupancyLabel"]:checked').val() || 'human',
+		intervalMinutes: parseInt($('#occupancyInterval').val(), 10),
+		aoi: { enabled: aoiEnabled, x1: bounds.x1, x2: bounds.x2, y1: bounds.y1, y2: bounds.y2, points: points }
+	});
+	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
+		success: function() { currentSettings.transmission = transmission; showToast('Occupancy saved', 'success'); },
+		error: function(xhr, status, error) { showToast('Failed to save Occupancy: ' + error, 'danger'); }
+	});
+}
+
+function updateOccupancyStatus() {
+	$.ajax({ type: 'GET', url: 'counters', dataType: 'json', cache: false,
+		success: function(data) {
+			const publish = ((data || {}).publish || {}).occupancy || {};
+			const balance = (data || {}).occupancyAreaBalance || {};
+			$('#intervalMaximumValue').text(publish.count || 0);
+			$('#occupancyEntering').text(balance.entering || 0);
+			$('#occupancyExiting').text(balance.exiting || 0);
+		}
+	});
+}
+
+function pollLoraStatus() {
+	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
+		success: function(d) { const dot = $('#lora-nav-dot'); const lw = d && d.lorawan; dot.removeClass('lora-joined lora-connected lora-disconnected'); if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined'); else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined'); else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected'); }
+	});
+}
+</script>
+</body>
+</html>

@@ -1,7 +1,0 @@
-[
-	{
-		"name": "AOA Scenario events",
-		"topic0": {"tnsaxis":"CameraApplicationPlatform"},
-        "topic1": {"tnsaxis":"ObjectAnalytics"}
-	}
-]

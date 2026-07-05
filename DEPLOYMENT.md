@@ -87,8 +87,8 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 1. Connect the camera to your local LAN and use a browser to access it. *Use AXIS IP Utility or similar tools to find its IP address.*
 2. Install the ACAP:
-   - [AI-B100_AOA_Counter_1_x_x_aarch64.eap](https://raw.githubusercontent.com/pandosme/AI-B100/main/aoa-counter/AI-B100_AOA_Counter_1_0_1_aarch64.eap) for ARTPEC-8 and ARTPEC-9 cameras
-   - [AI-B100_AOA_Counter_1_x_x_armv7hf.eap](https://raw.githubusercontent.com/pandosme/AI-B100/main/aoa-counter/AI-B100_AOA_Counter_1_0_1_armv7hf.eap) for ARTPEC-7 cameras
+   - [AI-B100_AOA_Counter_1_x_x_aarch64.eap](https://raw.githubusercontent.com/pandosme/AI-B100/main/aoa/AI-B100_AOA_Counter_1_0_1_aarch64.eap) for ARTPEC-8 and ARTPEC-9 cameras
+   - [AI-B100_AOA_Counter_1_x_x_armv7hf.eap](https://raw.githubusercontent.com/pandosme/AI-B100/main/aoa/AI-B100_AOA_Counter_1_0_1_armv7hf.eap) for ARTPEC-7 cameras
 3. Start **AXIS Object Analytics**.
 4. Go to **System → Accounts → Add Account**. The AI-B100 needs credentials to make HTTP callbacks to the camera.
    - Set username and password with **Viewer** privileges. If this password is compromised, the user can only view video.

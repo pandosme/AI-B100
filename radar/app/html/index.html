@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		.publish-card .port-badge { font-size: 1.4rem; font-weight: 700; color: #1a2a6c; }
+		.publish-log-table code { white-space: normal; word-break: break-all; user-select: text; }
+		.payload-cell { display: flex; align-items: center; gap: 0.5rem; }
+		.payload-cell code { flex: 1; min-width: 0; }
+		.payload-copy { flex: 0 0 auto; }
+	</style>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html" class="active">Publish</a>
+			<a href="occupancy.html">Occupancy</a>
+			<a href="alert.html">Detection Alert</a>
+			<a href="aoa.html">Radar</a>
+			<a href="bridge.html">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
+			<a href="about.html">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="row mb-4">
+			<div class="col-12 col-lg-4 mb-3 d-flex">
+				<div class="card publish-card w-100">
+					<div class="card-header"><h5 class="card-title mb-0">Area Balance</h5></div>
+					<div class="card-body">
+						<div class="form-check form-switch mb-3">
+							<input class="form-check-input publish-toggle" type="checkbox" id="countingEnabled" data-stream="counting">
+							<label class="form-check-label" for="countingEnabled">Enable Publishing</label>
+						</div>
+						<div class="d-flex justify-content-between mb-2"><span>LoRaWAN Port</span><span class="port-badge">1</span></div>
+						<div class="d-flex justify-content-between mb-2"><span>Label</span><strong id="countingLabel">--</strong></div>
+						<div class="d-flex justify-content-between mb-2"><span>Balance</span><strong id="countingStatus">--</strong></div>
+						<div class="d-flex justify-content-between mb-2"><span>Interval</span><strong id="countingInterval">--</strong></div>
+						<div class="d-flex justify-content-between mb-3"><span>Next Publish</span><strong id="countingNext">--</strong></div>
+						<button class="btn btn-success" id="publishCountingNow" style="display:none;">Publish Now</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-lg-4 mb-3 d-flex">
+				<div class="card publish-card w-100">
+					<div class="card-header"><h5 class="card-title mb-0">Occupancy</h5></div>
+					<div class="card-body">
+						<div class="form-check form-switch mb-3">
+							<input class="form-check-input publish-toggle" type="checkbox" id="occupancyEnabled" data-stream="occupancy">
+							<label class="form-check-label" for="occupancyEnabled">Enable Publishing</label>
+						</div>
+						<div class="d-flex justify-content-between mb-2"><span>LoRaWAN Port</span><span class="port-badge">2</span></div>
+						<div class="d-flex justify-content-between mb-2"><span>Type</span><strong id="occupancyType">--</strong></div>
+						<div class="d-flex justify-content-between mb-2"><span>Value</span><strong id="occupancyStatus">--</strong></div>
+						<div class="d-flex justify-content-between mb-2"><span>Interval</span><strong id="occupancyInterval">--</strong></div>
+						<div class="d-flex justify-content-between mb-3"><span>Next Publish</span><strong id="occupancyNext">--</strong></div>
+						<button class="btn btn-success" id="publishOccupancyNow" style="display:none;">Publish Now</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-lg-4 mb-3 d-flex">
+				<div class="card publish-card w-100">
+					<div class="card-header"><h5 class="card-title mb-0">Detection Alert</h5></div>
+					<div class="card-body">
+						<div class="form-check form-switch mb-3">
+							<input class="form-check-input publish-toggle" type="checkbox" id="alertEnabled" data-stream="alert">
+							<label class="form-check-label" for="alertEnabled">Enable Publishing</label>
+						</div>
+						<div class="d-flex justify-content-between mb-2"><span>LoRaWAN Port</span><span class="port-badge">3</span></div>
+						<div class="d-flex justify-content-between mb-2"><span>Label</span><strong id="alertLabel">--</strong></div>
+						<div class="d-flex justify-content-between mb-2"><span>State</span><strong id="alertState">--</strong></div>
+						<div class="d-flex justify-content-between mb-3"><span>Next Publish</span><strong id="alertNext">--</strong></div>
+						<button class="btn btn-success" id="publishAlertNow" style="display:none;">Publish Now</button>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row mb-4">
+			<div class="col-12">
+				<div class="card w-100">
+					<div class="card-header d-flex justify-content-between align-items-center">
+						<h5 class="card-title mb-0">Last 20 LoRaWAN Publishes</h5>
+						<button id="downloadTranslator" class="btn btn-secondary btn-sm">Download JavaScript Translator</button>
+					</div>
+					<div class="card-body">
+						<div class="table-responsive">
+							<table class="table table-sm table-striped align-middle publish-log-table mb-0">
+								<thead><tr><th>Date</th><th>Time</th><th>Use Case</th><th>Port</th><th>Payload</th></tr></thead>
+								<tbody id="publishLogBody"><tr><td colspan="5" class="text-muted text-center">No publish data yet.</td></tr></tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<script>
+let currentSettings = {};
+let publishToggleDirty = { counting: false, occupancy: false, alert: false };
+let lastPublishLogKey = '';
+
+$(document).ready(function() {
+	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+			loadSettings();
+			updateTimer();
+			setInterval(updateTimer, 1000);
+		},
+		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
+	});
+
+	$('#publishCountingNow').on('click', function() { publishNow('counting', this); });
+	$('#publishOccupancyNow').on('click', function() { publishNow('occupancy', this); });
+	$('#publishAlertNow').on('click', function() { publishNow('alert', this); });
+	$('#publishLogBody').on('click', '.payload-copy', function() { copyPayload($(this).data('payload')); });
+	$('.publish-toggle').on('change', function() {
+		updatePublishingEnabled($(this).data('stream'), $(this).is(':checked'), this);
+	});
+	$('#downloadTranslator').on('click', function() { window.location.href = 'translator'; });
+	setInterval(pollLoraStatus, 10000);
+	pollLoraStatus();
+});
+
+function loadSettings() {
+	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
+		success: function(settings) {
+			currentSettings = settings || {};
+			const transmission = currentSettings.transmission || {};
+			publishToggleDirty = { counting: false, occupancy: false, alert: false };
+			$('#countingEnabled').prop('checked', !!(transmission.counting || {}).enabled);
+			$('#occupancyEnabled').prop('checked', !!(transmission.occupancy || {}).enabled);
+			$('#alertEnabled').prop('checked', !!(transmission.alert || {}).enabled);
+			setPublishButtonVisible('counting', !!(transmission.counting || {}).enabled);
+			setPublishButtonVisible('occupancy', !!(transmission.occupancy || {}).enabled);
+			setPublishButtonVisible('alert', !!(transmission.alert || {}).enabled);
+		}
+	});
+}
+
+function updatePublishingEnabled(stream, enabled, toggle) {
+	const transmission = currentSettings.transmission || {};
+	const defaults = {
+		counting: { port: 1, intervalMinutes: 15, label: 'human' },
+		occupancy: { port: 2, intervalMinutes: 15, type: 'maximum' },
+		alert: { port: 3, heartbeatMinutes: 15, activeIntervalSeconds: 60, transitionSeconds: 2, label: 'human' }
+	};
+	const previousEnabled = !!((transmission[stream] || {}).enabled);
+	transmission[stream] = Object.assign({}, defaults[stream], transmission[stream] || {}, { enabled: enabled });
+	publishToggleDirty[stream] = true;
+	setPublishButtonVisible(stream, enabled);
+	$(toggle).prop('disabled', true);
+	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
+		success: function() { currentSettings.transmission = transmission; publishToggleDirty[stream] = false; showToast((enabled ? 'Enabled ' : 'Disabled ') + stream + ' publishing', 'success'); updateTimer(); },
+		error: function(xhr, status, error) { transmission[stream].enabled = previousEnabled; $(toggle).prop('checked', previousEnabled); setPublishButtonVisible(stream, previousEnabled); publishToggleDirty[stream] = false; showToast('Failed to update publishing: ' + error, 'danger'); },
+		complete: function() { $(toggle).prop('disabled', false); }
+	});
+}
+
+function publishNow(stream, button) {
+	const originalText = $(button).text();
+	$(button).prop('disabled', true).text('Publishing...');
+	$.ajax({ type: 'POST', url: 'publish?stream=' + encodeURIComponent(stream),
+		success: function() { showToast('Publish accepted', 'success'); updateTimer(); },
+		error: function(xhr) { showToast('Publish failed: ' + xhr.responseText, 'danger'); },
+		complete: function() { $(button).prop('disabled', false).text(originalText); }
+	});
+}
+
+function updateTimer() {
+	$.ajax({ type: 'GET', url: 'counters', dataType: 'json', cache: false,
+		success: function(data) {
+			const publish = data.publish || {};
+			updateStreamCard('counting', publish.counting || {});
+			updateStreamCard('occupancy', publish.occupancy || {});
+			updateStreamCard('alert', publish.alert || {});
+			renderPublishLog(data.publishLog || []);
+		}
+	});
+}
+
+function updateStreamCard(stream, publish) {
+	if (!publishToggleDirty[stream])
+		$('#' + stream + 'Enabled').prop('checked', !!publish.enabled);
+	const enabled = publishToggleDirty[stream] ? $('#' + stream + 'Enabled').is(':checked') : !!publish.enabled;
+	setPublishButtonVisible(stream, enabled);
+	$('#' + stream + 'Next').text(formatTimer(publish));
+	if (stream === 'counting') {
+		$('#countingLabel').text(publish.label === 'vehicle' ? 'Vehicles' : 'Humans');
+		$('#countingStatus').text(publish.enabled ? ((publish.entering || 0) + ' in / ' + (publish.exiting || 0) + ' out') : 'Disabled');
+		$('#countingInterval').text((publish.intervalMinutes || 15) + ' min');
+	}
+	if (stream === 'occupancy') {
+		const areaBalance = publish.type === 'areaBalance';
+		$('#occupancyType').text(areaBalance ? 'Area Balance' : 'Interval Maximum');
+		$('#occupancyStatus').text(areaBalance ? ((publish.entering || 0) + ' in / ' + (publish.exiting || 0) + ' out') : (publish.count || 0));
+		$('#occupancyInterval').text((publish.intervalMinutes || 15) + ' min');
+	}
+	if (stream === 'alert') {
+		$('#alertLabel').text(publish.label === 'vehicle' ? 'Vehicles' : 'Humans');
+		$('#alertState').text(publish.active ? 'Active' : 'Inactive');
+	}
+}
+
+function setPublishButtonVisible(stream, enabled) {
+	const buttonMap = { counting: '#publishCountingNow', occupancy: '#publishOccupancyNow', alert: '#publishAlertNow' };
+	$(buttonMap[stream]).toggle(!!enabled);
+}
+
+function formatTimer(publish) {
+	if (!publish || publish.enabled === false) return 'Disabled';
+	const seconds = publish.secondsUntilPublish || 0;
+	if (seconds <= 0) return 'Due now';
+	const minutes = Math.floor(seconds / 60);
+	const rem = seconds % 60;
+	return minutes + 'm ' + rem + 's';
+}
+
+function renderPublishLog(entries) {
+	const key = JSON.stringify(entries || []);
+	if (key === lastPublishLogKey) return;
+	lastPublishLogKey = key;
+	const body = $('#publishLogBody');
+	body.empty();
+	if (!entries || entries.length === 0) {
+		body.html('<tr><td colspan="5" class="text-muted text-center">No publish data yet.</td></tr>');
+		return;
+	}
+	entries.slice().reverse().slice(0, 20).forEach(function(entry) {
+		const parts = splitDateTime(entry.time || '');
+		const payload = entry.payload || '';
+		body.append('<tr><td>' + escapeHtml(parts.date) + '</td><td>' + escapeHtml(parts.time) + '</td><td>' + escapeHtml(entry.stream || '') + '</td><td>' + escapeHtml(entry.port) + '</td><td><div class="payload-cell"><code>' + escapeHtml(payload) + '</code><button type="button" class="btn btn-outline-secondary btn-sm payload-copy" data-payload="' + escapeHtml(payload) + '" title="Copy payload">Copy</button></div></td></tr>');
+	});
+}
+
+function copyPayload(payload) {
+	payload = String(payload || '');
+	if (navigator.clipboard && window.isSecureContext) {
+		navigator.clipboard.writeText(payload).then(function() { showToast('Payload copied', 'success'); }, fallbackCopyPayload.bind(null, payload));
+	} else {
+		fallbackCopyPayload(payload);
+	}
+}
+
+function fallbackCopyPayload(payload) {
+	const input = $('<textarea readonly></textarea>').val(payload).css({ position: 'fixed', top: '-1000px', left: '-1000px' }).appendTo('body');
+	input[0].select();
+	try {
+		document.execCommand('copy');
+		showToast('Payload copied', 'success');
+	} catch (error) {
+		showToast('Copy failed', 'danger');
+	}
+	input.remove();
+}
+
+function splitDateTime(value) {
+	const parts = String(value).split(/\s+/);
+	if (parts.length >= 2) return { date: parts[0], time: parts.slice(1).join(' ') };
+	return { date: '', time: value };
+}
+
+function escapeHtml(value) { return $('<div>').text(value == null ? '' : String(value)).html(); }
+
+function pollLoraStatus() {
+	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
+		success: function(d) {
+			const dot = $('#lora-nav-dot');
+			const lw = d && d.lorawan;
+			dot.removeClass('lora-joined lora-connected lora-disconnected');
+			if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+			else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+			else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+		}
+	});
+}
+</script>
+</body>
+</html>

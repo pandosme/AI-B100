@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title></title>
+<link rel="stylesheet" href="css/bootstrap.min.css">
+<link rel="stylesheet" href="css/app.css">
+<script src="js/jquery-3.7.1.min.js"></script>
+<script src="js/bootstrap.bundle.min.js"></script>
+<script src="js/toast.js"></script>
+</head>
+<body>
+<header class="app-header">
+<div class="app-name" id="app-name">&nbsp;</div>
+<nav class="nav-bar">
+<a href="index.html">Publish</a>
+<a href="occupancy.html">Occupancy</a>
+<a href="alert.html">Detection Alert</a>
+<a href="aoa.html">Radar</a>
+<a href="bridge.html" class="active">LoRA Bridge</a>
+<a href="downlink.html">LoRA Downlink</a>
+<a href="gps.html">GPS</a>
+<a href="about.html">About</a>
+<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+</nav>
+</header>
+
+<div class="page-content">
+
+<h4 class="mb-3">AI-B100 LoRaWAN Bridge</h4>
+
+<!-- ===== STATUS ===== -->
+<div class="card mb-3">
+<div class="card-header d-flex justify-content-between align-items-center">
+<h5 class="card-title mb-0">Status</h5>
+<div class="d-flex gap-2">
+<button id="btn-linkcheck" class="btn btn-info btn-sm">Link Check</button>
+<button id="btn-restart" class="btn btn-warning btn-sm">Restart Bridge</button>
+</div>
+</div>
+<div class="card-body">
+<div class="row">
+<!-- Connection -->
+<div class="col-12 col-md-4">
+<h6 class="text-muted">Connection</h6>
+<div class="info-grid">
+<div class="info-row"><div class="info-label">Bridge HTTP:</div><div class="info-value"><span id="s-connection">Checking...</span></div></div>
+<div class="info-row"><div class="info-label">LoRaWAN:</div><div class="info-value"><span id="s-joined">Unknown</span></div></div>
+<div class="info-row"><div class="info-label">Callbacks:</div><div class="info-value"><span id="s-callbacks">-</span></div></div>
+<div class="info-row"><div class="info-label">HTTP API:</div><div class="info-value"><span id="s-httpapi">-</span></div></div>
+<div class="info-row"><div class="info-label">Status:</div><div class="info-value"><span id="s-status-text">-</span></div></div>
+</div>
+</div>
+<!-- Uplink -->
+<div class="col-12 col-md-4">
+<h6 class="text-muted">Uplink</h6>
+<div class="info-grid">
+<div class="info-row"><div class="info-label">DevAddr:</div><div class="info-value"><span id="s-devaddr" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Data Rate:</div><div class="info-value"><span id="s-dr">-</span></div></div>
+<div class="info-row"><div class="info-label">Max Payload:</div><div class="info-value"><span id="s-maxpayload">-</span></div></div>
+<div class="info-row"><div class="info-label">Frame Up:</div><div class="info-value"><span id="s-fcntup">-</span></div></div>
+<div class="info-row"><div class="info-label">Duty Cycle:</div><div class="info-value"><span id="s-dutycycle">-</span></div></div>
+<div class="info-row"><div class="info-label">Network Time:</div><div class="info-value"><span id="s-uplink-time">-</span></div></div>
+</div>
+</div>
+<!-- Downlink & Signal -->
+<div class="col-12 col-md-4">
+<h6 class="text-muted">Downlink &amp; Signal</h6>
+<div class="info-grid">
+<div class="info-row"><div class="info-label">RSSI:</div><div class="info-value"><span id="s-rssi">-</span></div></div>
+<div class="info-row"><div class="info-label">SNR:</div><div class="info-value"><span id="s-snr">-</span></div></div>
+<div class="info-row"><div class="info-label">Frame Down:</div><div class="info-value"><span id="s-fcntdown">-</span></div></div>
+<div class="info-row"><div class="info-label">Last Port:</div><div class="info-value"><span id="s-downlink-port">-</span></div></div>
+<div class="info-row"><div class="info-label">Last Downlink:</div><div class="info-value"><span id="s-downlink-time">-</span></div></div>
+<div class="info-row"><div class="info-label">Link Margin:</div><div class="info-value"><span id="s-margin">-</span></div></div>
+<div class="info-row"><div class="info-label">Gateways:</div><div class="info-value"><span id="s-gwcount">-</span></div></div>
+</div>
+</div>
+</div>
+</div>
+<div class="card-footer">
+<button id="btn-join" class="btn btn-primary btn-sm">Join Network</button>
+</div>
+</div>
+
+<!-- ===== SETTINGS + DEVICE side-by-side ===== -->
+<div class="row">
+
+<!-- Left column: HTTP Settings + LoRaWAN Parameters -->
+<div class="col-12 col-lg-6">
+
+<!-- HTTP Settings -->
+<div class="card mb-3">
+<div class="card-header">
+<h5 class="card-title mb-0">HTTP Settings</h5>
+</div>
+<div class="card-body">
+<div class="form-group row align-items-center mb-2">
+<label for="b100-ip" class="col-6 col-form-label">Bridge IP Address</label>
+<div class="col-6">
+<input type="text" class="form-control" id="b100-ip" name="b100.ip">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="callback-ip" class="col-6 col-form-label">HTTP Callback Address</label>
+<div class="col-6">
+<input type="text" class="form-control" id="callback-ip" name="b100.callbackIP" placeholder="auto-detect">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="callback-port" class="col-6 col-form-label">HTTP Callback Port</label>
+<div class="col-6">
+<input type="number" class="form-control" id="callback-port" name="b100.callbackPort" min="1" max="65535">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="callback-user" class="col-6 col-form-label">Callback User</label>
+<div class="col-6">
+<input type="text" class="form-control" id="callback-user" name="b100.callbackDigestUser">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="callback-password" class="col-6 col-form-label">Callback Password</label>
+<div class="col-6">
+<input type="password" class="form-control" id="callback-password" name="b100.callbackDigestPassword">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="polling-health" class="col-6 col-form-label">Health Interval (s)</label>
+<div class="col-6">
+<input type="number" class="form-control" id="polling-health" name="polling.health_interval">
+</div>
+</div>
+</div>
+<div class="card-footer">
+<button id="save-settings" class="btn btn-primary btn-sm">Save Settings</button>
+</div>
+</div>
+
+<!-- LoRaWAN Parameters -->
+<div class="card mb-3">
+<div class="card-header d-flex justify-content-between align-items-center">
+<h5 class="card-title mb-0">LoRaWAN Parameters</h5>
+<button id="btn-load-params" class="btn btn-sm btn-outline-secondary py-0 px-2">Refresh</button>
+</div>
+<div class="card-body">
+<div class="form-group row align-items-center mb-2">
+<label for="param-adr" class="col-6 col-form-label">ADR (Adaptive DR)</label>
+<div class="col-6">
+<select class="form-select" id="param-adr">
+<option value="0">Disabled</option>
+<option value="1">Enabled</option>
+</select>
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="param-dr" class="col-6 col-form-label">Data Rate</label>
+<div class="col-6">
+<select class="form-select" id="param-dr">
+<option value="0">DR0 (SF12)</option>
+<option value="1">DR1 (SF11)</option>
+<option value="2">DR2 (SF10)</option>
+<option value="3">DR3 (SF9)</option>
+<option value="4">DR4 (SF8)</option>
+<option value="5">DR5 (SF7)</option>
+</select>
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="param-drjoin" class="col-6 col-form-label">Join Data Rate</label>
+<div class="col-6">
+<select class="form-select" id="param-drjoin">
+<option value="0">DR0 (SF12)</option>
+<option value="1">DR1 (SF11)</option>
+<option value="2">DR2 (SF10)</option>
+<option value="3">DR3 (SF9)</option>
+<option value="4">DR4 (SF8)</option>
+<option value="5">DR5 (SF7)</option>
+</select>
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="param-autojoin" class="col-6 col-form-label">Auto Join</label>
+<div class="col-6">
+<select class="form-select" id="param-autojoin">
+<option value="0">Disabled</option>
+<option value="1">Enabled</option>
+</select>
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="param-dutycycle" class="col-6 col-form-label">Duty Cycle Check</label>
+<div class="col-6">
+<select class="form-select" id="param-dutycycle">
+<option value="0">Disabled</option>
+<option value="1">Enabled</option>
+</select>
+</div>
+</div>
+</div>
+<div class="card-footer">
+<button id="save-b100-params" class="btn btn-primary btn-sm">Save Parameters</button>
+</div>
+</div>
+
+</div>
+
+<!-- Device Info -->
+<div class="col-12 col-lg-6">
+<div class="card mb-3">
+<div class="card-header d-flex justify-content-between align-items-center">
+<h5 class="card-title mb-0">Device</h5>
+<button id="btn-refresh-info" class="btn btn-sm btn-outline-secondary">Refresh</button>
+</div>
+<div class="card-body">
+<div class="info-grid">
+<div class="info-row"><div class="info-label">Hardware:</div><div class="info-value"><span id="d-hw">-</span></div></div>
+<div class="info-row"><div class="info-label">HW Version:</div><div class="info-value"><span id="d-hwver">-</span></div></div>
+<div class="info-row"><div class="info-label">Firmware:</div><div class="info-value"><span id="d-fwver">-</span></div></div>
+<div class="info-row"><div class="info-label">Power Source:</div><div class="info-value"><span id="d-power">-</span></div></div>
+<div class="info-row"><div class="info-label">Temperature:</div><div class="info-value"><span id="d-temp">-</span></div></div>
+<div class="info-row"><div class="info-label">IP Address:</div><div class="info-value"><span id="d-ipaddr" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">DHCP:</div><div class="info-value"><span id="d-dhcp">-</span></div></div>
+<div class="info-row"><div class="info-label">DevEUI:</div><div class="info-value"><span id="d-deveui" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Restart Count:</div><div class="info-value"><span id="d-restarts">-</span></div></div>
+<div class="info-row"><div class="info-label">MQTT:</div><div class="info-value"><span id="d-mqtt">-</span></div></div>
+<div class="info-row"><div class="info-label">HTTP API:</div><div class="info-value"><span id="d-httpapi">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback Addr:</div><div class="info-value"><span id="d-cbaddr" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback Port:</div><div class="info-value"><span id="d-cbport" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback User:</div><div class="info-value"><span id="d-cbuser" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Status URI:</div><div class="info-value"><span id="d-cbstatusuri" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Receive URI:</div><div class="info-value"><span id="d-cbreceiveuri" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Network Time:</div><div class="info-value"><span id="d-time">-</span></div></div>
+<div class="info-row"><div class="info-label">Tamper:</div><div class="info-value"><span id="d-tamper">-</span></div></div>
+</div>
+</div>
+</div>
+</div>
+
+</div><!-- /row -->
+</div><!-- /page-content -->
+
+<script>
+const drLabels = ['DR0 \u2014 SF12', 'DR1 \u2014 SF11', 'DR2 \u2014 SF10', 'DR3 \u2014 SF9', 'DR4 \u2014 SF8', 'DR5 \u2014 SF7'];
+
+$(document).ready(function() {
+
+let callbackRequestInProgress = false;
+
+$.ajax({
+type: "GET",
+url: 'app',
+dataType: 'json',
+cache: false,
+success: function(data) {
+document.title = data.manifest.acapPackageConf.setup.friendlyName;
+$('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
+loadSettings(data.settings);
+loadBridgeStatus();
+loadB100Info();
+loadB100Params();
+},
+error: function(response) {
+showToast("Failed to load device information: " + response.statusText, 'danger');
+}
+});
+
+setInterval(loadBridgeStatus, 10000);
+
+function signalQuality(rssi, snr) {
+const rssiLevels = [
+{ min: -70,  label: 'Excellent' },
+{ min: -85,  label: 'Good' },
+{ min: -100, label: 'Sufficient' },
+{ min: -115, label: 'Poor' },
+{ min: -999, label: 'Bad' }
+];
+const snrLevels = [
+{ min: 10,  label: 'Excellent' },
+{ min: 5,   label: 'Good' },
+{ min: 0,   label: 'Sufficient' },
+{ min: -5,  label: 'Poor' },
+{ min: -99, label: 'Bad' }
+];
+return {
+rssi: (rssiLevels.find(l => rssi >= l.min) || rssiLevels[4]).label,
+snr:  (snrLevels.find(l => snr  >= l.min) || snrLevels[4]).label
+};
+}
+
+function hasValue(value) {
+return value !== undefined && value !== null && value !== '';
+}
+
+function statusCodeText(lw) {
+if (!lw) return '-';
+if (hasValue(lw.statusText)) return lw.statusText;
+if (hasValue(lw.statusCode)) return 'Code ' + lw.statusCode;
+return '-';
+}
+
+function signalValueText(value, unit, quality) {
+if (!hasValue(value)) return '-';
+return value + ' ' + unit + (quality ? ' - ' + quality : '');
+}
+
+function pollBridgeStatus(count, delayMs) {
+let checksRemaining = count;
+const checkTimer = setInterval(function() {
+loadBridgeStatus();
+checksRemaining--;
+if (checksRemaining <= 0) clearInterval(checkTimer);
+}, delayMs);
+}
+
+function shouldRepairCallbacks(data) {
+const br = data && data.bridge;
+if (!br || !br.connected) return false;
+return !br.callbacksActive;
+}
+
+function maybeRepairCallbacks(data) {
+if (!shouldRepairCallbacks(data)) return;
+if (callbackRequestInProgress) return;
+configureCallbacksNow(false);
+}
+
+function loadBridgeStatus() {
+$.ajax({
+type: "GET",
+url: 'status',
+dataType: 'json',
+cache: false,
+success: function(data) {
+updateNavDot(data);
+
+// ---- Bridge device info ----
+const br = data.bridge;
+if (br) {
+$('#d-hw').text(br.hardware || '-');
+$('#d-hwver').text(br.hardwareVersion || '-');
+$('#d-fwver').text(br.firmwareVersion || '-');
+$('#d-power').text(br.powerSource || '-');
+$('#d-temp').text(br.tempC != null && br.tempC !== 0 ? br.tempC.toFixed(1) + ' \u00B0C' : '-');
+$('#d-ipaddr').text(br.ipAddr || '-');
+$('#d-dhcp').text(br.dhcpEnabled ? 'Enabled' : 'Disabled');
+$('#d-deveui').text(br.devEUI || '-');
+$('#d-restarts').text(br.restartCounter != null ? br.restartCounter : '-');
+$('#d-mqtt').text(br.mqttEnabled ? 'Enabled' : 'Disabled');
+$('#d-httpapi').text(br.httpApiEnabled ? 'Enabled' : 'Disabled');
+$('#s-httpapi').text(br.httpApiEnabled ? 'Enabled' : 'Disabled').css('color', br.httpApiEnabled ? 'green' : 'orange');
+const callbackFailed = br.callbackStatus === 'fail';
+const callbacksConfigured = !!br.callbacksActive;
+$('#s-callbacks').text(callbacksConfigured ? 'Active' : (callbackFailed ? 'B100 reports fail' : 'Not configured'))
+.css('color', callbacksConfigured ? 'green' : (callbackFailed ? '#fd7e14' : 'orange'));
+if (br.tUnix && br.tUnix > 0) {
+$('#d-time').text(new Date(br.tUnix * 1000).toLocaleString());
+} else {
+$('#d-time').text('Not synchronized');
+}
+$('#d-tamper').text(br.tamper ? 'TAMPERED' : 'OK').css('color', br.tamper ? 'red' : 'green');
+} else {
+$('#s-httpapi').text('-').css('color', '');
+$('#s-callbacks').text('-').css('color', '');
+}
+
+// ---- LoRaWAN status ----
+const lw = data.lorawan;
+if (lw && lw.connected) {
+if (lw.joined) {
+$('#s-joined').text('Joined').css('color', 'green');
+$('#btn-join').hide();
+} else {
+$('#s-joined').text('Not joined').css('color', 'orange');
+$('#btn-join').show();
+}
+$('#s-connection').text('Connected').css('color', 'green');
+$('#s-status-text').text(statusCodeText(lw));
+$('#s-devaddr').text(lw.devAddr || (br && br.devAddr) || '-');
+
+const drText = lw.dataRate != null ? (drLabels[lw.dataRate] || 'DR' + lw.dataRate) : '-';
+$('#s-dr').text(drText);
+$('#s-maxpayload').text(lw.maxPayload != null ? lw.maxPayload + ' bytes' : '-');
+$('#s-fcntup').text(lw.fcntUp != null ? lw.fcntUp : '-');
+$('#s-fcntdown').text(lw.fcntDown != null ? lw.fcntDown : '-');
+
+if (hasValue(lw.rssi) || hasValue(lw.snr)) {
+const rq = signalQuality(hasValue(lw.rssi) ? lw.rssi : -999, hasValue(lw.snr) ? lw.snr : -99);
+$('#s-rssi').text(signalValueText(lw.rssi, 'dBm', hasValue(lw.rssi) ? rq.rssi : ''));
+$('#s-snr').text(signalValueText(lw.snr, 'dB', hasValue(lw.snr) ? rq.snr : ''));
+} else {
+$('#s-rssi').text('-');
+$('#s-snr').text('-');
+}
+
+if (hasValue(lw.nextUploadMs) && lw.nextUploadMs > 0) {
+$('#s-dutycycle').text((lw.nextUploadMs / 1000).toFixed(1) + 's until ready').css('color', '#fd7e14');
+} else if (hasValue(lw.nextUploadMs)) {
+$('#s-dutycycle').text('Ready').css('color', 'green');
+} else {
+$('#s-dutycycle').text('-').css('color', '');
+}
+
+if (lw.tUnix && lw.tUnix > 0)
+$('#s-uplink-time').text(new Date(lw.tUnix * 1000).toLocaleString());
+else
+$('#s-uplink-time').text('-');
+if (lw.lastDownlinkPort != null)
+$('#s-downlink-port').text(lw.lastDownlinkPort);
+else
+$('#s-downlink-port').text('-');
+if (lw.downlinkTUnix && lw.downlinkTUnix > 0)
+$('#s-downlink-time').text(new Date(lw.downlinkTUnix * 1000).toLocaleString());
+else
+$('#s-downlink-time').text('-');
+if (lw.margin != null)
+$('#s-margin').text(lw.margin + ' dB');
+else
+$('#s-margin').text('-');
+if (lw.gwCount != null)
+$('#s-gwcount').text(lw.gwCount);
+else
+$('#s-gwcount').text('-');
+
+} else {
+$('#s-connection').text('Disconnected').css('color', 'red');
+$('#s-joined').text('Unknown').css('color', '');
+$('#s-status-text').text('-');
+$('#s-devaddr').text('-');
+$('#s-dr').text('-');
+$('#s-maxpayload').text('-');
+$('#s-fcntup').text('-');
+$('#s-fcntdown').text('-');
+$('#s-rssi').text('-');
+$('#s-snr').text('-');
+$('#s-dutycycle').text('-').css('color', '');
+$('#s-uplink-time').text('-');
+$('#s-downlink-port').text('-');
+$('#s-downlink-time').text('-');
+$('#s-margin').text('-');
+$('#s-gwcount').text('-');
+$('#btn-join').show();
+}
+maybeRepairCallbacks(data);
+},
+error: function() {
+updateNavDot(null);
+$('#s-connection').text('Error').css('color', 'red');
+}
+});
+}
+
+function loadB100Info() {
+$.ajax({
+type: "GET",
+url: 'b100_info',
+dataType: 'json',
+cache: false,
+success: function(info) {
+$('#d-hw').text(info.HW || '-');
+$('#d-hwver').text(info.HW_ver || '-');
+$('#d-fwver').text(info.FW_ver || '-');
+$('#d-power').text(info.power || '-');
+$('#d-temp').text(info.TempC != null ? info.TempC.toFixed(1) + ' \u00B0C' : '-');
+$('#d-ipaddr').text(info.ip_addr || '-');
+$('#d-dhcp').text(info.dhcp_enable ? 'Enabled' : 'Disabled');
+$('#d-deveui').text(info.dev_eui || '-');
+$('#d-restarts').text(info.restart_counter != null ? info.restart_counter : '-');
+$('#d-mqtt').text(info.mqtt_enable ? 'Enabled' : 'Disabled');
+$('#d-httpapi').text(info.http_api_enable ? 'Enabled' : 'Disabled');
+$('#d-cbaddr').text(info.callback_configured_addr || '-');
+$('#d-cbport').text(info.callback_configured_port != null ? info.callback_configured_port : '-');
+$('#d-cbuser').text(info.callback_digest_user || '-');
+$('#d-cbstatusuri').text(info.callback_status_uri || '-');
+$('#d-cbreceiveuri').text(info.callback_receive_uri || '-');
+const infoCallbackFailed = info.callback === 'fail';
+$('#s-callbacks').text(info.callbacks_active ? 'Active' : (infoCallbackFailed ? 'B100 reports fail' : 'Not configured'))
+.css('color', info.callbacks_active ? 'green' : (infoCallbackFailed ? '#fd7e14' : 'orange'));
+if (info.tUnix && info.tUnix > 0) {
+$('#d-time').text(new Date(info.tUnix * 1000).toLocaleString());
+} else {
+$('#d-time').text('Not synchronized');
+}
+$('#d-tamper').text(info.tamper ? 'TAMPERED' : 'OK').css('color', info.tamper ? 'red' : 'green');
+},
+error: function() { $('#d-hw').text('N/A'); }
+});
+}
+
+function loadB100Params() {
+$.ajax({
+type: "GET",
+url: 'b100_params',
+dataType: 'json',
+cache: false,
+success: function(params) {
+if (params.adr_enable != null) $('#param-adr').val(params.adr_enable);
+if (params.data_rate != null) $('#param-dr').val(params.data_rate);
+if (params.data_rate_join != null) $('#param-drjoin').val(params.data_rate_join);
+if (params.autojoin_enable != null) $('#param-autojoin').val(params.autojoin_enable);
+if (params.duty_check_enable != null) $('#param-dutycycle').val(params.duty_check_enable);
+}
+});
+}
+
+function updateNavDot(data) {
+const dot = $('#lora-nav-dot');
+const lw = data && data.lorawan;
+dot.removeClass('lora-joined lora-connected lora-disconnected');
+if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+}
+
+function loadSettings(settings) {
+window.currentSettings = settings || {};
+$('#b100-ip').val(settings.b100?.ip || '');
+$('#callback-ip').val(settings.b100?.callbackIP || '');
+$('#callback-port').val(settings.b100?.callbackPort || 80);
+$('#callback-user').val(settings.b100?.callbackDigestUser || 'aib100');
+$('#callback-password').val(settings.b100?.callbackDigestPassword || 'aib100');
+$('#polling-health').val(settings.polling?.healthCheckIntervalSeconds || 60);
+}
+
+$('#save-settings').on('click', function() {
+const current = window.currentSettings || {};
+const currentB100 = current.b100 || {};
+$.ajax({
+type: "POST",
+url: "settings",
+contentType: 'application/json',
+data: JSON.stringify({
+b100: Object.assign({}, currentB100, {
+ip: $('#b100-ip').val(),
+callbackIP: $('#callback-ip').val(),
+callbackPort: parseInt($('#callback-port').val()) || 80,
+callbackDigestUser: $('#callback-user').val(),
+callbackDigestPassword: $('#callback-password').val()
+}),
+polling: { healthCheckIntervalSeconds: parseInt($('#polling-health').val()) }
+}),
+success: function() {
+showToast("Settings saved", 'success');
+configureCallbacksNow();
+},
+error: function(xhr, status, error) { showToast("Failed to save settings: " + error, 'danger'); }
+});
+});
+
+function configureCallbacksNow(showNotifications) {
+if (callbackRequestInProgress) return;
+callbackRequestInProgress = true;
+$.ajax({
+type: "POST",
+url: "b100_request_status",
+success: function() {
+if (showNotifications !== false) showToast("Callback API request sent", 'success');
+loadBridgeStatus();
+loadB100Info();
+loadB100Params();
+pollBridgeStatus(6, 3000);
+},
+error: function(xhr) {
+if (showNotifications !== false) showToast("Callback API request failed: " + xhr.responseText, 'danger');
+loadBridgeStatus();
+loadB100Info();
+},
+complete: function() {
+setTimeout(function() { callbackRequestInProgress = false; }, 3000);
+}
+});
+}
+
+$('#save-b100-params').on('click', function() {
+$.ajax({
+type: "POST",
+url: "b100_params",
+contentType: 'application/json',
+data: JSON.stringify({
+adr_enable: parseInt($('#param-adr').val()),
+data_rate: parseInt($('#param-dr').val()),
+data_rate_join: parseInt($('#param-drjoin').val()),
+autojoin_enable: parseInt($('#param-autojoin').val()),
+duty_check_enable: parseInt($('#param-dutycycle').val())
+}),
+success: function() { showToast("B100 parameters saved", 'success'); },
+error: function(xhr) { showToast("Failed: " + xhr.responseText, 'danger'); }
+});
+});
+
+$('#btn-load-params').on('click', loadB100Params);
+$('#btn-refresh-info').on('click', loadB100Info);
+
+$('#btn-join').on('click', function() {
+$(this).prop('disabled', true).text('Joining...');
+$.ajax({
+type: "POST", url: "join",
+success: function() { showToast("Join request sent", 'success'); setTimeout(loadBridgeStatus, 3000); },
+error: function(xhr) { showToast("Join failed: " + xhr.responseText, 'danger'); },
+complete: function() { $('#btn-join').prop('disabled', false).text('Join Network'); }
+});
+});
+
+$('#btn-linkcheck').on('click', function() {
+$(this).prop('disabled', true).text('Checking...');
+$.ajax({
+type: "POST", url: "linkcheck",
+success: function() {
+showToast("Linkcheck request sent", 'success');
+let checksRemaining = 10;
+const checkTimer = setInterval(function() {
+loadBridgeStatus();
+checksRemaining--;
+if (checksRemaining <= 0) clearInterval(checkTimer);
+}, 3000);
+},
+error: function(xhr) { showToast("Linkcheck failed: " + xhr.responseText, 'danger'); },
+complete: function() { setTimeout(function() { $('#btn-linkcheck').prop('disabled', false).text('Link Check'); }, 3000); }
+});
+});
+
+$('#btn-restart').on('click', function() {
+if (!confirm('Restart the LoRA Bridge device?')) return;
+$(this).prop('disabled', true).text('Restarting...');
+$.ajax({
+type: "POST", url: "restart",
+success: function() { showToast("Bridge restart initiated", 'success'); setTimeout(loadBridgeStatus, 10000); setTimeout(loadB100Info, 12000); },
+error: function(xhr) { showToast("Restart failed: " + xhr.responseText, 'danger'); },
+complete: function() { setTimeout(function() { $('#btn-restart').prop('disabled', false).text('Restart Bridge'); }, 10000); }
+});
+});
+
+});
+</script>
+</body>
+</html>

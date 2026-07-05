@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/media-stream-player.min.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		#video-view {
+			width: 100%;
+			max-width: 960px;
+			aspect-ratio: 16 / 9;
+			background: #000;
+			position: relative;
+			overflow: hidden;
+		}
+		#video {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+		}
+	</style>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html">Publish</a>
+			<a href="occupancy.html">Occupancy</a>
+			<a href="alert.html">Detection Alert</a>
+			<a href="aoa.html" class="active">Radar</a>
+			<a href="bridge.html">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
+			<a href="about.html">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="card mb-4">
+			<div class="card-header"><h5 class="card-title mb-0">Live Stream</h5></div>
+			<div class="card-body">
+				<div class="row g-3 align-items-end mb-3">
+					<div class="col-12 col-md-4">
+						<label for="detectionSensitivity" class="form-label">Detection Sensitivity</label>
+						<select id="detectionSensitivity" class="form-select">
+							<option value="">Loading...</option>
+							<option value="low">Low</option>
+							<option value="medium">Medium</option>
+							<option value="high">High</option>
+						</select>
+					</div>
+					<div class="col-12 col-md-3">
+						<button id="saveSensitivity" class="btn btn-primary">Save</button>
+					</div>
+				</div>
+				<div id="video-view">
+					<div id="video"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<script>
+$(document).ready(function() {
+	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+			playVideo(app.device && app.device.aspect ? app.device.aspect : '16:9');
+			loadDetectionSensitivity();
+		},
+		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
+	});
+
+	$('#saveSensitivity').on('click', saveDetectionSensitivity);
+	setInterval(pollLoraStatus, 10000);
+	pollLoraStatus();
+});
+
+function playVideo(aspect) {
+	let videoWidth = 1280;
+	let videoHeight = 720;
+	let ratio = '16 / 9';
+
+	switch (aspect) {
+		case '4:3':
+			videoWidth = 800;
+			videoHeight = 600;
+			ratio = '4 / 3';
+			break;
+		case '1:1':
+			videoWidth = 640;
+			videoHeight = 640;
+			ratio = '1 / 1';
+			break;
+		case '16:10':
+			videoWidth = 800;
+			videoHeight = 500;
+			ratio = '16 / 10';
+			break;
+		default:
+			break;
+	}
+
+	$('#video-view').css('aspect-ratio', ratio);
+	const secureConnection = location.protocol === 'https:' ? ' secure=true' : '';
+	const player = '<media-stream-player hostname="' + window.location.hostname + '"' + secureConnection +
+		' format="RTP_H264" compression="40" audio="0"' +
+		' resolution="' + videoWidth + 'x' + videoHeight + '"' +
+		' variant="basic" autoplay></media-stream-player>';
+	$('#video').empty().append(player);
+}
+
+function normalizeDetectionSensitivity(value) {
+	value = String(value || '').toLowerCase();
+	if (value === 'low' || value === 'medium' || value === 'high') return value;
+	return '';
+}
+
+function loadDetectionSensitivity() {
+	$('#detectionSensitivity').val('').prop('disabled', true);
+	$('#saveSensitivity').prop('disabled', true);
+	$.ajax({ type: 'POST', url: '/axis-cgi/radar/radaranalytics.cgi', data: JSON.stringify({ apiVersion: '2.4', method: 'getDetectionSensitivity' }), contentType: 'application/json', dataType: 'json', cache: false,
+		success: function(data) {
+			const apiData = data.data || {};
+			const value = normalizeDetectionSensitivity(apiData.value);
+			if (value) {
+				$('#detectionSensitivity').val(value);
+			} else {
+				$('#detectionSensitivity').val('');
+				showToast('Radar returned an unknown Detection Sensitivity value', 'warning');
+			}
+		},
+		error: function(xhr) {
+			$('#detectionSensitivity').val('');
+			showToast('Failed to read Detection Sensitivity: ' + xhr.responseText, 'danger');
+		},
+		complete: function() {
+			$('#detectionSensitivity').prop('disabled', false);
+			$('#saveSensitivity').prop('disabled', false);
+		}
+	});
+}
+
+function saveDetectionSensitivity() {
+	const button = $('#saveSensitivity');
+	const value = normalizeDetectionSensitivity($('#detectionSensitivity').val());
+	if (!value) {
+		showToast('Select Detection Sensitivity before saving', 'warning');
+		return;
+	}
+	button.prop('disabled', true).text('Saving...');
+	$.ajax({ type: 'POST', url: '/axis-cgi/radar/radaranalytics.cgi', data: JSON.stringify({ apiVersion: '2.4', method: 'setDetectionSensitivity', params: { value } }), contentType: 'application/json', dataType: 'json',
+		success: function(data) {
+			showToast('Detection Sensitivity saved', 'success');
+			loadDetectionSensitivity();
+		},
+		error: function(xhr) { showToast('Failed to save Detection Sensitivity: ' + xhr.responseText, 'danger'); button.prop('disabled', false); },
+		complete: function() { button.text('Save'); }
+	});
+}
+
+function pollLoraStatus() {
+	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
+		success: function(d) {
+			const dot = $('#lora-nav-dot');
+			const lw = d && d.lorawan;
+			dot.removeClass('lora-joined lora-connected lora-disconnected');
+			if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+			else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+			else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+		}
+	});
+}
+</script>
+</body>
+</html>

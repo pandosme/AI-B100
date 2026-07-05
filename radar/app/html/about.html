@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar">
+			<a href="index.html">Publish</a>
+			<a href="occupancy.html">Occupancy</a>
+			<a href="alert.html">Detection Alert</a>
+			<a href="aoa.html">Radar</a>
+			<a href="bridge.html">LoRA Bridge</a>
+			<a href="downlink.html">LoRA Downlink</a>
+			<a href="gps.html">GPS</a>
+			<a href="about.html" class="active">About</a>
+			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+		</nav>
+	</header>
+
+	<div class="page-content">
+		<div class="row mb-3">
+			<div class="col-12">
+				<button id="btn-download" class="btn btn-primary">
+					Download Info
+				</button>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-12 col-md-6">
+				<div class="card mb-3">
+					<div class="card-header">
+						<h5 class="card-title mb-0">Device Information</h5>
+					</div>
+					<div class="card-body">
+						<div class="info-grid">
+							<div class="info-row"><div class="info-label">Model:</div><div class="info-value"><span id="device-model"></span></div></div>
+							<div class="info-row"><div class="info-label">Firmware:</div><div class="info-value"><span id="device-firmware"></span></div></div>
+							<div class="info-row"><div class="info-label">Serial:</div><div class="info-value"><span id="device-serial"></span></div></div>
+							<div class="info-row"><div class="info-label">Chip:</div><div class="info-value"><span id="device-chip"></span></div></div>
+							<div class="info-row"><div class="info-label">Architecture:</div><div class="info-value"><span id="device-arch"></span></div></div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-md-6">
+				<div class="card mb-3">
+					<div class="card-header">
+						<h5 class="card-title mb-0">ACAP Application</h5>
+					</div>
+					<div class="card-body">
+						<div class="info-grid">
+							<div class="info-row"><div class="info-label">Name:</div><div class="info-value"><span id="acap-name"></span></div></div>
+							<div class="info-row"><div class="info-label">Package:</div><div class="info-value"><span id="acap-package"></span></div></div>
+							<div class="info-row"><div class="info-label">Version:</div><div class="info-value"><span id="acap-version"></span></div></div>
+							<div class="info-row"><div class="info-label">Vendor:</div><div class="info-value"><span id="acap-vendor"></span></div></div>
+							<div class="info-row"><div class="info-label">URL:</div><div class="info-value"><a id="acap-link" href="" target="_blank"><span id="acap-url"></span></a></div></div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-md-6">
+				<div class="card mb-3">
+					<div class="card-header">
+						<h5 class="card-title mb-0">LoRA Bridge (AI-B100)</h5>
+					</div>
+					<div class="card-body">
+						<div class="info-grid">
+							<div class="info-row"><div class="info-label">Hardware:</div><div class="info-value"><span id="bridge-hw"></span></div></div>
+							<div class="info-row"><div class="info-label">HW Version:</div><div class="info-value"><span id="bridge-hwver"></span></div></div>
+							<div class="info-row"><div class="info-label">Firmware:</div><div class="info-value"><span id="bridge-fwver"></span></div></div>
+							<div class="info-row"><div class="info-label">IP Address:</div><div class="info-value"><span id="bridge-ip"></span></div></div>
+							<div class="info-row"><div class="info-label">Power:</div><div class="info-value"><span id="bridge-power"></span></div></div>
+							<div class="info-row"><div class="info-label">Connection:</div><div class="info-value"><span id="bridge-status"></span></div></div>
+							<div class="info-row"><div class="info-label">Network Joined:</div><div class="info-value"><span id="bridge-joined"></span></div></div>
+							<div class="info-row"><div class="info-label">DevEUI:</div><div class="info-value"><span id="bridge-deveui" style="font-family:monospace"></span></div></div>
+							<div class="info-row"><div class="info-label">DevAddr:</div><div class="info-value"><span id="bridge-devaddr" style="font-family:monospace"></span></div></div>
+							<div class="info-row"><div class="info-label">Uplink Count:</div><div class="info-value"><span id="bridge-uplink"></span></div></div>
+							<div class="info-row"><div class="info-label">Restarts:</div><div class="info-value"><span id="bridge-restarts"></span></div></div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-md-6">
+				<div class="card mb-3">
+					<div class="card-header">
+						<h5 class="card-title mb-0">Radar</h5>
+					</div>
+					<div class="card-body">
+						<div class="info-grid">
+							<div class="info-row"><div class="info-label">Current:</div><div class="info-value"><span id="radar-current"></span></div></div>
+							<div class="info-row"><div class="info-label">Tracked Objects:</div><div class="info-value"><span id="radar-tracked"></span></div></div>
+							<div class="info-row"><div class="info-label">Last Frame:</div><div class="info-value"><span id="radar-last-frame"></span></div></div>
+							<div class="info-row"><div class="info-label">Status:</div><div class="info-value"><span id="radar-status"></span></div></div>
+							<div class="info-row"><div class="info-label">LoRaWAN Ports:</div><div class="info-value"><span id="radar-port"></span></div></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<script>
+let fullStatusData = {};
+
+$(document).ready(function() {
+	// Load app info
+	$.ajax({
+		type: "GET",
+		url: "app",
+		dataType: "json",
+		cache: false,
+		success: function(app) {
+			document.title = app.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+
+			// Device card
+			$("#device-model").text(app.device.model);
+			$("#device-firmware").text(app.device.firmware);
+			$("#device-serial").text(app.device.serial);
+			$("#device-chip").text(app.device.platform);
+			$("#device-arch").text(app.manifest.acapPackageConf.setup.architecture || app.device.chip);
+
+			// ACAP card
+			$("#acap-name").text(app.manifest.acapPackageConf.setup.friendlyName);
+			$("#acap-package").text(app.manifest.acapPackageConf.setup.appName);
+			$("#acap-version").text(app.manifest.acapPackageConf.setup.version);
+			$("#acap-vendor").text(app.manifest.acapPackageConf.setup.vendor);
+			$("#acap-url").text(app.manifest.acapPackageConf.setup.vendorUrl);
+			$("#acap-link").attr("href", app.manifest.acapPackageConf.setup.vendorUrl);
+
+			// Bridge config
+			$("#bridge-ip").text(app.settings.b100?.ip || 'Not configured');
+			$("#radar-port").text('Counting 1 / Occupancy 2 / Alert 3');
+
+			fullStatusData = { app: app };
+			loadStatus();
+		},
+		error: function(response) {
+			showToast("Failed to load application: " + response.statusText, 'danger');
+		}
+	});
+
+	function updateNavDot(data) {
+		const dot = $('#lora-nav-dot');
+		const lw = data && data.lorawan;
+		dot.removeClass('lora-joined lora-connected lora-disconnected');
+		if (lw && lw.joined)         dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+		else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+		else                         dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+	}
+
+	function loadStatus() {
+		$.ajax({
+			type: "GET",
+			url: "status",
+			dataType: "json",
+			cache: false,
+			success: function(status) {
+				fullStatusData.status = status;			updateNavDot(status);
+				// Bridge status
+				const br = status.bridge;
+				const lorawan = status.lorawan;
+				if (br && br.connected) {
+					$("#bridge-hw").text(br.hardware || '-');
+					$("#bridge-hwver").text(br.hardwareVersion || '-');
+					$("#bridge-fwver").text(br.firmwareVersion || '-');
+					$("#bridge-power").text(br.powerSource || '-');
+					$("#bridge-status").text("Connected").css('color', 'green');
+					$("#bridge-deveui").text(br.devEUI || '-');
+					$("#bridge-devaddr").text(br.devAddr && br.devAddr !== '00000000' ? br.devAddr : 'Not joined');
+					$("#bridge-restarts").text(br.restartCounter != null ? br.restartCounter : '-');
+				} else {
+					$("#bridge-hw").text('-');
+					$("#bridge-hwver").text('-');
+					$("#bridge-fwver").text('-');
+					$("#bridge-power").text('-');
+					$("#bridge-status").text("Disconnected").css('color', 'red');
+					$("#bridge-deveui").text('-');
+					$("#bridge-devaddr").text('-');
+					$("#bridge-restarts").text('-');
+				}
+				if (lorawan) {
+					$("#bridge-joined").text(lorawan.joined ? 'Yes' : 'No').css('color', lorawan.joined ? 'green' : 'orange');
+					$("#bridge-uplink").text(lorawan.fcntUp != null ? lorawan.fcntUp : '-');
+				}
+				const radar = status.radar;
+				if (radar) {
+					const currentOccupancy = radar.occupancy && typeof radar.occupancy === 'object' ? radar.occupancy.total : radar.occupancy;
+					$("#radar-current").text(currentOccupancy != null ? currentOccupancy : '0');
+					$("#radar-tracked").text(radar.trackedObjects != null ? radar.trackedObjects : '0');
+					$("#radar-last-frame").text(radar.connected ? 'Receiving' : 'No frames');
+					$("#radar-status").text(radar.connected ? 'Connected' : 'Disconnected').css('color', radar.connected ? 'green' : 'red');
+				} else {
+					$("#radar-current").text('0');
+					$("#radar-tracked").text('0');
+					$("#radar-last-frame").text('-');
+					$("#radar-status").text('Unknown').css('color', 'orange');
+				}
+
+			},
+			error: function() {
+				$("#radar-status").text("Error").css('color', 'red');
+				$("#bridge-status").text("Error").css('color', 'red');
+			}
+		});
+	}
+
+	// Refresh status every 10 seconds
+	setInterval(loadStatus, 10000);
+
+	function fetchJson(options) {
+		return new Promise(function(resolve) {
+			$.ajax(Object.assign({}, options, {
+				dataType: options.dataType || 'json',
+				cache: false,
+				success: function(data) { resolve({ ok: true, data: data }); },
+				error: function(xhr, status, error) { resolve({ ok: false, error: error || status || 'request failed' }); }
+			}));
+		});
+	}
+
+	function valueText(value) {
+		if (value === undefined || value === null || value === '') return '-';
+		if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+		return String(value);
+	}
+
+	function timeText(value) {
+		return value && value > 0 ? new Date(value * 1000).toLocaleString() : '-';
+	}
+
+	function addSection(lines, title) {
+		lines.push('');
+		lines.push(title);
+		lines.push('-'.repeat(title.length));
+	}
+
+	function addField(lines, label, value) {
+		lines.push(label + ': ' + valueText(value));
+	}
+
+	function addObjectFields(lines, object, labels) {
+		labels.forEach(function(item) {
+			addField(lines, item[0], object ? object[item[1]] : undefined);
+		});
+	}
+
+	function aoiText(aoi) {
+		if (!aoi) return '-';
+		const points = Array.isArray(aoi.points) ? aoi.points.length : 0;
+		return (aoi.enabled ? 'Enabled' : 'Disabled') + ', points=' + points + ', bounds=(' + valueText(aoi.x1) + ',' + valueText(aoi.y1) + ')-(' + valueText(aoi.x2) + ',' + valueText(aoi.y2) + ')';
+	}
+
+	function addPublishUseCase(lines, name, config, publish) {
+		config = config || {};
+		lines.push(name + ':');
+		lines.push('  Publishing enabled: ' + valueText(config.enabled));
+		lines.push('  LoRaWAN port: ' + valueText(config.port));
+		if (config.intervalMinutes != null) lines.push('  Publish interval minutes: ' + valueText(config.intervalMinutes));
+		if (config.heartbeatMinutes != null) lines.push('  Inactive heartbeat minutes: ' + valueText(config.heartbeatMinutes));
+		if (config.activeIntervalSeconds != null) lines.push('  Active publish seconds: ' + valueText(config.activeIntervalSeconds));
+		if (config.transitionSeconds != null) lines.push('  Hold time seconds: ' + valueText(config.transitionSeconds));
+		if (config.type) lines.push('  Occupancy type: ' + valueText(config.type));
+		if (config.label) lines.push('  Detection label: ' + valueText(config.label));
+		if (config.aoi) lines.push('  AOI: ' + aoiText(config.aoi));
+		if (publish) {
+			lines.push('  Next publish: ' + timeText(publish.nextPublishTime));
+			lines.push('  Seconds until publish: ' + valueText(publish.secondsUntilPublish));
+			lines.push('  Last publish: ' + timeText(publish.lastPublishTime));
+		}
+	}
+
+	function buildInstallationInfo(report) {
+		const app = report.app || {};
+		const settings = app.settings || {};
+		const status = report.status || {};
+		const counters = report.counters || {};
+		const bridgeInfo = report.bridgeInfo || {};
+		const bridgeParams = report.bridgeParams || {};
+		const gps = report.gps || status.gps || {};
+		const transmission = settings.transmission || {};
+		const setup = (((app.manifest || {}).acapPackageConf || {}).setup) || {};
+		const device = app.device || {};
+		const lines = [];
+
+		lines.push('AI-B100 Radar - Installation Info');
+		lines.push('Generated: ' + new Date().toLocaleString());
+		lines.push('Host: ' + location.host);
+
+		addSection(lines, 'Camera Information');
+		addObjectFields(lines, device, [
+			['Model', 'model'], ['Firmware', 'firmware'], ['Serial', 'serial'], ['Platform', 'platform'], ['Chip', 'chip'], ['IPv4', 'IPv4']
+		]);
+		addField(lines, 'ACAP name', setup.friendlyName);
+		addField(lines, 'ACAP package', setup.appName);
+		addField(lines, 'ACAP version', setup.version);
+		addField(lines, 'ACAP vendor', setup.vendor);
+		addField(lines, 'ACAP architecture', setup.architecture || device.chip);
+
+		addSection(lines, 'Bridge Information');
+		addObjectFields(lines, status.bridge, [
+			['Bridge connected', 'connected'], ['Hardware', 'hardware'], ['Hardware version', 'hardwareVersion'], ['Firmware', 'firmwareVersion'], ['IP address', 'ipAddr'], ['Power source', 'powerSource'], ['DevEUI', 'devEUI'], ['DevAddr', 'devAddr'], ['Restart counter', 'restartCounter'], ['Temperature C', 'tempC'], ['HTTP API enabled', 'httpApiEnabled'], ['Callbacks active', 'callbacksActive'], ['B100 callback self-test', 'callbackStatus'], ['Tamper', 'tamper'], ['GPS status', 'gpsStatus']
+		]);
+		if ((status.bridge || {}).callbacksActive && (status.bridge || {}).callbackStatus === 'fail')
+			addField(lines, 'Callback note', 'B100 /info reports fail, but ACAP callbacks are active and callback-derived status is being received');
+		addObjectFields(lines, status.lorawan, [
+			['LoRaWAN connected', 'connected'], ['Joined', 'joined'], ['Status code', 'statusCode'], ['Status text', 'statusText'], ['Frame counter up', 'fcntUp'], ['Frame counter down', 'fcntDown'], ['Data rate', 'dataRate'], ['Max payload', 'maxPayload'], ['RSSI', 'rssi'], ['SNR', 'snr'], ['Link margin', 'margin'], ['Gateway count', 'gwCount'], ['Next upload ms', 'nextUploadMs'], ['Last downlink port', 'lastDownlinkPort'], ['Last downlink length', 'lastDownlinkLength']
+		]);
+		addField(lines, 'Network time', timeText((status.lorawan || {}).tUnix));
+		addField(lines, 'Last downlink time', timeText((status.lorawan || {}).downlinkTUnix));
+
+		lines.push('');
+		lines.push('ACAP bridge settings:');
+		addObjectFields(lines, settings.b100, [
+			['Bridge IP', 'ip'], ['Bridge HTTP port', 'port'], ['HTTP timeout seconds', 'timeout'], ['Callback IP', 'callbackIP'], ['Callback port', 'callbackPort'], ['Callback digest user', 'callbackDigestUser']
+		]);
+		lines.push('');
+		lines.push('Bridge parameter endpoint:');
+		addObjectFields(lines, bridgeParams, [
+			['ADR enabled', 'adr_enable'], ['Data rate', 'data_rate'], ['Join data rate', 'data_rate_join'], ['Auto join enabled', 'autojoin_enable'], ['Duty cycle check', 'duty_check_enable'], ['MQTT enabled', 'mqtt_enable'], ['Broker address', 'broker_addr'], ['Tamper port', 'tamper_port']
+		]);
+		if (Object.keys(bridgeInfo).length > 0) {
+			lines.push('');
+			lines.push('Bridge info endpoint:');
+			addObjectFields(lines, bridgeInfo, [
+				['Device EUI', 'dev_eui'], ['Device address', 'dev_addr'], ['Firmware version', 'FW_ver'], ['Hardware', 'HW'], ['Callback configured address', 'callback_configured_addr'], ['Callback configured port', 'callback_configured_port'], ['Callback status URI', 'callback_status_uri'], ['Callback receive URI', 'callback_receive_uri']
+			]);
+		}
+
+		addSection(lines, 'Publish Settings');
+		addPublishUseCase(lines, 'Counting', transmission.counting || {}, (counters.publish || {}).counting);
+		addPublishUseCase(lines, 'Occupancy', transmission.occupancy || {}, (counters.publish || {}).occupancy);
+		addPublishUseCase(lines, 'Detection Alert', transmission.alert || {}, (counters.publish || {}).alert);
+
+		addSection(lines, 'Radar Status');
+		addObjectFields(lines, status.radar, [
+			['Connected', 'connected'], ['Status', 'status'], ['Current occupancy', 'occupancy'], ['Human count', 'human'], ['Vehicle count', 'vehicle'], ['Unknown count', 'unknown'], ['Tracked objects', 'trackedObjects'], ['Peak occupancy', 'peakOccupancy'], ['Mode', 'modeLabel']
+		]);
+		addField(lines, 'Configured object class', (settings.radar || {}).objectClass);
+		addField(lines, 'Stale timeout seconds', (settings.radar || {}).staleTimeoutSeconds);
+		addField(lines, 'Minimum dwell seconds', (settings.radar || {}).minDwellSeconds);
+		addField(lines, 'Minimum confidence', (settings.radar || {}).minConfidence);
+		addField(lines, 'Radar AOI', aoiText((settings.radar || {}).aoi));
+
+		addSection(lines, 'GPS');
+		addObjectFields(lines, gps, [
+			['GPS status', 'gps_status'], ['Latitude', 'lat'], ['Longitude', 'lon'], ['Altitude', 'alt'], ['Satellites', 'nosv'], ['PDOP', 'pdop'], ['HDOP', 'hdop'], ['VDOP', 'vdop'], ['UTC', 'utc'], ['Date', 'date']
+		]);
+
+		if (report.errors.length > 0) {
+			addSection(lines, 'Collection Warnings');
+			report.errors.forEach(function(error) { lines.push(error); });
+		}
+
+		return lines.join('\n') + '\n';
+	}
+
+	async function collectInstallationInfo() {
+		const results = await Promise.all([
+			fetchJson({ type: 'GET', url: 'app' }),
+			fetchJson({ type: 'GET', url: 'status' }),
+			fetchJson({ type: 'GET', url: 'counters' }),
+			fetchJson({ type: 'GET', url: 'b100_info' }),
+			fetchJson({ type: 'GET', url: 'b100_params' }),
+			fetchJson({ type: 'GET', url: 'gps' })
+		]);
+		const names = ['app', 'status', 'counters', 'bridgeInfo', 'bridgeParams', 'gps'];
+		const report = { errors: [] };
+		results.forEach(function(result, index) {
+			if (result.ok) report[names[index]] = result.data;
+			else {
+				report[names[index]] = {};
+				report.errors.push(names[index] + ': ' + result.error);
+			}
+		});
+		return report;
+	}
+
+	// Download button
+	$('#btn-download').on('click', async function() {
+		const $button = $(this);
+		const originalText = $button.text();
+		$button.prop('disabled', true).text('Preparing...');
+		const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+		const filename = `aib100-radar-installation-info-${timestamp}.txt`;
+
+		const report = await collectInstallationInfo();
+		const dataStr = buildInstallationInfo(report);
+		const dataBlob = new Blob([dataStr], { type: 'text/plain' });
+		const url = URL.createObjectURL(dataBlob);
+		
+		const link = document.createElement('a');
+		link.href = url;
+		link.download = filename;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+		URL.revokeObjectURL(url);
+		$button.prop('disabled', false).text(originalText);
+		
+		showToast("Installation info downloaded: " + filename, 'success');
+	});
+});
+</script>
+</body>
+</html>
