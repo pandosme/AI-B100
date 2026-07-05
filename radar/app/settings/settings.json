@@ -3,7 +3,7 @@
     "ip": "192.168.1.250",
     "port": 80,
     "timeout": 30,
-    "callbackIP": "192.168.1.2",
+    "callbackIP": "192.168.1.200",
     "callbackPort": 80,
     "callbackDigestUser": "aib100",
     "callbackDigestPassword": "aib100"

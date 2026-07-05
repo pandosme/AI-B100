@@ -1,10 +1,20 @@
-# Radar
+# AI-B100 Radar
 
 An Axis ACAP application for radar-equipped Axis cameras. The app subscribes to Axis radar scene data, estimates occupancy from tracked radar objects, and publishes compact numeric snapshots over LoRaWAN through an AI-B100 bridge.
 
-The package name is `aib100`, matching the AOA app. This allows the Radar and AOA variants to reuse the same ACAP settings, HTTP endpoint paths, and AI-B100 callback configuration when switching between applications. The user-facing name shown in the camera UI is **Radar**.
+The package name is `aib100`, matching the AOA app. This allows the Radar and AOA variants to reuse the same ACAP settings, HTTP endpoint paths, and AI-B100 callback configuration when switching between applications. The user-facing name shown in the camera UI is **AI-B100 Radar**.
 
 Only numeric occupancy data is transmitted. No images or video leave the camera.
+
+## What It Does
+
+- Subscribes to the Axis radar scene provider and tracks moving radar objects locally on the camera.
+- Exposes Occupancy and Detection Alert as active use cases. Counting is reserved on port `1` but is currently hidden because that use case is not developed.
+- Publishes each enabled use case on a fixed LoRaWAN port through the AI-B100 bridge.
+- Supports Human or Vehicle label selection and optional area-of-interest filtering for each use case.
+- Receives AI-B100 status, downlink, GPS, and link-check callbacks.
+- Provides web pages for Publish, Occupancy, Detection Alert, Radar, LoRA Bridge, LoRA Downlink, GPS, and About.
+- Provides a JavaScript translator and a plain-text Installation Info report for field documentation.
 
 ## Deployment
 
@@ -12,11 +22,11 @@ For hardware setup, IP addressing, camera account setup, bridge LAN configuratio
 
 - [../DEPLOYMENT.md](../DEPLOYMENT.md)
 
-The packaged defaults follow that deployment guide:
+The recommended field setup is:
 
-| Setting | Default |
-|---------|---------|
-| Camera callback address | `192.168.1.2` |
+| Setting | Recommended value |
+|---------|-------------------|
+| Camera callback address | `192.168.1.200` |
 | AI-B100 bridge address | `192.168.1.250` |
 | Callback digest user | `aib100` |
 | Callback digest password | `aib100` |
@@ -36,33 +46,45 @@ Axis radar camera + ACAP  <--HTTP callbacks/status-->  AI-B100 bridge  --LoRaWAN
 
 The camera runs the radar scene provider and this ACAP locally. The ACAP reads radar objects, maintains independent use-case state, encodes compact binary payloads, and sends them to the AI-B100 bridge over HTTP. The bridge transmits the payload over LoRaWAN and forwards downlinks back to the ACAP by HTTP callback.
 
+The app is served from the shared package path `/local/aib100/`. The package friendly name is **AI-B100 Radar** and the package `appName` is `aib100`.
+
 ## Web UI
 
 Open the app from the Axis camera Apps page. The main pages are:
 
 | Page | Purpose |
 |------|---------|
-| Publish | Enable/disable each use case, view fixed LoRaWAN ports, see next publish times, publish manually, download decoder, and view the last 20 publishes |
-| Area Balance | Select Human or Vehicle detection, publish frequency, and optional area of interest for entering/exiting counts on fixed uplink port 1 |
-| Occupancy | Select Interval Maximum or Area Balance, Human or Vehicle detection, publish frequency, and area of interest for fixed uplink port 2 |
+| Publish | Enable/disable active use cases, view fixed LoRaWAN ports, see next publish times, publish manually, download decoder, and view the last 20 publishes |
+| Occupancy | Select Human or Vehicle detection, publish frequency, and optional area of interest for fixed uplink port 2 |
 | Detection Alert | Select Human or Vehicle detection, inactive heartbeat publish, active publish, hold time, and optional area of interest for fixed uplink port 3 |
 | Radar | View the live stream and set Radar Detection Sensitivity |
 | LoRA Bridge | Configure bridge IP, callback address, callback credentials, join/restart/link-check, and bridge parameters |
 | LoRA Downlink | View received downlinks and enable/disable supported command bytes |
 | GPS | View GPS information reported by the AI-B100 bridge |
-| About | App, camera, and decoder information |
+| About | App, camera, decoder, and Installation Info report |
+
+## Operating Flow
+
+1. Install and start the `.eap` package from the Axis camera Apps page.
+2. Open the app UI and go to **LoRA Bridge**.
+3. Set the AI-B100 bridge IP, callback IP, callback port, and callback digest credentials. Save, then request status or join.
+4. Use **Radar** to verify the live stream and set Radar Detection Sensitivity.
+5. Configure **Occupancy** and/or **Detection Alert** with the desired label, publish timing, and optional area of interest.
+6. Go to **Publish** to enable the desired use cases, publish manually, and inspect recent uplinks.
+7. Download the JavaScript translator from **Publish** or **About** after changing use-case modes or labels.
+8. Use **LoRA Downlink**, **GPS**, and **About** for received downlinks, GPS callback data, link state, and the Installation Info report.
 
 ## Use Cases
 
-Axis radar reports moving tracked objects. The app now runs use cases independently so Counting, Occupancy, and Detection Alert can be enabled at the same time.
+Axis radar reports moving tracked objects. The app runs use cases independently. Occupancy and Detection Alert are currently exposed in the UI; Counting is reserved but hidden until that use case is developed.
 
-### Area Balance
+### Counting
 
-Area Balance uses fixed uplink port `1`. It counts selected Human or Vehicle objects entering and exiting the configured area of interest during the publish interval. On publish, it sends entering and exiting counts and then resets the interval counters.
+Counting is reserved for fixed uplink port `1`, but the card is hidden in the UI because the use case is not currently developed.
 
 ### Occupancy
 
-Occupancy uses fixed uplink port `2`. It can publish either the interval maximum or Area Balance, with a publish frequency from 1 to 60 minutes. It can count Humans or Vehicles. Area Balance requires an area of interest and counts selected detections entering and exiting that area.
+Occupancy uses fixed uplink port `2`. It publishes the interval maximum with a publish frequency from 1 to 60 minutes. It can count Humans or Vehicles and can optionally limit counting to an area of interest.
 
 ### Interval Peak
 
@@ -82,13 +104,12 @@ The Radar page shows the live stream and reads/sets the camera Radar Detection S
 
 ## LoRaWAN Uplink Payload
 
-Each use case has a fixed LoRaWAN port, so compact payloads do not include a mode byte. Area Balance publishes on port `1`, Occupancy publishes on port `2`, and Detection Alert publishes on port `3`. Counts are clamped to unsigned 8-bit values, `0-255`. The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in the uplink.
+Each use case has a fixed LoRaWAN port, so compact payloads do not include a mode byte. Counting is reserved on port `1`, Occupancy publishes on port `2`, and Detection Alert publishes on port `3`. Counts are clamped to unsigned 8-bit values, `0-255`. The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in the uplink.
 
 | Port | Use case | Payload |
 |------|----------|---------|
-| `1` | Area Balance | 2 bytes: `[entering, exiting]` |
+| `1` | Counting | Reserved; hidden in the UI until developed |
 | `2` | Occupancy Interval Maximum | 1 byte: `[selected_label_interval_max]` |
-| `2` | Occupancy Area Balance | 2 bytes: `[entering, exiting]` |
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
 | `3` | Detection Alert active | 1 byte: `[selected_label_count]` |
 
@@ -96,6 +117,8 @@ The decoder is available in two places:
 
 - [translator.js](translator.js)
 - **Publish** or **About** page in the ACAP UI, using **Download JavaScript Translator**
+
+Download a fresh translator after changing enabled use cases, labels, Occupancy type, or area settings.
 
 ## Downlink Commands
 
@@ -129,7 +152,7 @@ Port 110 commands use two bytes: `[command, value]`.
 
 ## HTTP Endpoints
 
-The app uses the same package path as the AOA Counter app:
+The app uses the shared AI-B100 package path:
 
 ```text
 /local/aib100/<endpoint>
@@ -151,7 +174,9 @@ Important endpoints include:
 | `b100_receive` | POST | AI-B100 downlink callback endpoint |
 | `b100_gps` | POST | AI-B100 GPS callback endpoint |
 | `b100_info` | GET | AI-B100 bridge identity and callback status |
+| `b100_params` | GET/POST | Read or update AI-B100 bridge parameters |
 | `b100_request_status` | POST | Configure callbacks and request bridge status |
+| `linkcheck` | POST | Request AI-B100 link-check status |
 
 The callback URI values are short enough for the AI-B100 firmware limit:
 
@@ -171,7 +196,7 @@ The packaged default settings are:
 		"ip": "192.168.1.250",
 		"port": 80,
 		"timeout": 30,
-		"callbackIP": "192.168.1.2",
+		"callbackIP": "192.168.1.200",
 		"callbackPort": 80,
 		"callbackDigestUser": "aib100",
 		"callbackDigestPassword": "aib100"
@@ -223,14 +248,14 @@ The packaged default settings are:
 ## Building
 
 ```bash
-cd radar-occupancy
+cd radar
 ./build.sh
 ```
 
 Output:
 
-- `Radar_1_2_0_aarch64.eap`
-- `Radar_1_2_0_armv7hf.eap`
+- `AI-B100_Radar_1_2_0_aarch64.eap`
+- `AI-B100_Radar_1_2_0_armv7hf.eap`
 
 Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
 
@@ -239,7 +264,7 @@ Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 came
 Upload the correct `.eap` file through the Axis camera Apps page, or use the helper script:
 
 ```bash
-./install.sh <camera-host> Radar_1_2_0_aarch64.eap
+./install.sh <camera-host> AI-B100_Radar_1_2_0_aarch64.eap
 ```
 
 If an older `radaroccupancy` package is still installed, remove it before using this package. Both the Radar and AOA variants now use `appName: "aib100"`; this is intentional so settings and callback paths are reused.

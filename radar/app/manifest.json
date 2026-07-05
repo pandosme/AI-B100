@@ -3,7 +3,7 @@
     "schemaVersion": "1.7.1",
     "acapPackageConf": {
         "setup": {
-			"friendlyName": "Radar",
+			"friendlyName": "AI-B100 Radar",
 			"appName": "aib100",
             "vendor": "Fred Juhlin",
             "embeddedSdkVersion": "3.0",

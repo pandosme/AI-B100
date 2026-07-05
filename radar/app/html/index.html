@@ -35,9 +35,9 @@
 
 	<div class="page-content">
 		<div class="row mb-4">
-			<div class="col-12 col-lg-4 mb-3 d-flex">
+			<div class="col-12 col-lg-4 mb-3 d-none">
 				<div class="card publish-card w-100">
-					<div class="card-header"><h5 class="card-title mb-0">Area Balance</h5></div>
+					<div class="card-header"><h5 class="card-title mb-0">Counting</h5></div>
 					<div class="card-body">
 						<div class="form-check form-switch mb-3">
 							<input class="form-check-input publish-toggle" type="checkbox" id="countingEnabled" data-stream="counting">
@@ -53,7 +53,7 @@
 				</div>
 			</div>
 
-			<div class="col-12 col-lg-4 mb-3 d-flex">
+			<div class="col-12 col-lg-6 mb-3 d-flex">
 				<div class="card publish-card w-100">
 					<div class="card-header"><h5 class="card-title mb-0">Occupancy</h5></div>
 					<div class="card-body">
@@ -71,7 +71,7 @@
 				</div>
 			</div>
 
-			<div class="col-12 col-lg-4 mb-3 d-flex">
+			<div class="col-12 col-lg-6 mb-3 d-flex">
 				<div class="card publish-card w-100">
 					<div class="card-header"><h5 class="card-title mb-0">Detection Alert</h5></div>
 					<div class="card-body">
@@ -207,9 +207,8 @@ function updateStreamCard(stream, publish) {
 		$('#countingInterval').text((publish.intervalMinutes || 15) + ' min');
 	}
 	if (stream === 'occupancy') {
-		const areaBalance = publish.type === 'areaBalance';
-		$('#occupancyType').text(areaBalance ? 'Area Balance' : 'Interval Maximum');
-		$('#occupancyStatus').text(areaBalance ? ((publish.entering || 0) + ' in / ' + (publish.exiting || 0) + ' out') : (publish.count || 0));
+		$('#occupancyType').text('Interval Maximum');
+		$('#occupancyStatus').text(publish.count || 0);
 		$('#occupancyInterval').text((publish.intervalMinutes || 15) + ' min');
 	}
 	if (stream === 'alert') {

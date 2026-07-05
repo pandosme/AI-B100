@@ -2,14 +2,11 @@
  * Radar LoRaWAN Decoder
  *
  * Uplink payloads
- * - Port 1, Area Balance, 2 bytes:
+ * - Port 1, Counting, 2 bytes:
  *   byte[0] = selected-label entering count, uint8, 0-255
  *   byte[1] = selected-label exiting count, uint8, 0-255
  * - Port 2, Occupancy Interval Maximum, 1 byte:
  *   byte[0] = selected-label maximum occupancy during interval, uint8, 0-255
- * - Port 2, Occupancy Area Balance, 2 bytes:
- *   byte[0] = selected-label entering count, uint8, 0-255
- *   byte[1] = selected-label exiting count, uint8, 0-255
  * - Port 3, Detection Alert, 1 byte:
  *   byte[0] = selected-label detection count, uint8, 0-255. 0 means inactive/no detections.
  *
@@ -104,30 +101,19 @@ function decodeRadarOccupancy(bytes, fPort) {
   if (!bytes) throw new Error('Missing bytes');
 
   if (fPort === 1) {
-    if (bytes.length !== 2) throw new Error('Area Balance payload must be 2 bytes');
+    if (bytes.length !== 2) throw new Error('Counting payload must be 2 bytes');
     return {
       port: fPort,
-      messageType: 'area_balance',
-      useCase: 'area_balance',
-      useCaseLabel: 'Area Balance',
+      messageType: 'counting',
+      useCase: 'counting',
+      useCaseLabel: 'Counting',
       entering: byteValue(bytes[0]),
       exiting: byteValue(bytes[1])
     };
   }
 
   if (fPort === 2) {
-    if (bytes.length === 2) {
-      return {
-        port: fPort,
-        messageType: 'occupancy_area_balance',
-        useCase: 'occupancy_area_balance',
-        useCaseLabel: 'Occupancy Area Balance',
-        entering: byteValue(bytes[0]),
-        exiting: byteValue(bytes[1])
-      };
-    }
-
-    if (bytes.length !== 1) throw new Error('Occupancy payload must be 1 or 2 bytes');
+    if (bytes.length !== 1) throw new Error('Occupancy payload must be 1 byte');
     return {
       port: fPort,
       messageType: 'occupancy_interval_maximum',

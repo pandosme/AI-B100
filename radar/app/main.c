@@ -190,8 +190,7 @@ Occupancy_Type_Name(int type) {
 
 static int
 Occupancy_Type_From_String(const char* value) {
-	if (value && (strcasecmp(value, "areaBalance") == 0 || strcasecmp(value, "area-balance") == 0))
-		return OCCUPANCY_TYPE_AREA_BALANCE;
+	(void)value;
 	return OCCUPANCY_TYPE_MAXIMUM;
 }
 
@@ -948,10 +947,18 @@ Radar_Reset_State(void) {
 // ==================================================================
 
 static void
-Load_Transmission_Config(cJSON* transmission, int reset_schedule) {
+Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 	if (!transmission) return;
 	time_t now = time(NULL);
 	pthread_mutex_lock(&g_publish_mutex);
+	int old_counting_enabled = g_counting_publish_enabled;
+	int old_counting_interval_minutes = g_counting_interval_minutes;
+	int old_occupancy_enabled = g_occupancy_publish_enabled;
+	int old_occupancy_interval_minutes = g_occupancy_interval_minutes;
+	int old_alert_enabled = g_alert_publish_enabled;
+	int old_alert_heartbeat_minutes = g_alert_heartbeat_minutes;
+	int old_alert_active_interval_seconds = g_alert_active_interval_seconds;
+	int reset_alert_timers = 0;
 
 	cJSON* legacy_enabled = cJSON_GetObjectItem(transmission, "enabled");
 	cJSON* legacy_interval = cJSON_GetObjectItem(transmission, "intervalMinutes");
@@ -1052,11 +1059,35 @@ Load_Transmission_Config(cJSON* transmission, int reset_schedule) {
 		}
 	}
 
-	if (reset_schedule) {
+	if (initialize_schedule) {
 		g_counting_next_publish_time = now + (g_counting_interval_minutes * 60);
 		g_occupancy_next_publish_time = now + (g_occupancy_interval_minutes * 60);
+	} else {
+		int counting_schedule_changed = counting &&
+			((!old_counting_enabled && g_counting_publish_enabled) ||
+			 old_counting_interval_minutes != g_counting_interval_minutes ||
+			 g_counting_next_publish_time == 0);
+		int occupancy_schedule_changed = (occupancy || (!occupancy && (legacy_enabled || legacy_interval))) &&
+			((!old_occupancy_enabled && g_occupancy_publish_enabled) ||
+			 old_occupancy_interval_minutes != g_occupancy_interval_minutes ||
+			 g_occupancy_next_publish_time == 0);
+		int alert_schedule_changed = alert &&
+			((!old_alert_enabled && g_alert_publish_enabled) ||
+			 old_alert_heartbeat_minutes != g_alert_heartbeat_minutes ||
+			 old_alert_active_interval_seconds != g_alert_active_interval_seconds);
+
+		if (counting_schedule_changed)
+			g_counting_next_publish_time = now + (g_counting_interval_minutes * 60);
+		if (occupancy_schedule_changed)
+			g_occupancy_next_publish_time = now + (g_occupancy_interval_minutes * 60);
+		if (alert_schedule_changed) {
+			g_alert_last_publish_time = 0;
+			reset_alert_timers = 1;
+		}
 	}
 	pthread_mutex_unlock(&g_publish_mutex);
+	if (reset_alert_timers)
+		Alert_Reset_Timers();
 }
 
 void
@@ -1107,7 +1138,7 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 	}
 
 	if (strcmp(service, "transmission") == 0) {
-		Load_Transmission_Config(data, 1);
+		Load_Transmission_Config(data, 0);
 	}
 
 	if (strcmp(service, "radar") == 0) {
@@ -1856,36 +1887,19 @@ static int
 Publish_Occupancy_To_LoRa(void) {
 	pthread_mutex_lock(&g_publish_mutex);
 	int enabled = g_occupancy_publish_enabled;
-	int type = g_occupancy_type;
-	int aoi_enabled = g_occupancy_aoi_enabled;
 	int label_bucket = g_occupancy_label_bucket;
 	pthread_mutex_unlock(&g_publish_mutex);
 	if (!enabled)
 		return 0;
 
-	unsigned char buffer[2];
-	int length = 1;
+	unsigned char buffer[1];
+	int length = (int)sizeof(buffer);
 	const char* stream = "occupancy";
-	RadarAreaBalance balance = {0, 0};
-	if (type == OCCUPANCY_TYPE_AREA_BALANCE) {
-		if (!aoi_enabled) {
-			LOG_WARN("LoRa: Occupancy Area Balance requires an enabled AOI\n");
-			return 0;
-		}
-		balance = Occupancy_Area_Balance();
-		Build_Area_Balance_Payload(buffer, balance);
-		length = 2;
-		stream = "occupancy-area-balance";
-	} else {
-		RadarCounts counts = Occupancy_Peak_Counts();
-		Build_Selected_Count_Payload(buffer, counts, label_bucket);
-	}
+	RadarCounts counts = Occupancy_Peak_Counts();
+	Build_Selected_Count_Payload(buffer, counts, label_bucket);
 	if (!Send_LoRa_Payload(stream, LORA_PORT_OCCUPANCY, buffer, length))
 		return 0;
-	if (type == OCCUPANCY_TYPE_AREA_BALANCE)
-		Occupancy_Mark_Area_Balance_Published(balance);
-	else
-		Occupancy_Mark_Published();
+	Occupancy_Mark_Published();
 	pthread_mutex_lock(&g_publish_mutex);
 	time_t now = time(NULL);
 	g_occupancy_last_publish_time = now;
@@ -2264,14 +2278,11 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		" * Generated: %s\n"
 		" *\n"
 		" * Uplink payloads\n"
-		" * - Port 1, Area Balance, 2 bytes:\n"
+		" * - Port 1, Counting, 2 bytes:\n"
 		" *   byte[0] = selected-label entering count, uint8, 0-255\n"
 		" *   byte[1] = selected-label exiting count, uint8, 0-255\n"
 		" * - Port 2, Occupancy Interval Maximum, 1 byte:\n"
 		" *   byte[0] = selected-label maximum occupancy during interval, uint8, 0-255\n"
-		" * - Port 2, Occupancy Area Balance, 2 bytes:\n"
-		" *   byte[0] = selected-label entering count, uint8, 0-255\n"
-		" *   byte[1] = selected-label exiting count, uint8, 0-255\n"
 		" * - Port 3, Detection Alert, 1 byte:\n"
 		" *   byte[0] = selected-label detection count, uint8, 0-255. 0 means inactive/no detections.\n"
 		" *\n"
@@ -2312,12 +2323,11 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"function decodeRadarOccupancy(bytes, fPort) {\n"
 		"  if (!bytes) throw new Error('Missing bytes');\n"
 		"  if (fPort === 1) {\n"
-		"    if (bytes.length !== 2) throw new Error('Area Balance payload must be 2 bytes');\n"
-		"    return { port: fPort, messageType: 'area_balance', useCase: 'area_balance', useCaseLabel: 'Area Balance', entering: byteValue(bytes[0]), exiting: byteValue(bytes[1]) };\n"
+		"    if (bytes.length !== 2) throw new Error('Counting payload must be 2 bytes');\n"
+		"    return { port: fPort, messageType: 'counting', useCase: 'counting', useCaseLabel: 'Counting', entering: byteValue(bytes[0]), exiting: byteValue(bytes[1]) };\n"
 		"  }\n"
 		"  if (fPort === 2) {\n"
-		"    if (bytes.length === 2) return { port: fPort, messageType: 'occupancy_area_balance', useCase: 'occupancy_area_balance', useCaseLabel: 'Occupancy Area Balance', entering: byteValue(bytes[0]), exiting: byteValue(bytes[1]) };\n"
-		"    if (bytes.length !== 1) throw new Error('Occupancy payload must be 1 or 2 bytes');\n"
+		"    if (bytes.length !== 1) throw new Error('Occupancy payload must be 1 byte');\n"
 		"    return { port: fPort, messageType: 'occupancy_interval_maximum', useCase: 'occupancy', useCaseLabel: 'Occupancy Interval Maximum', count: byteValue(bytes[0]) };\n"
 		"  }\n"
 		"  if (fPort === 3) {\n"

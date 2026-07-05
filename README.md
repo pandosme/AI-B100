@@ -1,99 +1,140 @@
-# AI-B100 — Axis Camera ACAP Collection
+# AI-B100 Axis ACAP Collection
 
-## What Is the AI-B100?
+This repository contains Axis ACAP applications that connect Axis camera analytics to LoRaWAN through an AI-B100 bridge. The top-level README gives the repository overview. The app-specific README files explain how each ACAP works and how to operate it:
 
-The **AI-B100** is an industrial LoRaWAN bridge by [AI Embedded Nordic AB](https://www.ai-embedded.se) that connects Ethernet-based devices — such as Axis cameras — to LoRaWAN networks. It sits on your local LAN and handles all LoRa radio communication, so the camera only needs to make simple HTTP calls over the local network.
+- [aoa/README.md](aoa/README.md) - AI-B100 AOA for Axis Object Analytics Counting and Occupancy
+- [radar/README.md](radar/README.md) - AI-B100 Radar for radar Occupancy and Detection Alert, with Counting reserved for future use
 
-| Property | Value |
-|----------|-------|
-| Protocol | LoRaWAN 1.0.4, Class A and Class C |
-| Region | EU868 (other regions available) |
-| LAN | 10/100 Ethernet, DHCP or static IP |
-| Interface | JSON HTTP REST API |
-| Configuration | Built-in web UI — no CLI required |
-| Power | USB-C 5 V (standard) |
-| Operating range | −20 °C to +85 °C |
+For complete bench staging and field setup, including static IP addressing, camera accounts, bridge callbacks, LoRaWAN registration, and end-to-end verification, follow [DEPLOYMENT.md](DEPLOYMENT.md). The recommended static addresses are camera/radar `192.168.1.200` and AI-B100 bridge `192.168.1.250`.
 
-**Variants:**
-- **AI-B100**
-- **AI-B100-GPS** — GPS antenna
-
-Contact: **ai-b100@ai-embedded.se** | **www.ai-embedded.se**  
-Location: AI Embedded Nordic AB, Vellinge, Sweden
+The camera runs the analytics and ACAP locally. The ACAP sends only compact numeric payloads to the AI-B100 bridge over the local LAN; no images or video are sent over LoRaWAN.
 
 ---
 
-## Why Use These ACAPs?
+## What The System Does
 
-Standard Axis camera integrations rely on IP connectivity — cloud subscriptions, VPNs, or internet access at the installation site. These ACAPs remove that dependency entirely:
+The AI-B100 is an Ethernet-to-LoRaWAN bridge from AI Embedded Nordic AB. It exposes a local HTTP API to the camera and handles LoRaWAN join, uplink, downlink, callback, GPS, and link-quality reporting.
 
-- The camera processes data **locally** using Axis analytics
-- The ACAP communicates with the AI-B100 **over the local LAN via HTTP**
-- The AI-B100 transmits compact payloads **over LoRaWAN radio** to any standard LoRaWAN network
-
-This makes the solution suitable for:
-
-| Scenario | Why it fits |
-|----------|-------------|
-| **Remote sites** | LoRaWAN is the only available connectivity |
-| **Smart city installations** | Uses the existing city LoRaWAN infrastructure |
-| **GDPR-sensitive deployments** | Only anonymised/numeric data leaves the device — no images, no video |
-| **Locations without internet** | No cloud subscription or IP backhaul needed |
-| **Unattended long-term deployments** | Configurable watchdog, Class C downlink for remote commands |
-
----
-
-## Typical Hardware Setup
-
-```
-┌─────────────────────────────────────────────┐
-│  Local LAN (PoE Switch)                     │
-│                                             │
-│  ┌────────────┐  HTTP/REST   ┌───────────┐  │
-│  │ Axis Camera│◄────────────►│  AI-B100  │  │
-│  │  + ACAP    │              │  Bridge   │  │
-│  └────────────┘              └─────┬─────┘  │
-│                                    │ LoRa   │
-└────────────────────────────────────┼────────┘
-                                     │
-                              LoRaWAN Gateway
-                                     │
-                        LoRaWAN Network Server
-                        (TTN / Chirpstack / private)
-                                     │
-                          Your backend / dashboard
+```text
+Axis camera + ACAP
+       |
+       | HTTP on local PoE/LAN network
+       v
+AI-B100 LoRaWAN bridge
+       |
+       | LoRaWAN uplink/downlink
+       v
+LoRaWAN gateway / network server
+       |
+       v
+Backend, dashboard, TTN, ChirpStack, Node-RED, or private LNS
 ```
 
-**Minimum bill of materials:**
-- Axis camera (ACAP v4+)
-- AI-B100 bridge
-- PoE switch (to power the camera and provide a commissioning port)
-- PoE splitter with USB-C 5 V output (to power the standard AI-B100 from the PoE switch)
-
-If using the **AI-B100-POE** variant, connect it directly to the PoE switch — no splitter needed.
-
----
-
-## LoRaWAN Considerations
-
-- **Duty cycle** — LoRaWAN imposes regional transmission limits. ACAPs in this collection enforce a minimum publish interval to stay compliant. Typical safe minimum: 10–15 minutes.
-- **Payload size** — Payloads are kept compact. All ACAPs use binary or short ASCII encoding.
-- **Class C** — The AI-B100 in Class C mode listens continuously, so downlink commands from the network server arrive within seconds.
-- **Coverage** — Verify RSSI and SNR at the installation site before finalising the camera mount.
-- **Network servers** — The AI-B100 works with TTN, Chirpstack, and any standard LoRaWAN LNS.
+Typical deployments use an Axis camera, an AI-B100 or AI-B100-POE bridge, a local PoE switch, and a LoRaWAN gateway or existing LoRaWAN coverage. The site does not need internet access for the camera itself once the bridge is joined to the LoRaWAN network.
 
 ---
 
 ## Available ACAPs
 
-| Directory | ACAP | Description |
-|-----------|------|-------------|
-| [`aoa/`](aoa/) | **AI-B100 AOA Counter** | Reads Axis Object Analytics CrosslineCounting events and publishes aggregated people/vehicle counts over LoRaWAN |
+| Directory | ACAP package | Source analytics | Main LoRaWAN uplinks | Read more |
+| --- | --- | --- | --- | --- |
+| [aoa/](aoa/) | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2 | [aoa/README.md](aoa/README.md) |
+| [radar/](radar/) | AI-B100 Radar | Axis radar scene provider | Counting reserved on port 1, Occupancy on port 2, Detection Alert on port 3 | [radar/README.md](radar/README.md) |
 
-More ACAPs may be added here in the future, each in their own subdirectory with their own README.
+Both variants use ACAP `appName` `aib100`. This keeps the camera URL path, settings store, and AI-B100 callback paths stable when switching between the AOA and Radar variants. It also means the two variants are alternatives: install and run the one that matches the camera and use case.
+
+---
+
+## Shared Platform Behavior
+
+Both ACAPs share the same AI-B100 integration pattern:
+
+- The app UI is served from the Axis camera under `/local/aib100/`.
+- Persistent settings are stored by the ACAP on the camera.
+- The bridge is configured with short HTTP callback paths:
+  - `/local/aib100/b100_status`
+  - `/local/aib100/b100_receive`
+  - `/local/aib100/b100_gps`
+- Uplink payloads use fixed application ports so decoders can be simple and deterministic.
+- Management downlinks use reserved ports: actions on `100`, configuration on `110`, information requests on `120`, and information replies on `121` and `122`.
+- The LoRA Bridge page in each app handles bridge IP, callback address, callback credentials, join, restart, status request, and link check.
+- The LoRA Downlink page logs received downlinks and lets supported command bytes be enabled or disabled.
+- The GPS page shows GPS callback data when the bridge provides it.
+- The About page provides app/camera information and an installation report for field documentation.
+
+---
+
+## Which App To Use
+
+Use [AI-B100 AOA](aoa/README.md) when the camera uses Axis Object Analytics scenarios. It is the right choice for optical line counting, object-class counts, and AOA occupancy areas.
+
+Use [AI-B100 Radar](radar/README.md) on radar-equipped Axis cameras when you want radar-based counting, occupancy, or active/inactive detection alerts. Radar is useful where lighting, privacy, or weather conditions make video analytics less suitable.
+
+---
+
+## Operating Flow
+
+1. Stage the camera, bridge, static IP addresses, camera callback user, and LoRaWAN registration using the complete setup guide in [DEPLOYMENT.md](DEPLOYMENT.md).
+2. Install the matching `.eap` package for the camera architecture from either [aoa/](aoa/) or [radar/](radar/).
+3. Start the ACAP from the Axis camera Apps page and open its web UI.
+4. Configure the bridge IP and callback settings on the LoRA Bridge page, then request status or join.
+5. Configure the analytics use cases in the AOA or Radar pages.
+6. Enable the desired publish streams on the Publish page.
+7. Download the JavaScript translator/decoder from the Publish or About page and use it in the LoRaWAN network server.
+8. Verify end-to-end behavior with manual publish, scheduled publish, downlink commands, signal quality, and the installation report.
+
+Detailed operating instructions are in the app README files:
+
+- [AOA operation guide](aoa/README.md)
+- [Radar operation guide](radar/README.md)
+
+---
+
+## Build Packages
+
+Docker is required for the ACAP cross-builds.
+
+```bash
+cd aoa
+./build.sh
+
+cd ../radar
+./build.sh
+```
+
+Current package outputs:
+
+| App | ARTPEC-8/9 | ARTPEC-7 |
+| --- | --- | --- |
+| AOA | `AI-B100_AOA_1_2_0_aarch64.eap` | `AI-B100_AOA_1_2_0_armv7hf.eap` |
+| Radar | `AI-B100_Radar_1_2_0_aarch64.eap` | `AI-B100_Radar_1_2_0_armv7hf.eap` |
+
+Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
+
+---
+
+## Repository Layout
+
+| Path | Purpose |
+| --- | --- |
+| [aoa/](aoa/) | AI-B100 AOA ACAP source, UI, settings, build script, and packages |
+| [radar/](radar/) | AI-B100 Radar ACAP source, UI, settings, build script, decoder, and packages |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Shared field deployment guide |
+| [Customization.md](Customization.md) | Notes for cloning and adapting an ACAP variant |
+| [http_api.md](http_api.md) | AI-B100 HTTP API notes |
+| [images/](images/) | Shared documentation images |
+
+---
+
+## LoRaWAN Notes
+
+- Use Class C when low-latency downlink commands are required.
+- Verify RSSI and SNR at the installation site before final mounting.
+- Keep scheduled publish intervals conservative. A 10 to 15 minute interval is a typical safe starting point for EU868 duty-cycle limits.
+- Download a fresh decoder after changing enabled streams, labels, scenarios, areas, or occupancy modes.
 
 ---
 
 ## License
 
-MIT — see [aoa/app/LICENSE](aoa/app/LICENSE).
+MIT - see [aoa/app/LICENSE](aoa/app/LICENSE) and [radar/app/LICENSE](radar/app/LICENSE).

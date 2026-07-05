@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Complete field deployment guide for the AI-B100 AOA Counter system using an Axis camera, AI-B100 LoRaWAN bridge, and PoE infrastructure.
+Complete field deployment guide for AI-B100 Axis ACAP installations using an Axis camera or Axis radar camera, an AI-B100 LoRaWAN bridge, and PoE infrastructure.
 
 ---
 
@@ -8,7 +8,7 @@ Complete field deployment guide for the AI-B100 AOA Counter system using an Axis
 
 | Component | Description | Example |
 |-----------|-------------|---------|
-| **Axis camera** | Any model supporting ACAP v4+ and Axis Object Analytics | M3086-V, P3245-V, Q1656 |
+| **Axis camera or radar camera** | Any model supporting the selected ACAP variant | AOA camera, radar-equipped Axis camera |
 | **AI-B100 LoRaWAN bridge** | PoE-powered Ethernet-to-LoRaWAN bridge | [AI-B100-POE](https://www.ai-embedded.se) |
 | **PoE switch** | Unmanaged or managed; provides PoE to camera and bridge | Netgear GS305EPP |
 | **Ethernet cables** | Cat5e or better | Short runs for cabinet/pole mounting |
@@ -40,7 +40,7 @@ Both the camera and the AI-B100 are powered directly via PoE from the switch —
 
 ## Mounting Recommendations
 
-- **Camera:** Mount at 3–4 meters height for optimal AOA people/vehicle detection. Angle 30–45° downward.
+- **Camera:** Mount according to the selected analytics. For AOA line counting, 3–4 meters height with a 30–45° downward angle is a common starting point. For radar, follow the radar model's coverage and mounting recommendations.
 - **AI-B100:** Mount with antenna pointing upward (vertical polarization). Avoid metal enclosures that block RF.
 - **PoE switch:** If outdoors, use an IP65-rated enclosure with the switch inside.
 - **Antenna placement:** Keep the AI-B100 antenna above obstructions. For pole mounts, place at the top of the pole if possible.
@@ -57,9 +57,9 @@ There is **no DHCP server** on the local network — all devices must use static
 
 | Device | Static IP | Subnet Mask |
 |--------|-----------|-------------|
-| Laptop (commissioning) | 192.168.0.1 | 255.255.255.0 |
-| Axis camera | 192.168.0.2 | 255.255.255.0 |
-| AI-B100 bridge | 192.168.0.3 | 255.255.255.0 |
+| Laptop (commissioning example) | 192.168.1.10 | 255.255.255.0 |
+| Axis camera or radar camera | 192.168.1.200 | 255.255.255.0 |
+| AI-B100 bridge | 192.168.1.250 | 255.255.255.0 |
 
 > **Note:** The camera and AI-B100 must be on the same subnet. No router, DHCP server, or internet connection is required at the site. The laptop is only needed during commissioning.
 
@@ -86,10 +86,12 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 ### Step 1: Stage the Camera
 
 1. Connect the camera to your local LAN and use a browser to access it. *Use AXIS IP Utility or similar tools to find its IP address.*
-2. Install the ACAP:
-   - [AI-B100_AOA_Counter_1_x_x_aarch64.eap](https://raw.githubusercontent.com/pandosme/AI-B100/main/aoa/AI-B100_AOA_Counter_1_0_1_aarch64.eap) for ARTPEC-8 and ARTPEC-9 cameras
-   - [AI-B100_AOA_Counter_1_x_x_armv7hf.eap](https://raw.githubusercontent.com/pandosme/AI-B100/main/aoa/AI-B100_AOA_Counter_1_0_1_armv7hf.eap) for ARTPEC-7 cameras
-3. Start **AXIS Object Analytics**.
+2. Install the ACAP variant that matches the device and use case:
+   - `aoa/AI-B100_AOA_1_2_0_aarch64.eap` for AOA on ARTPEC-8 and ARTPEC-9 cameras
+   - `aoa/AI-B100_AOA_1_2_0_armv7hf.eap` for AOA on ARTPEC-7 cameras
+   - `radar/AI-B100_Radar_1_2_0_aarch64.eap` for Radar on ARTPEC-8 and ARTPEC-9 cameras
+   - `radar/AI-B100_Radar_1_2_0_armv7hf.eap` for Radar on ARTPEC-7 cameras
+3. For AOA deployments, start **AXIS Object Analytics**. For Radar deployments, verify that radar analytics are available on the camera.
 4. Go to **System → Accounts → Add Account**. The AI-B100 needs credentials to make HTTP callbacks to the camera.
    - Set username and password with **Viewer** privileges. If this password is compromised, the user can only view video.
    - Example: user = `aib100`, password = `aib100`
@@ -100,9 +102,9 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 5. Set a static fallback IP address. Go to **System → Network**:
    - **Enable** "Fallback to static IP address"
-   - **IP Address:** 192.168.0.2
+   - **IP Address:** 192.168.1.200
    - **Subnet mask:** 255.255.255.0
-   - **Router:** 192.168.0.1
+   - **Router:** 192.168.1.1
 
 ![Fallback address](images/fallback-address.png)
 
@@ -118,16 +120,16 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 2. Open the AI-B100 web UI at `http://<IP Address>`
 3. Click **LAN Settings**:
    - **Disable DHCP**
-   - **IP Number:** 192.168.0.3
-   - **Gateway:** 192.168.0.1
-   - **DNS:** 192.168.0.1
+   - **IP Number:** 192.168.1.250
+   - **Gateway:** 192.168.1.1
+   - **DNS:** 192.168.1.1
    - **Subnet Mask:** 255.255.255.0
 
 ![Bridge network](images/bridge-lan.png)
 
 4. Enable HTTP callbacks. Note that the ACAP will update some of these settings; you need to set:
    - **Check "HTTP API Enabled"**
-   - **Callback IP:** 192.168.0.2 (the camera's IP address)
+   - **Callback IP:** 192.168.1.200 (the camera's IP address)
    - **Digest User:** `aib100` (the account defined on the camera)
    - **Digest Password:** `aib100` (the account password defined on the camera)
 
@@ -135,7 +137,7 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 5. Click **Save**.
 
-> You can now connect the AI-B100 LoRA Bridge to the PoE switch as well as your laptop. Note that you must configure the laptop to use static IP address **192.168.0.1**. Verify that your laptop can access the camera at `http://192.168.0.2` and the bridge at `http://192.168.0.3`. If you cannot connect, troubleshoot before proceeding.
+> You can now connect the AI-B100 LoRA Bridge to the PoE switch as well as your laptop. Configure the laptop to use a free static address on the same subnet, for example **192.168.1.10**. Verify that your laptop can access the camera at `http://192.168.1.200` and the bridge at `http://192.168.1.250`. If you cannot connect, troubleshoot before proceeding.
 
 ---
 
@@ -143,7 +145,7 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 *See the [AI-B100 User Manual](https://ai-embedded.se/ai-b100/) for detailed information.*
 
-1. Browse to the bridge at `http://192.168.0.3`
+1. Browse to the bridge at `http://192.168.1.250`
 2. Click **LoRaWAN Settings**:
    - **LoRaWAN Version:** Recommended to use "Version 1.04 Class C". This is a commonly supported setting. Class C enables the device to receive downlinks in real-time.
    - **Check "Auto Join"**
@@ -157,11 +159,12 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 ### Step 4: Configure the ACAP
 
-1. Use a browser to access the camera at `http://192.168.0.2` using your admin credentials.
-2. Go to **Apps** and verify that both **AI-B100 AOA Counter** and **AXIS Object Analytics** are running.
-3. Open the user interface for **AI-B100 AOA Counter**.
+1. Use a browser to access the camera at `http://192.168.1.200` using your admin credentials.
+2. Go to **Apps** and verify that the installed AI-B100 ACAP is running. For AOA deployments, also verify that **AXIS Object Analytics** is running.
+3. Open the user interface for **AI-B100 AOA** or **AI-B100 Radar**.
 4. Go to the **LoRA Bridge** tab:
-   - **Bridge IP Address:** 192.168.0.3
+   - **Bridge IP Address:** 192.168.1.250
+   - **Callback IP Address:** 192.168.1.200
    - **HTTP Callback:** Auto-configure
    - **HTTP Callback Port:** 80
    - Click **Save**.
@@ -169,17 +172,19 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 ![LoRA Bridge](images/acap-bridge.png)
 
-6. Go to the **AOA** tab to set up counters. Click **+Add counter**. A common configuration is two counters: Left and Right.
+6. Configure the selected analytics use case:
+   - For AOA, use **Counting** and **Occupancy** to select AOA scenarios, object classes, occupancy areas, and value types.
+   - For Radar, use **Radar**, **Occupancy**, and **Detection Alert** to set sensitivity, labels, publish behavior, and optional areas of interest.
 
 ![AOA Counters](images/aoa-counters.png)
 
 > The ACAP saves counters periodically and resumes the values after reboot. Note that the values published over LoRaWAN are 16-bit unsigned and will wrap around at 65535.
 
-7. Go to the **Counters** tab:
-   - **Active:** true
-   - **Interval:** 1–60 minutes
-   - **Port:** 1–223 (typically port 1 for the main data)
-   - **Object Classes to Publish:** Select the classes/labels to count
+7. Go to the **Publish** tab:
+   - Enable the streams that should publish.
+   - Set the publish intervals or heartbeat intervals.
+   - Confirm the fixed LoRaWAN ports shown by the UI.
+   - Click **Publish Now** to test an uplink.
 
 ![Counter page](images/acap-counters.png)
 
@@ -194,8 +199,8 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 ### Step 6: Verify End-to-End
 
-1. Walk in front of the camera or drive a vehicle through the counting zone.
-2. Observe the counter incrementing on the ACAP Counters page (laptop still connected).
+1. Walk in front of the camera, drive a vehicle through the counting zone, or trigger the configured radar area.
+2. Observe the values changing in the ACAP UI while the laptop is still connected.
 3. Wait for the next scheduled transmission (or click **Publish Now**).
 4. Confirm the decoded payload appears on your network server / application.
 5. Disconnect the laptop — deployment is complete.
@@ -206,29 +211,36 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 ```json
 {
-  "b100": {
-    "ip": "192.168.0.3",
-    "port": 80,
-    "timeout": 30
-  },
-  "lorawan": {
-    "port": 10,
-    "confirmed": false,
-    "dataRate": 4,
-    "autoJoin": true
-  },
-  "transmission": {
-    "intervalMinutes": 15,
-    "enabled": true,
-    "classes": {
-      "human": true, "car": true, "bike": true,
-      "bus": true, "truck": true, "other": true
-    }
-  },
-  "polling": {
-    "downlinkIntervalSeconds": 30,
-    "healthCheckIntervalSeconds": 60
-  }
+   "b100": {
+      "ip": "192.168.1.250",
+      "port": 80,
+      "timeout": 30,
+      "callbackIP": "192.168.1.200",
+      "callbackPort": 80,
+      "callbackDigestUser": "aib100",
+      "callbackDigestPassword": "aib100"
+   },
+   "lorawan": {
+      "port": 1,
+      "confirmed": false,
+      "dataRate": 4,
+      "autoJoin": true
+   },
+   "transmission": {
+      "counting": {
+         "enabled": true,
+         "intervalMinutes": 15,
+         "port": 1
+      },
+      "occupancy": {
+         "enabled": false,
+         "intervalMinutes": 15,
+         "port": 2
+      }
+   },
+   "polling": {
+      "healthCheckIntervalSeconds": 60
+   }
 }
 ```
 
@@ -236,14 +248,14 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 | Setting | Description | Recommendation |
 |---------|-------------|----------------|
-| `b100.ip` | AI-B100 bridge IP address | `192.168.0.3` (same subnet as camera) |
+| `b100.ip` | AI-B100 bridge IP address | `192.168.1.250` (same subnet as camera) |
+| `b100.callbackIP` | Camera callback address used by the bridge | `192.168.1.200` |
 | `b100.timeout` | HTTP timeout in seconds | 30s (device can be slow) |
-| `lorawan.port` | LoRaWAN uplink port number | 10 (match your decoder) |
+| `lorawan.port` | Legacy/default LoRaWAN uplink port metadata | Fixed app ports are shown by the UI |
 | `lorawan.confirmed` | Request downlink ACK for uplinks | `false` (saves airtime) |
 | `lorawan.dataRate` | Fixed data rate (0–5) | 4 or 5 for short range; 0–2 for long range |
 | `lorawan.autoJoin` | Auto-rejoin if connection lost | `true` |
-| `transmission.intervalMinutes` | Minutes between uplinks | 10–15 (duty cycle safe) |
-| `polling.downlinkIntervalSeconds` | How often to check for downlinks | 30 |
+| `transmission.*.intervalMinutes` | Minutes between scheduled uplinks | 10–15 (duty cycle safe) |
 | `polling.healthCheckIntervalSeconds` | Bridge health check interval | 60 |
 
 ---
@@ -293,8 +305,8 @@ The AI-B100 operates in **Class C** (continuous receive). This means:
 
 | Symptom | Check |
 |---------|-------|
-| "Not Connected" on Bridge page | Verify AI-B100 IP is `192.168.0.3` and reachable (connect laptop and ping) |
-| Connection timeout | Ensure camera and AI-B100 are on the same subnet (192.168.0.x/24) |
+| "Not Connected" on Bridge page | Verify AI-B100 IP is `192.168.1.250` and reachable (connect laptop and ping) |
+| Connection timeout | Ensure camera and AI-B100 are on the same subnet (`192.168.1.x/24`) |
 | Intermittent disconnects | Check PoE switch — ensure it delivers sufficient PoE wattage to both devices |
 
 ### LoRaWAN not joining
@@ -309,9 +321,10 @@ The AI-B100 operates in **Class C** (continuous receive). This means:
 
 | Symptom | Check |
 |---------|-------|
-| Counters stay at zero | Verify AOA scenarios are active and detecting objects |
+| AOA counters stay at zero | Verify AOA scenarios are active and detecting objects |
 | AOA page shows "No scenarios" | Ensure AOA CrosslineCounting is configured (not just ObjectDetection) |
-| Counters increment but don't publish | Check that transmission is enabled and interval has elapsed |
+| Radar values stay at zero | Verify radar analytics are active, sensitivity is appropriate, and the selected label/area matches the test target |
+| Values change but don't publish | Check that the relevant stream is enabled and the interval has elapsed |
 
 ### Uplinks not received by network server
 
@@ -328,10 +341,12 @@ The AI-B100 operates in **Class C** (continuous receive). This means:
 ### Remote Management via Downlink
 
 Once deployed, the system can be managed entirely via LoRaWAN downlinks:
-- Change transmission interval (port 11, command 0x01)
-- Reset counters (port 10, command 0x03)
-- Request device info (port 12)
-- Restart bridge (port 10, command 0x01)
+- Restart the bridge (port 100, command `0x01`)
+- Initiate a new LoRaWAN join (port 100, command `0x02`)
+- Reset app state or counters (port 100, command `0x03`)
+- Change supported transmission interval settings (port 110, command `0x01`)
+- Change data rate or ADR (port 110, commands `0x02` and `0x03`)
+- Request camera, bridge, or signal-quality information (port 120, commands `0x01` to `0x03`)
 
 ### Firmware Updates
 
@@ -339,15 +354,15 @@ Once deployed, the system can be managed entirely via LoRaWAN downlinks:
 - **AI-B100 firmware:** Updated via the AI-B100 web UI (requires network access to bridge)
 - **Camera firmware:** Standard Axis firmware update procedure
 
-### Counter Persistence
+### State Persistence
 
-Counters survive:
+Counters and retained use-case state survive:
 - ACAP restarts
 - Camera reboots
 - Power cycles
 
-Counters are reset to zero only by:
-- Downlink command (port 10, 0x03)
+State is reset only by:
+- Downlink command (port 100, `0x03`)
 - Manual reset via the ACAP web UI
 
 ---

@@ -35,7 +35,7 @@
 
 	<div class="page-content">
 		<div class="card mb-4">
-			<div class="card-header"><h5 class="card-title mb-0">Area Balance</h5></div>
+			<div class="card-header"><h5 class="card-title mb-0">Counting</h5></div>
 			<div class="card-body">
 				<div class="row g-3 align-items-end">
 					<div class="col-12 col-md-3">
@@ -44,7 +44,7 @@
 					</div>
 					<div class="col-12 col-md-3">
 						<label class="form-label d-block">Detection Label</label>
-						<div class="btn-group" role="group" aria-label="Area Balance detection label">
+						<div class="btn-group" role="group" aria-label="Counting detection label">
 							<input type="radio" class="btn-check" name="countingLabel" id="countingHuman" value="human" autocomplete="off">
 							<label class="btn btn-outline-primary" for="countingHuman">Humans</label>
 							<input type="radio" class="btn-check" name="countingLabel" id="countingVehicle" value="vehicle" autocomplete="off">
@@ -168,8 +168,8 @@ function saveCounting() {
 		aoi: { enabled: $('#aoiEnabled').is(':checked'), x1: bounds.x1, x2: bounds.x2, y1: bounds.y1, y2: bounds.y2, points: points }
 	});
 	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
-		success: function() { currentSettings.transmission = transmission; showToast('Area Balance saved', 'success'); },
-		error: function(xhr, status, error) { showToast('Failed to save Area Balance: ' + error, 'danger'); }
+		success: function() { currentSettings.transmission = transmission; showToast('Counting saved', 'success'); },
+		error: function(xhr, status, error) { showToast('Failed to save Counting: ' + error, 'danger'); }
 	});
 }
 

@@ -36,6 +36,18 @@ void Alert_Reset(void) {
 	pthread_mutex_unlock(&g_mutex);
 }
 
+void Alert_Reset_Timers(void) {
+	pthread_mutex_lock(&g_mutex);
+	g_last_alert_time = 0;
+	g_last_heartbeat_time = 0;
+	g_last_active_publish_time = 0;
+	if (g_active)
+		g_pending = 1;
+	else
+		g_inactive_pending = 1;
+	pthread_mutex_unlock(&g_mutex);
+}
+
 void Alert_Update_Current(RadarCounts current, time_t now, int transition_seconds) {
 	pthread_mutex_lock(&g_mutex);
 	if (transition_seconds < 2) transition_seconds = 2;

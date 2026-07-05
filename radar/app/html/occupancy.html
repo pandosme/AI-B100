@@ -42,7 +42,6 @@
 						<label for="occupancyType" class="form-label">Occupancy Type</label>
 						<select id="occupancyType" class="form-select">
 							<option value="maximum">Interval Maximum</option>
-							<option value="areaBalance">Area Balance</option>
 						</select>
 					</div>
 					<div class="col-12 col-md-3">
@@ -149,15 +148,13 @@ function loadSettings() {
 }
 
 function normalizeOccupancyType(value) {
-	return value === 'areaBalance' || value === 'area-balance' ? 'areaBalance' : 'maximum';
+	return 'maximum';
 }
 
 function updateModeControls() {
-	const areaBalance = $('#occupancyType').val() === 'areaBalance';
-	$('.area-balance-value').toggle(areaBalance);
-	$('#intervalMaximumWrap').toggle(!areaBalance);
-	if (areaBalance) $('#aoiEnabled').prop('checked', true).prop('disabled', true);
-	else $('#aoiEnabled').prop('disabled', false);
+	$('.area-balance-value').hide();
+	$('#intervalMaximumWrap').show();
+	$('#aoiEnabled').prop('disabled', false);
 	if (polygonSelector) polygonSelector.setEnabled($('#aoiEnabled').is(':checked'));
 }
 
@@ -182,12 +179,8 @@ function saveOccupancy() {
 	const existingOccupancy = transmission.occupancy || {};
 	const type = normalizeOccupancyType($('#occupancyType').val());
 	const points = readPolygonPoints();
-	if (type === 'areaBalance' && points.length < 3) {
-		showToast('Area Balance requires an area of interest', 'warning');
-		return;
-	}
 	const bounds = polygonBounds(points);
-	const aoiEnabled = type === 'areaBalance' || $('#aoiEnabled').is(':checked');
+	const aoiEnabled = $('#aoiEnabled').is(':checked');
 	transmission.occupancy = Object.assign({ port: 2, enabled: false }, existingOccupancy, {
 		type: type,
 		label: $('input[name="occupancyLabel"]:checked').val() || 'human',
