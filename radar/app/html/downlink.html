@@ -123,7 +123,19 @@ const DEFAULT_COMMANDS = [
 	// Port 120 — Information requests
 	{ enabled: true,  port: 120, byte: '0x01', message: 'Camera Info',   action: 'Reply on port 121: model, serial, firmware, uptime hours, CPU %, ACAP version' },
 	{ enabled: true,  port: 120, byte: '0x02', message: 'Bridge Info',   action: 'Reply on port 122: hardware, firmware, power source, temperature, restart count, DevAddr' },
-	{ enabled: true,  port: 120, byte: '0x03', message: 'Signal Quality',action: 'Update local signal quality status' }
+	{ enabled: true,  port: 120, byte: '0x03', message: 'Signal Quality',action: 'Update local signal quality status' },
+	// Port 130 — Radar OTA configuration
+	{ enabled: true,  port: 130, byte: '0x01', message: 'Radar OTA Get Config', action: 'Request Radar OTA config response on port 130' },
+	{ enabled: true,  port: 130, byte: '0x02', message: 'Radar OTA Set Config', action: 'Apply Radar OTA config payload and return ACK/NACK on port 130' },
+	{ enabled: true,  port: 130, byte: '0x03', message: 'Radar OTA Get Caps',   action: 'Request Radar OTA capability response on port 130' },
+	// Port 132 — Occupancy OTA configuration
+	{ enabled: true,  port: 132, byte: '0x01', message: 'Occupancy OTA Get Config', action: 'Request Occupancy OTA config response on port 132' },
+	{ enabled: true,  port: 132, byte: '0x02', message: 'Occupancy OTA Set Config', action: 'Apply Occupancy OTA config payload and return ACK/NACK on port 132' },
+	{ enabled: true,  port: 132, byte: '0x03', message: 'Occupancy OTA Get Caps',   action: 'Request Occupancy OTA capability response on port 132' },
+	// Port 133 — Detection Alert OTA configuration
+	{ enabled: true,  port: 133, byte: '0x01', message: 'Alert OTA Get Config', action: 'Request Detection Alert OTA config response on port 133' },
+	{ enabled: true,  port: 133, byte: '0x02', message: 'Alert OTA Set Config', action: 'Apply Detection Alert OTA config payload and return ACK/NACK on port 133' },
+	{ enabled: true,  port: 133, byte: '0x03', message: 'Alert OTA Get Caps',   action: 'Request Detection Alert OTA capability response on port 133' }
 ];
 
 $(document).ready(function() {
@@ -197,6 +209,9 @@ $(document).ready(function() {
 		100: 'Port 100 - Actions',
 		110: 'Port 110 - Configuration',
 		120: 'Port 120 - Information Requests'
+		,130: 'Port 130 - Radar OTA'
+		,132: 'Port 132 - Occupancy OTA'
+		,133: 'Port 133 - Detection Alert OTA'
 	};
 
 	function renderCommandTable() {

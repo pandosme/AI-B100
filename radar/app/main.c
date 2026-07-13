@@ -41,6 +41,56 @@
 #define LORA_PORT_DOWNLINK_QUERY 120
 #define LORA_PORT_CAMERA_INFO_RESPONSE 121
 #define LORA_PORT_BRIDGE_INFO_RESPONSE 122
+#define LORA_PORT_RADAR_OTA_CONFIG 130
+#define LORA_PORT_OCCUPANCY_OTA_CONFIG 132
+#define LORA_PORT_ALERT_OTA_CONFIG 133
+
+#define RADAR_OTA_PROTOCOL_VERSION 1
+#define RADAR_OTA_FIELD_DETECTION_SENSITIVITY 0x0001
+#define RADAR_OTA_CMD_GET_CONFIG 0x01
+#define RADAR_OTA_CMD_SET_CONFIG 0x02
+#define RADAR_OTA_CMD_GET_CAPS 0x03
+#define RADAR_OTA_CMD_GET_CONFIG_RESP 0x81
+#define RADAR_OTA_CMD_SET_CONFIG_ACK 0x82
+#define RADAR_OTA_CMD_GET_CAPS_RESP 0x83
+
+#define RADAR_OTA_STATUS_OK 0x00
+#define RADAR_OTA_STATUS_INVALID_LENGTH 0x01
+#define RADAR_OTA_STATUS_INVALID_RANGE 0x02
+#define RADAR_OTA_STATUS_CRC_MISMATCH 0x04
+#define RADAR_OTA_STATUS_INTERNAL_ERROR 0x05
+
+#define OCCUPANCY_OTA_PROTOCOL_VERSION 1
+#define OCCUPANCY_OTA_MAX_POINTS 10
+#define OCCUPANCY_OTA_CMD_GET_CONFIG 0x01
+#define OCCUPANCY_OTA_CMD_SET_CONFIG 0x02
+#define OCCUPANCY_OTA_CMD_GET_CAPS 0x03
+#define OCCUPANCY_OTA_CMD_GET_CONFIG_RESP 0x81
+#define OCCUPANCY_OTA_CMD_SET_CONFIG_ACK 0x82
+#define OCCUPANCY_OTA_CMD_GET_CAPS_RESP 0x83
+
+#define OCCUPANCY_OTA_STATUS_OK 0x00
+#define OCCUPANCY_OTA_STATUS_INVALID_LENGTH 0x01
+#define OCCUPANCY_OTA_STATUS_INVALID_RANGE 0x02
+#define OCCUPANCY_OTA_STATUS_INVALID_POINT_COUNT 0x03
+#define OCCUPANCY_OTA_STATUS_CRC_MISMATCH 0x04
+#define OCCUPANCY_OTA_STATUS_INTERNAL_ERROR 0x05
+
+#define ALERT_OTA_PROTOCOL_VERSION 1
+#define ALERT_OTA_MAX_POINTS 10
+#define ALERT_OTA_CMD_GET_CONFIG 0x01
+#define ALERT_OTA_CMD_SET_CONFIG 0x02
+#define ALERT_OTA_CMD_GET_CAPS 0x03
+#define ALERT_OTA_CMD_GET_CONFIG_RESP 0x81
+#define ALERT_OTA_CMD_SET_CONFIG_ACK 0x82
+#define ALERT_OTA_CMD_GET_CAPS_RESP 0x83
+
+#define ALERT_OTA_STATUS_OK 0x00
+#define ALERT_OTA_STATUS_INVALID_LENGTH 0x01
+#define ALERT_OTA_STATUS_INVALID_RANGE 0x02
+#define ALERT_OTA_STATUS_INVALID_POINT_COUNT 0x03
+#define ALERT_OTA_STATUS_CRC_MISMATCH 0x04
+#define ALERT_OTA_STATUS_INTERNAL_ERROR 0x05
 
 #define LOG(fmt, args...)    { syslog(LOG_INFO, fmt, ## args); printf(fmt, ## args);}
 #define LOG_WARN(fmt, args...)    { syslog(LOG_WARNING, fmt, ## args); printf(fmt, ## args);}
@@ -524,6 +574,644 @@ Bytes_To_Hex(const unsigned char* data, int length, char* out, int out_size) {
 	}
 }
 
+static unsigned char
+CRC8_Compute(const unsigned char* data, int length) {
+	unsigned char crc = 0x00;
+	for (int i = 0; i < length; i++) {
+		crc ^= data[i];
+		for (int bit = 0; bit < 8; bit++) {
+			if (crc & 0x80)
+				crc = (unsigned char)((crc << 1) ^ 0x07);
+			else
+				crc <<= 1;
+		}
+	}
+	return crc;
+}
+
+static void
+Write_U16_BE(unsigned char* out, unsigned int value) {
+	out[0] = (unsigned char)((value >> 8) & 0xFF);
+	out[1] = (unsigned char)(value & 0xFF);
+}
+
+static unsigned int
+Read_U16_BE(const unsigned char* in) {
+	return ((unsigned int)in[0] << 8) | (unsigned int)in[1];
+}
+
+static void Append_Publish_Log(const char* stream, int port, const unsigned char* data, int length);
+static void Append_Publish_Log_Text(const char* stream, int port, const char* payload_text);
+
+static const char*
+Radar_Detection_Sensitivity_Name(int code) {
+	switch (code) {
+		case 1: return "low";
+		case 2: return "medium";
+		case 3: return "high";
+		default: return "";
+	}
+}
+
+static int
+Radar_Detection_Sensitivity_Code(const char* value) {
+	if (!value) return 0;
+	if (strcasecmp(value, "low") == 0) return 1;
+	if (strcasecmp(value, "medium") == 0) return 2;
+	if (strcasecmp(value, "high") == 0) return 3;
+	return 0;
+}
+
+static int
+Radar_Get_Detection_Sensitivity(char* out, size_t out_size) {
+	if (!out || out_size == 0) return 0;
+	out[0] = '\0';
+	char* response = ACAP_VAPIX_Post("radar/radaranalytics.cgi", "{\"apiVersion\":\"2.4\",\"method\":\"getDetectionSensitivity\"}");
+	if (!response) return 0;
+
+	cJSON* root = cJSON_Parse(response);
+	free(response);
+	if (!root) return 0;
+	cJSON* data = cJSON_GetObjectItem(root, "data");
+	cJSON* value = data ? cJSON_GetObjectItem(data, "value") : NULL;
+	int ok = 0;
+	if (value && cJSON_IsString(value) && Radar_Detection_Sensitivity_Code(value->valuestring) != 0) {
+		snprintf(out, out_size, "%s", value->valuestring);
+		ACAP_STATUS_SetString("radar", "detectionSensitivity", out);
+		ok = 1;
+	}
+	cJSON_Delete(root);
+	return ok;
+}
+
+static int
+Radar_Set_Detection_Sensitivity(const char* value) {
+	int code = Radar_Detection_Sensitivity_Code(value);
+	if (code == 0) return 0;
+	const char* normalized = Radar_Detection_Sensitivity_Name(code);
+	char request[160];
+	snprintf(request, sizeof(request), "{\"apiVersion\":\"2.4\",\"method\":\"setDetectionSensitivity\",\"params\":{\"value\":\"%s\"}}", normalized);
+	char* response = ACAP_VAPIX_Post("radar/radaranalytics.cgi", request);
+	if (!response) return 0;
+	free(response);
+	ACAP_STATUS_SetString("radar", "detectionSensitivity", normalized);
+	return 1;
+}
+
+static int
+Send_Radar_OTA_Frame(const char* stream, const unsigned char* data, int length) {
+	if (!B100_Send_Bytes(data, length, LORA_PORT_RADAR_OTA_CONFIG, 0)) {
+		LOG_WARN("Radar OTA: Send failed - %s\n", B100_Get_Last_Error());
+		return 0;
+	}
+	pthread_mutex_lock(&g_publish_mutex);
+	Append_Publish_Log(stream ? stream : "radar-ota", LORA_PORT_RADAR_OTA_CONFIG, data, length);
+	pthread_mutex_unlock(&g_publish_mutex);
+	return 1;
+}
+
+static int
+Send_Radar_OTA_Ack(unsigned char echoed_command, unsigned char status_code) {
+	unsigned char frame[5];
+	frame[0] = RADAR_OTA_CMD_SET_CONFIG_ACK;
+	frame[1] = RADAR_OTA_PROTOCOL_VERSION;
+	frame[2] = echoed_command;
+	frame[3] = status_code;
+	frame[4] = CRC8_Compute(frame, 4);
+	return Send_Radar_OTA_Frame("radar-ota-ack", frame, (int)sizeof(frame));
+}
+
+static int
+Send_Radar_OTA_Config_Response(void) {
+	unsigned char frame[9] = {0};
+	unsigned char* body = &frame[1];
+	char sensitivity[16] = "medium";
+	int code = 2;
+
+	if (Radar_Get_Detection_Sensitivity(sensitivity, sizeof(sensitivity))) {
+		code = Radar_Detection_Sensitivity_Code(sensitivity);
+		if (code == 0) code = 2;
+	}
+
+	frame[0] = RADAR_OTA_CMD_GET_CONFIG_RESP;
+	body[0] = RADAR_OTA_PROTOCOL_VERSION;
+	Write_U16_BE(&body[1], RADAR_OTA_FIELD_DETECTION_SENSITIVITY);
+	body[3] = (unsigned char)code;
+	body[7] = CRC8_Compute(body, 7);
+	return Send_Radar_OTA_Frame("radar-ota-config", frame, (int)sizeof(frame));
+}
+
+static int
+Send_Radar_OTA_Caps_Response(void) {
+	unsigned char frame[8] = {0};
+	frame[0] = RADAR_OTA_CMD_GET_CAPS_RESP;
+	frame[1] = RADAR_OTA_PROTOCOL_VERSION;
+	Write_U16_BE(&frame[2], RADAR_OTA_FIELD_DETECTION_SENSITIVITY);
+	frame[4] = 1;
+	frame[5] = 3;
+	frame[7] = CRC8_Compute(&frame[1], 6);
+	return Send_Radar_OTA_Frame("radar-ota-caps", frame, (int)sizeof(frame));
+}
+
+static unsigned char
+Apply_Radar_OTA_Set_Config(const unsigned char* payload, int length) {
+	if (!payload || length != 8)
+		return RADAR_OTA_STATUS_INVALID_LENGTH;
+	if (payload[0] != RADAR_OTA_PROTOCOL_VERSION)
+		return RADAR_OTA_STATUS_INVALID_RANGE;
+	if (CRC8_Compute(payload, 7) != payload[7])
+		return RADAR_OTA_STATUS_CRC_MISMATCH;
+
+	unsigned int field_mask = Read_U16_BE(&payload[1]);
+	if ((field_mask & ~RADAR_OTA_FIELD_DETECTION_SENSITIVITY) != 0)
+		return RADAR_OTA_STATUS_INVALID_RANGE;
+
+	if (field_mask & RADAR_OTA_FIELD_DETECTION_SENSITIVITY) {
+		int sensitivity_code = payload[3];
+		const char* sensitivity = Radar_Detection_Sensitivity_Name(sensitivity_code);
+		if (!sensitivity[0])
+			return RADAR_OTA_STATUS_INVALID_RANGE;
+		if (!Radar_Set_Detection_Sensitivity(sensitivity))
+			return RADAR_OTA_STATUS_INTERNAL_ERROR;
+	}
+
+	return RADAR_OTA_STATUS_OK;
+}
+
+static int
+Send_Occupancy_OTA_Frame(const char* stream, const unsigned char* data, int length) {
+	if (!B100_Send_Bytes(data, length, LORA_PORT_OCCUPANCY_OTA_CONFIG, 0)) {
+		LOG_WARN("Occupancy OTA: Send failed - %s\n", B100_Get_Last_Error());
+		return 0;
+	}
+	pthread_mutex_lock(&g_publish_mutex);
+	Append_Publish_Log(stream ? stream : "occupancy-ota", LORA_PORT_OCCUPANCY_OTA_CONFIG, data, length);
+	pthread_mutex_unlock(&g_publish_mutex);
+	return 1;
+}
+
+static int
+Send_Occupancy_OTA_Ack(unsigned char echoed_command, unsigned char status_code) {
+	unsigned char frame[5];
+	frame[0] = OCCUPANCY_OTA_CMD_SET_CONFIG_ACK;
+	frame[1] = OCCUPANCY_OTA_PROTOCOL_VERSION;
+	frame[2] = echoed_command;
+	frame[3] = status_code;
+	frame[4] = CRC8_Compute(frame, 4);
+	return Send_Occupancy_OTA_Frame("occupancy-ota-ack", frame, (int)sizeof(frame));
+}
+
+static int
+Send_Occupancy_OTA_Config_Response(void) {
+	unsigned char frame[1 + 48];
+	unsigned char* body = &frame[1];
+	int point_count = 0;
+
+	frame[0] = OCCUPANCY_OTA_CMD_GET_CONFIG_RESP;
+
+	pthread_mutex_lock(&g_publish_mutex);
+	body[0] = OCCUPANCY_OTA_PROTOCOL_VERSION;
+	body[1] = 0;
+	if (g_occupancy_publish_enabled) body[1] |= 0x01;
+	if (g_occupancy_label_bucket == 2) body[1] |= 0x02;
+	if (g_occupancy_aoi_enabled) body[1] |= 0x04;
+	body[2] = (unsigned char)Clamp_Int(g_occupancy_interval_minutes, 1, 60);
+
+	if (g_occupancy_aoi_enabled)
+		point_count = Clamp_Int(g_occupancy_area_point_count, 3, OCCUPANCY_OTA_MAX_POINTS);
+	else
+		point_count = 0;
+	body[3] = (unsigned char)point_count;
+
+	for (int i = 0; i < OCCUPANCY_OTA_MAX_POINTS; i++) {
+		int offset = 4 + (i * 4);
+		unsigned int x = 0;
+		unsigned int y = 0;
+		if (i < g_occupancy_area_point_count) {
+			x = (unsigned int)Clamp_Int((int)g_occupancy_area_x[i], 0, 1000);
+			y = (unsigned int)Clamp_Int((int)g_occupancy_area_y[i], 0, 1000);
+		}
+		Write_U16_BE(&body[offset], x);
+		Write_U16_BE(&body[offset + 2], y);
+	}
+	body[44] = (unsigned char)Clamp_Int(g_occupancy_type, OCCUPANCY_TYPE_MAXIMUM, OCCUPANCY_TYPE_MAXIMUM);
+	body[45] = 0;
+	body[46] = 0;
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	body[47] = CRC8_Compute(body, 47);
+	return Send_Occupancy_OTA_Frame("occupancy-ota-config", frame, (int)sizeof(frame));
+}
+
+static int
+Send_Occupancy_OTA_Caps_Response(void) {
+	unsigned char frame[13];
+	frame[0] = OCCUPANCY_OTA_CMD_GET_CAPS_RESP;
+	frame[1] = OCCUPANCY_OTA_PROTOCOL_VERSION;
+	frame[2] = OCCUPANCY_OTA_MAX_POINTS;
+	frame[3] = 0x01; // coordinate encoding: uint16 0..1000
+	frame[4] = 1;    // interval min (minutes)
+	frame[5] = 60;   // interval max (minutes)
+	Write_U16_BE(&frame[6], 3);                       // area points min
+	Write_U16_BE(&frame[8], OCCUPANCY_OTA_MAX_POINTS); // area points max
+	frame[10] = OCCUPANCY_TYPE_MAXIMUM; // occupancy type min
+	frame[11] = OCCUPANCY_TYPE_MAXIMUM; // occupancy type max
+	frame[12] = CRC8_Compute(&frame[1], 11);
+	return Send_Occupancy_OTA_Frame("occupancy-ota-caps", frame, (int)sizeof(frame));
+}
+
+static int
+Update_Occupancy_Settings_JSON(int enabled,
+	                            int label_bucket,
+	                            int interval_minutes,
+	                            int occupancy_type,
+	                            int aoi_enabled,
+	                            int point_count,
+	                            int point_x[OCCUPANCY_OTA_MAX_POINTS],
+	                            int point_y[OCCUPANCY_OTA_MAX_POINTS]) {
+	cJSON* settings_obj = ACAP_Get_Config("settings");
+	if (!settings_obj)
+		return 0;
+
+	cJSON* transmission = cJSON_GetObjectItem(settings_obj, "transmission");
+	if (!transmission) {
+		transmission = cJSON_CreateObject();
+		if (!transmission) return 0;
+		cJSON_AddItemToObject(settings_obj, "transmission", transmission);
+	}
+
+	cJSON* occupancy = cJSON_GetObjectItem(transmission, "occupancy");
+	if (!occupancy) {
+		occupancy = cJSON_CreateObject();
+		if (!occupancy) return 0;
+		cJSON_AddItemToObject(transmission, "occupancy", occupancy);
+	}
+
+	cJSON_ReplaceItemInObject(occupancy, "enabled", cJSON_CreateBool(enabled));
+	cJSON_ReplaceItemInObject(occupancy, "label", cJSON_CreateString(label_bucket == 2 ? "vehicle" : "human"));
+	cJSON_ReplaceItemInObject(occupancy, "intervalMinutes", cJSON_CreateNumber(interval_minutes));
+	cJSON_ReplaceItemInObject(occupancy, "type", cJSON_CreateString(Occupancy_Type_Name(occupancy_type)));
+
+	cJSON* aoi = cJSON_GetObjectItem(occupancy, "aoi");
+	if (!aoi) {
+		aoi = cJSON_CreateObject();
+		if (!aoi) return 0;
+		cJSON_AddItemToObject(occupancy, "aoi", aoi);
+	}
+
+	cJSON_ReplaceItemInObject(aoi, "enabled", cJSON_CreateBool(aoi_enabled));
+
+	int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+	cJSON* points = cJSON_CreateArray();
+	if (!points) return 0;
+	for (int i = 0; i < point_count; i++) {
+		if (point_x[i] < min_x) min_x = point_x[i];
+		if (point_x[i] > max_x) max_x = point_x[i];
+		if (point_y[i] < min_y) min_y = point_y[i];
+		if (point_y[i] > max_y) max_y = point_y[i];
+		cJSON* point = cJSON_CreateObject();
+		if (!point) continue;
+		cJSON_AddNumberToObject(point, "x", point_x[i]);
+		cJSON_AddNumberToObject(point, "y", point_y[i]);
+		cJSON_AddItemToArray(points, point);
+	}
+
+	if (point_count == 0) {
+		min_x = 0; max_x = 1000; min_y = 0; max_y = 1000;
+	}
+
+	cJSON_ReplaceItemInObject(aoi, "x1", cJSON_CreateNumber(min_x));
+	cJSON_ReplaceItemInObject(aoi, "x2", cJSON_CreateNumber(max_x));
+	cJSON_ReplaceItemInObject(aoi, "y1", cJSON_CreateNumber(min_y));
+	cJSON_ReplaceItemInObject(aoi, "y2", cJSON_CreateNumber(max_y));
+	cJSON_ReplaceItemInObject(aoi, "points", points);
+
+	ACAP_FILE_Write("localdata/settings.json", settings_obj);
+	return 1;
+}
+
+static unsigned char
+Apply_Occupancy_OTA_Set_Config(const unsigned char* payload, int length) {
+	if (!payload || length != 48)
+		return OCCUPANCY_OTA_STATUS_INVALID_LENGTH;
+
+	if (payload[0] != OCCUPANCY_OTA_PROTOCOL_VERSION)
+		return OCCUPANCY_OTA_STATUS_INVALID_RANGE;
+
+	unsigned char expected_crc = CRC8_Compute(payload, 47);
+	if (expected_crc != payload[47])
+		return OCCUPANCY_OTA_STATUS_CRC_MISMATCH;
+
+	unsigned char flags = payload[1];
+	int enabled = (flags & 0x01) ? 1 : 0;
+	int label_bucket = (flags & 0x02) ? 2 : 1;
+	int aoi_enabled = (flags & 0x04) ? 1 : 0;
+	int interval_minutes = payload[2];
+	int point_count = payload[3];
+	int occupancy_type = payload[44];
+
+	if (interval_minutes < 1 || interval_minutes > 60)
+		return OCCUPANCY_OTA_STATUS_INVALID_RANGE;
+	if (occupancy_type != OCCUPANCY_TYPE_MAXIMUM)
+		return OCCUPANCY_OTA_STATUS_INVALID_RANGE;
+	if (point_count > OCCUPANCY_OTA_MAX_POINTS)
+		return OCCUPANCY_OTA_STATUS_INVALID_POINT_COUNT;
+	if (aoi_enabled && point_count > 0 && point_count < 3)
+		return OCCUPANCY_OTA_STATUS_INVALID_POINT_COUNT;
+
+	int point_x[OCCUPANCY_OTA_MAX_POINTS] = {0};
+	int point_y[OCCUPANCY_OTA_MAX_POINTS] = {0};
+	for (int i = 0; i < OCCUPANCY_OTA_MAX_POINTS; i++) {
+		int base = 4 + (i * 4);
+		int x = Clamp_Int((int)Read_U16_BE(&payload[base]), 0, 1000);
+		int y = Clamp_Int((int)Read_U16_BE(&payload[base + 2]), 0, 1000);
+		if (i < point_count) {
+			point_x[i] = x;
+			point_y[i] = y;
+		}
+	}
+
+	pthread_mutex_lock(&g_publish_mutex);
+	g_occupancy_publish_enabled = enabled;
+	g_occupancy_label_bucket = label_bucket;
+	g_occupancy_interval_minutes = interval_minutes;
+	g_occupancy_type = occupancy_type;
+	g_occupancy_aoi_enabled = aoi_enabled;
+
+	if (aoi_enabled && point_count >= 3) {
+		int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+		for (int i = 0; i < point_count; i++) {
+			g_occupancy_area_x[i] = point_x[i];
+			g_occupancy_area_y[i] = point_y[i];
+			if (point_x[i] < min_x) min_x = point_x[i];
+			if (point_x[i] > max_x) max_x = point_x[i];
+			if (point_y[i] < min_y) min_y = point_y[i];
+			if (point_y[i] > max_y) max_y = point_y[i];
+		}
+		g_occupancy_area_point_count = point_count;
+		g_occupancy_aoi_x1 = min_x;
+		g_occupancy_aoi_x2 = max_x;
+		g_occupancy_aoi_y1 = min_y;
+		g_occupancy_aoi_y2 = max_y;
+	} else {
+		g_occupancy_aoi_x1 = 0;
+		g_occupancy_aoi_x2 = 1000;
+		g_occupancy_aoi_y1 = 0;
+		g_occupancy_aoi_y2 = 1000;
+		Occupancy_Set_Rectangle_Area_Points();
+	}
+	g_occupancy_last_publish_time = 0;
+	g_occupancy_next_publish_time = time(NULL) + (g_occupancy_interval_minutes * 60);
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	if (!Update_Occupancy_Settings_JSON(enabled, label_bucket, interval_minutes, occupancy_type,
+		                              aoi_enabled, (aoi_enabled ? point_count : 0), point_x, point_y)) {
+		return OCCUPANCY_OTA_STATUS_INTERNAL_ERROR;
+	}
+
+	return OCCUPANCY_OTA_STATUS_OK;
+}
+
+static int
+Send_Alert_OTA_Frame(const char* stream, const unsigned char* data, int length) {
+	if (!B100_Send_Bytes(data, length, LORA_PORT_ALERT_OTA_CONFIG, 0)) {
+		LOG_WARN("Alert OTA: Send failed - %s\n", B100_Get_Last_Error());
+		return 0;
+	}
+	pthread_mutex_lock(&g_publish_mutex);
+	Append_Publish_Log(stream ? stream : "alert-ota", LORA_PORT_ALERT_OTA_CONFIG, data, length);
+	pthread_mutex_unlock(&g_publish_mutex);
+	return 1;
+}
+
+static int
+Send_Alert_OTA_Ack(unsigned char echoed_command, unsigned char status_code) {
+	unsigned char frame[5];
+	frame[0] = ALERT_OTA_CMD_SET_CONFIG_ACK;
+	frame[1] = ALERT_OTA_PROTOCOL_VERSION;
+	frame[2] = echoed_command;
+	frame[3] = status_code;
+	frame[4] = CRC8_Compute(frame, 4);
+	return Send_Alert_OTA_Frame("alert-ota-ack", frame, (int)sizeof(frame));
+}
+
+static int
+Send_Alert_OTA_Config_Response(void) {
+	unsigned char frame[1 + 48];
+	unsigned char* body = &frame[1];
+	int point_count = 0;
+
+	frame[0] = ALERT_OTA_CMD_GET_CONFIG_RESP;
+
+	pthread_mutex_lock(&g_publish_mutex);
+	body[0] = ALERT_OTA_PROTOCOL_VERSION;
+	body[1] = 0;
+	if (g_alert_publish_enabled) body[1] |= 0x01;
+	if (g_alert_label_bucket == 2) body[1] |= 0x02;
+	if (g_alert_aoi_enabled) body[1] |= 0x04;
+	body[2] = (unsigned char)Clamp_Int(g_alert_heartbeat_minutes, 5, 60);
+	Write_U16_BE(&body[3], (unsigned int)Clamp_Int(g_alert_active_interval_seconds, 60, 300));
+	body[5] = (unsigned char)Clamp_Int(g_alert_transition_seconds, 2, 20);
+
+	if (g_alert_aoi_enabled)
+		point_count = Clamp_Int(g_alert_area_point_count, 3, ALERT_OTA_MAX_POINTS);
+	else
+		point_count = 0;
+	body[6] = (unsigned char)point_count;
+
+	for (int i = 0; i < ALERT_OTA_MAX_POINTS; i++) {
+		int offset = 7 + (i * 4);
+		unsigned int x = 0;
+		unsigned int y = 0;
+		if (i < g_alert_area_point_count) {
+			x = (unsigned int)Clamp_Int((int)g_alert_area_x[i], 0, 1000);
+			y = (unsigned int)Clamp_Int((int)g_alert_area_y[i], 0, 1000);
+		}
+		Write_U16_BE(&body[offset], x);
+		Write_U16_BE(&body[offset + 2], y);
+	}
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	body[47] = CRC8_Compute(body, 47);
+	return Send_Alert_OTA_Frame("alert-ota-config", frame, (int)sizeof(frame));
+}
+
+static int
+Send_Alert_OTA_Caps_Response(void) {
+	unsigned char frame[13];
+	frame[0] = ALERT_OTA_CMD_GET_CAPS_RESP;
+	frame[1] = ALERT_OTA_PROTOCOL_VERSION;
+	frame[2] = ALERT_OTA_MAX_POINTS;
+	frame[3] = 0x01; // coordinate encoding: uint16 0..1000
+	frame[4] = 5;    // heartbeat min
+	frame[5] = 60;   // heartbeat max
+	Write_U16_BE(&frame[6], 60);   // active interval min
+	Write_U16_BE(&frame[8], 300);  // active interval max
+	frame[10] = 2;   // transition min
+	frame[11] = 20;  // transition max
+	frame[12] = CRC8_Compute(&frame[1], 11);
+	return Send_Alert_OTA_Frame("alert-ota-caps", frame, (int)sizeof(frame));
+}
+
+static int
+Update_Alert_Settings_JSON(int enabled,
+	                       int label_bucket,
+	                       int heartbeat,
+	                       int active_interval,
+	                       int transition,
+	                       int aoi_enabled,
+	                       int point_count,
+	                       int point_x[ALERT_OTA_MAX_POINTS],
+	                       int point_y[ALERT_OTA_MAX_POINTS]) {
+	cJSON* settings_obj = ACAP_Get_Config("settings");
+	if (!settings_obj)
+		return 0;
+
+	cJSON* transmission = cJSON_GetObjectItem(settings_obj, "transmission");
+	if (!transmission) {
+		transmission = cJSON_CreateObject();
+		if (!transmission) return 0;
+		cJSON_AddItemToObject(settings_obj, "transmission", transmission);
+	}
+
+	cJSON* alert = cJSON_GetObjectItem(transmission, "alert");
+	if (!alert) {
+		alert = cJSON_CreateObject();
+		if (!alert) return 0;
+		cJSON_AddItemToObject(transmission, "alert", alert);
+	}
+
+	cJSON_ReplaceItemInObject(alert, "enabled", cJSON_CreateBool(enabled));
+	cJSON_ReplaceItemInObject(alert, "label", cJSON_CreateString(label_bucket == 2 ? "vehicle" : "human"));
+	cJSON_ReplaceItemInObject(alert, "heartbeatMinutes", cJSON_CreateNumber(heartbeat));
+	cJSON_ReplaceItemInObject(alert, "activeIntervalSeconds", cJSON_CreateNumber(active_interval));
+	cJSON_ReplaceItemInObject(alert, "transitionSeconds", cJSON_CreateNumber(transition));
+
+	cJSON* aoi = cJSON_GetObjectItem(alert, "aoi");
+	if (!aoi) {
+		aoi = cJSON_CreateObject();
+		if (!aoi) return 0;
+		cJSON_AddItemToObject(alert, "aoi", aoi);
+	}
+
+	cJSON_ReplaceItemInObject(aoi, "enabled", cJSON_CreateBool(aoi_enabled));
+
+	int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+	cJSON* points = cJSON_CreateArray();
+	if (!points) return 0;
+	for (int i = 0; i < point_count; i++) {
+		if (point_x[i] < min_x) min_x = point_x[i];
+		if (point_x[i] > max_x) max_x = point_x[i];
+		if (point_y[i] < min_y) min_y = point_y[i];
+		if (point_y[i] > max_y) max_y = point_y[i];
+		cJSON* point = cJSON_CreateObject();
+		if (!point) continue;
+		cJSON_AddNumberToObject(point, "x", point_x[i]);
+		cJSON_AddNumberToObject(point, "y", point_y[i]);
+		cJSON_AddItemToArray(points, point);
+	}
+
+	if (point_count == 0) {
+		min_x = 0; max_x = 1000; min_y = 0; max_y = 1000;
+	}
+
+	cJSON_ReplaceItemInObject(aoi, "x1", cJSON_CreateNumber(min_x));
+	cJSON_ReplaceItemInObject(aoi, "x2", cJSON_CreateNumber(max_x));
+	cJSON_ReplaceItemInObject(aoi, "y1", cJSON_CreateNumber(min_y));
+	cJSON_ReplaceItemInObject(aoi, "y2", cJSON_CreateNumber(max_y));
+	cJSON_ReplaceItemInObject(aoi, "points", points);
+
+	ACAP_FILE_Write("localdata/settings.json", settings_obj);
+	return 1;
+}
+
+static unsigned char
+Apply_Alert_OTA_Set_Config(const unsigned char* payload, int length) {
+	if (!payload || length != 48)
+		return ALERT_OTA_STATUS_INVALID_LENGTH;
+
+	if (payload[0] != ALERT_OTA_PROTOCOL_VERSION)
+		return ALERT_OTA_STATUS_INVALID_RANGE;
+
+	unsigned char expected_crc = CRC8_Compute(payload, 47);
+	if (expected_crc != payload[47])
+		return ALERT_OTA_STATUS_CRC_MISMATCH;
+
+	unsigned char flags = payload[1];
+	int enabled = (flags & 0x01) ? 1 : 0;
+	int label_bucket = (flags & 0x02) ? 2 : 1;
+	int aoi_enabled = (flags & 0x04) ? 1 : 0;
+	int heartbeat = payload[2];
+	int active_interval = (int)Read_U16_BE(&payload[3]);
+	int transition = payload[5];
+	int point_count = payload[6];
+
+	if (heartbeat < 5 || heartbeat > 60)
+		return ALERT_OTA_STATUS_INVALID_RANGE;
+	if (active_interval < 60 || active_interval > 300)
+		return ALERT_OTA_STATUS_INVALID_RANGE;
+	if (transition < 2 || transition > 20)
+		return ALERT_OTA_STATUS_INVALID_RANGE;
+	if (point_count > ALERT_OTA_MAX_POINTS)
+		return ALERT_OTA_STATUS_INVALID_POINT_COUNT;
+	if (aoi_enabled && point_count > 0 && point_count < 3)
+		return ALERT_OTA_STATUS_INVALID_POINT_COUNT;
+
+	int point_x[ALERT_OTA_MAX_POINTS] = {0};
+	int point_y[ALERT_OTA_MAX_POINTS] = {0};
+	for (int i = 0; i < ALERT_OTA_MAX_POINTS; i++) {
+		int base = 7 + (i * 4);
+		int x = Clamp_Int((int)Read_U16_BE(&payload[base]), 0, 1000);
+		int y = Clamp_Int((int)Read_U16_BE(&payload[base + 2]), 0, 1000);
+		if (i < point_count) {
+			point_x[i] = x;
+			point_y[i] = y;
+		}
+	}
+
+	pthread_mutex_lock(&g_publish_mutex);
+	g_alert_publish_enabled = enabled;
+	g_alert_label_bucket = label_bucket;
+	g_alert_heartbeat_minutes = heartbeat;
+	g_alert_active_interval_seconds = active_interval;
+	g_alert_transition_seconds = transition;
+	g_alert_aoi_enabled = aoi_enabled;
+
+	if (aoi_enabled && point_count >= 3) {
+		int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+		for (int i = 0; i < point_count; i++) {
+			g_alert_area_x[i] = point_x[i];
+			g_alert_area_y[i] = point_y[i];
+			if (point_x[i] < min_x) min_x = point_x[i];
+			if (point_x[i] > max_x) max_x = point_x[i];
+			if (point_y[i] < min_y) min_y = point_y[i];
+			if (point_y[i] > max_y) max_y = point_y[i];
+		}
+		g_alert_area_point_count = point_count;
+		g_alert_aoi_x1 = min_x;
+		g_alert_aoi_x2 = max_x;
+		g_alert_aoi_y1 = min_y;
+		g_alert_aoi_y2 = max_y;
+	} else {
+		g_alert_aoi_x1 = 0;
+		g_alert_aoi_x2 = 1000;
+		g_alert_aoi_y1 = 0;
+		g_alert_aoi_y2 = 1000;
+		Alert_Set_Rectangle_Area_Points();
+	}
+	g_alert_last_publish_time = 0;
+	pthread_mutex_unlock(&g_publish_mutex);
+
+	Alert_Reset_Timers();
+
+	if (!Update_Alert_Settings_JSON(enabled, label_bucket, heartbeat, active_interval, transition,
+		                         aoi_enabled, (aoi_enabled ? point_count : 0), point_x, point_y)) {
+		return ALERT_OTA_STATUS_INTERNAL_ERROR;
+	}
+
+	return ALERT_OTA_STATUS_OK;
+}
+
 static void
 Append_Publish_Log(const char* stream, int port, const unsigned char* data, int length) {
 	char payload[128];
@@ -534,6 +1222,24 @@ Append_Publish_Log(const char* stream, int port, const unsigned char* data, int 
 	cJSON_AddStringToObject(entry, "stream", stream ? stream : "");
 	cJSON_AddNumberToObject(entry, "port", port);
 	cJSON_AddNumberToObject(entry, "length", length);
+	cJSON_AddStringToObject(entry, "payload", payload);
+	if (!g_publish_log)
+		g_publish_log = cJSON_CreateArray();
+	cJSON_AddItemToArray(g_publish_log, entry);
+	while (cJSON_GetArraySize(g_publish_log) > PUBLISH_LOG_MAX)
+		cJSON_DeleteItemFromArray(g_publish_log, 0);
+	ACAP_STATUS_SetObject("lorawan", "publishes", g_publish_log);
+}
+
+static void
+Append_Publish_Log_Text(const char* stream, int port, const char* payload_text) {
+	const char* payload = payload_text ? payload_text : "";
+	cJSON* entry = cJSON_CreateObject();
+	if (!entry) return;
+	cJSON_AddStringToObject(entry, "time", ACAP_DEVICE_Local_Time());
+	cJSON_AddStringToObject(entry, "stream", stream ? stream : "");
+	cJSON_AddNumberToObject(entry, "port", port);
+	cJSON_AddNumberToObject(entry, "length", (int)strlen(payload));
 	cJSON_AddStringToObject(entry, "payload", payload);
 	if (!g_publish_log)
 		g_publish_log = cJSON_CreateArray();
@@ -1396,8 +2102,13 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				         firmware ? firmware : "?",
 				         uptime_hours, cpu_pct, app_ver);
 				LOG("Downlink: Camera Info reply: %s\n", info);
-				if (!B100_Send(info, LORA_PORT_CAMERA_INFO_RESPONSE, 0))
+				if (!B100_Send(info, LORA_PORT_CAMERA_INFO_RESPONSE, 0)) {
 					LOG_WARN("Downlink: Camera Info send failed: %s\n", B100_Get_Last_Error());
+				} else {
+					pthread_mutex_lock(&g_publish_mutex);
+					Append_Publish_Log_Text("camera-info", LORA_PORT_CAMERA_INFO_RESPONSE, info);
+					pthread_mutex_unlock(&g_publish_mutex);
+				}
 				break;
 			}
 			case 0x02: {
@@ -1413,8 +2124,13 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				         s->restartCounter,
 				         s->devAddrStr[0]      ? s->devAddrStr      : "0");
 				LOG("Downlink: Bridge Info reply: %s\n", info);
-				if (!B100_Send(info, LORA_PORT_BRIDGE_INFO_RESPONSE, 0))
+				if (!B100_Send(info, LORA_PORT_BRIDGE_INFO_RESPONSE, 0)) {
 					LOG_WARN("Downlink: Bridge Info send failed: %s\n", B100_Get_Last_Error());
+				} else {
+					pthread_mutex_lock(&g_publish_mutex);
+					Append_Publish_Log_Text("bridge-info", LORA_PORT_BRIDGE_INFO_RESPONSE, info);
+					pthread_mutex_unlock(&g_publish_mutex);
+				}
 				ACAP_STATUS_SetString("lorawan", "bridgeInfo", info);
 				break;
 			}
@@ -1432,6 +2148,87 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 			}
 			default:
 				LOG_WARN("Downlink: Unknown query command 0x%02X\n", first_byte);
+				break;
+		}
+
+	} else if (port == LORA_PORT_RADAR_OTA_CONFIG) {
+		// Port 130: Radar OTA config, GET/SET over same Radar dedicated port
+		switch (first_byte) {
+			case RADAR_OTA_CMD_GET_CONFIG:
+				LOG("Downlink: Radar OTA get config\n");
+				if (!Send_Radar_OTA_Config_Response())
+					LOG_WARN("Radar OTA: Failed to send config response\n");
+				break;
+			case RADAR_OTA_CMD_GET_CAPS:
+				LOG("Downlink: Radar OTA get capabilities\n");
+				if (!Send_Radar_OTA_Caps_Response())
+					LOG_WARN("Radar OTA: Failed to send capabilities response\n");
+				break;
+			case RADAR_OTA_CMD_SET_CONFIG: {
+				LOG("Downlink: Radar OTA set config\n");
+				unsigned char status = Apply_Radar_OTA_Set_Config(bytes + 1, byte_count - 1);
+				if (!Send_Radar_OTA_Ack(RADAR_OTA_CMD_SET_CONFIG, status))
+					LOG_WARN("Radar OTA: Failed to send set-config ack\n");
+				break;
+			}
+			default:
+				LOG_WARN("Downlink: Unknown Radar OTA command 0x%02X\n", first_byte);
+				if (!Send_Radar_OTA_Ack((unsigned char)first_byte, RADAR_OTA_STATUS_INVALID_RANGE))
+					LOG_WARN("Radar OTA: Failed to send unknown-command ack\n");
+				break;
+		}
+
+	} else if (port == LORA_PORT_OCCUPANCY_OTA_CONFIG) {
+		// Port 132: Occupancy OTA config, GET/SET over same use-case dedicated port
+		switch (first_byte) {
+			case OCCUPANCY_OTA_CMD_GET_CONFIG:
+				LOG("Downlink: Occupancy OTA get config\n");
+				if (!Send_Occupancy_OTA_Config_Response())
+					LOG_WARN("Occupancy OTA: Failed to send config response\n");
+				break;
+			case OCCUPANCY_OTA_CMD_GET_CAPS:
+				LOG("Downlink: Occupancy OTA get capabilities\n");
+				if (!Send_Occupancy_OTA_Caps_Response())
+					LOG_WARN("Occupancy OTA: Failed to send capabilities response\n");
+				break;
+			case OCCUPANCY_OTA_CMD_SET_CONFIG: {
+				LOG("Downlink: Occupancy OTA set config\n");
+				unsigned char status = Apply_Occupancy_OTA_Set_Config(bytes + 1, byte_count - 1);
+				if (!Send_Occupancy_OTA_Ack(OCCUPANCY_OTA_CMD_SET_CONFIG, status))
+					LOG_WARN("Occupancy OTA: Failed to send set-config ack\n");
+				break;
+			}
+			default:
+				LOG_WARN("Downlink: Unknown Occupancy OTA command 0x%02X\n", first_byte);
+				if (!Send_Occupancy_OTA_Ack((unsigned char)first_byte, OCCUPANCY_OTA_STATUS_INVALID_RANGE))
+					LOG_WARN("Occupancy OTA: Failed to send unknown-command ack\n");
+				break;
+		}
+
+	} else if (port == LORA_PORT_ALERT_OTA_CONFIG) {
+		// Port 133: Detection Alert OTA config, GET/SET over same use-case dedicated port
+		switch (first_byte) {
+			case ALERT_OTA_CMD_GET_CONFIG:
+				LOG("Downlink: Alert OTA get config\n");
+				if (!Send_Alert_OTA_Config_Response())
+					LOG_WARN("Alert OTA: Failed to send config response\n");
+				break;
+			case ALERT_OTA_CMD_GET_CAPS:
+				LOG("Downlink: Alert OTA get capabilities\n");
+				if (!Send_Alert_OTA_Caps_Response())
+					LOG_WARN("Alert OTA: Failed to send capabilities response\n");
+				break;
+			case ALERT_OTA_CMD_SET_CONFIG: {
+				LOG("Downlink: Alert OTA set config\n");
+				unsigned char status = Apply_Alert_OTA_Set_Config(bytes + 1, byte_count - 1);
+				if (!Send_Alert_OTA_Ack(ALERT_OTA_CMD_SET_CONFIG, status))
+					LOG_WARN("Alert OTA: Failed to send set-config ack\n");
+				break;
+			}
+			default:
+				LOG_WARN("Downlink: Unknown Alert OTA command 0x%02X\n", first_byte);
+				if (!Send_Alert_OTA_Ack((unsigned char)first_byte, ALERT_OTA_STATUS_INVALID_RANGE))
+					LOG_WARN("Alert OTA: Failed to send unknown-command ack\n");
 				break;
 		}
 
@@ -1793,6 +2590,9 @@ HTTP_Endpoint_send(const ACAP_HTTP_Response response, const ACAP_HTTP_Request re
 	
 	// Send message
 	if (B100_Send(payload, port, confirmed)) {
+		pthread_mutex_lock(&g_publish_mutex);
+		Append_Publish_Log_Text("manual-send", port, payload);
+		pthread_mutex_unlock(&g_publish_mutex);
 		ACAP_HTTP_Respond_Text(response, "Message sent");
 	} else {
 		ACAP_HTTP_Respond_Error(response, 500, B100_Get_Last_Error());
@@ -2050,14 +2850,20 @@ HTTP_Endpoint_b100_request_status(const ACAP_HTTP_Response response, const ACAP_
 
 	// Ensure B100 has http_api_enable=1 and correct callback URIs configured
 	if (!Configure_B100_Callbacks()) {
-		ACAP_HTTP_Respond_Error(response, 500, "Failed to configure B100 callbacks");
+		const char* err = B100_Get_Last_Error();
+		if (!err || !err[0]) err = "Failed to configure B100 callbacks";
+		ACAP_HTTP_Respond_Error(response, 500, err);
 		return;
 	}
 
 	if (B100_Request_Status()) {
-		ACAP_HTTP_Respond_Text(response, "Status request sent");
+		ACAP_HTTP_Respond_Text(response, "Bridge HTTP callbacks configured and status request sent");
 	} else {
-		ACAP_HTTP_Respond_Error(response, 500, B100_Get_Last_Error());
+		const char* err = B100_Get_Last_Error();
+		if (!err || !err[0]) err = "status request not accepted";
+		LOG_WARN("Status request failed right after callback configuration: %s\n", err);
+		// Saving HTTP settings should still succeed if callback configuration was applied.
+		ACAP_HTTP_Respond_Text(response, "Bridge HTTP callbacks configured, but status request failed");
 	}
 }
 
@@ -2075,7 +2881,15 @@ HTTP_Endpoint_B100_Status_Callback(const ACAP_HTTP_Response response, const ACAP
 	
 	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
 	if (!body) {
-		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
+		const char* raw = ACAP_HTTP_Get_Body(request);
+		size_t raw_len = ACAP_HTTP_Get_Body_Length(request);
+		if (raw && raw_len > 0) {
+			body = cJSON_ParseWithLength(raw, raw_len);
+		}
+	}
+	if (!body) {
+		LOG_WARN("B100 status callback: failed to parse JSON body\n");
+		ACAP_HTTP_Respond_Text(response, "OK");
 		return;
 	}
 
@@ -2085,10 +2899,9 @@ HTTP_Endpoint_B100_Status_Callback(const ACAP_HTTP_Response response, const ACAP
 		free(json_str);
 	}
 
+	ACAP_HTTP_Respond_Text(response, "OK");
 	B100_Process_Status_Callback(body);
 	cJSON_Delete(body);
-
-	ACAP_HTTP_Respond_Text(response, "OK");
 }
 
 void
@@ -2099,10 +2912,24 @@ HTTP_Endpoint_B100_Receive_Callback(const ACAP_HTTP_Response response, const ACA
 		return;
 	}
 
+	const char* content_type = ACAP_HTTP_Get_Content_Type(request);
+	const char* raw = ACAP_HTTP_Get_Body(request);
+	size_t raw_len = ACAP_HTTP_Get_Body_Length(request);
+	ACAP_STATUS_SetString("lorawan", "lastReceiveCallbackTime", ACAP_DEVICE_Local_Time());
+	ACAP_STATUS_SetString("lorawan", "lastReceiveCallbackContentType", content_type ? content_type : "");
+	ACAP_STATUS_SetNumber("lorawan", "lastReceiveCallbackBytes", (int)raw_len);
+
 	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
 	if (!body) {
-		LOG_WARN("B100 receive callback: failed to parse JSON body (Content-Type may be wrong)\n");
-		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
+		if (raw && raw_len > 0) {
+			body = cJSON_ParseWithLength(raw, raw_len);
+		}
+	}
+	if (!body) {
+		LOG_WARN("B100 receive callback: failed to parse JSON body (content-type=%s, bytes=%zu)\n",
+		         content_type ? content_type : "", raw_len);
+		ACAP_STATUS_SetString("lorawan", "lastReceiveCallbackResult", "invalid_json_acknowledged");
+		ACAP_HTTP_Respond_Text(response, "OK");
 		return;
 	}
 
@@ -2113,10 +2940,10 @@ HTTP_Endpoint_B100_Receive_Callback(const ACAP_HTTP_Response response, const ACA
 		free(json_str);
 	}
 
-	B100_Process_Receive_Callback(body);
-	cJSON_Delete(body);
-
 	ACAP_HTTP_Respond_Text(response, "OK");
+	int processed = B100_Process_Receive_Callback(body);
+	ACAP_STATUS_SetString("lorawan", "lastReceiveCallbackResult", processed ? "processed" : "received_no_payload");
+	cJSON_Delete(body);
 }
 
 void
@@ -2148,6 +2975,13 @@ HTTP_Endpoint_B100_GPS_Callback(const ACAP_HTTP_Response response, const ACAP_HT
 	}
 
 	cJSON* body = ACAP_HTTP_Request_JSON(request, NULL);
+	if (!body) {
+		const char* raw = ACAP_HTTP_Get_Body(request);
+		size_t raw_len = ACAP_HTTP_Get_Body_Length(request);
+		if (raw && raw_len > 0) {
+			body = cJSON_ParseWithLength(raw, raw_len);
+		}
+	}
 	if (!body) {
 		ACAP_HTTP_Respond_Error(response, 400, "Invalid JSON body");
 		return;
@@ -2277,14 +3111,11 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		" * Device  : %s  (serial %s)\n"
 		" * Generated: %s\n"
 		" *\n"
-		" * Uplink payloads\n"
-		" * - Port 1, Counting, 2 bytes:\n"
-		" *   byte[0] = selected-label entering count, uint8, 0-255\n"
-		" *   byte[1] = selected-label exiting count, uint8, 0-255\n"
-		" * - Port 2, Occupancy Interval Maximum, 1 byte:\n"
-		" *   byte[0] = selected-label maximum occupancy during interval, uint8, 0-255\n"
-		" * - Port 3, Detection Alert, 1 byte:\n"
-		" *   byte[0] = selected-label detection count, uint8, 0-255. 0 means inactive/no detections.\n"
+		" * Payloads\n"
+		" * - Port 2, Occupancy, 1 byte: maximum selected-label objects during the interval.\n"
+		" * - Port 3, Detection Alert, 1 byte: maximum selected-label objects while alert is active.\n"
+		" *   Value 0 on port 3 means inactive or heartbeat.\n"
+		" * - Port 1, Counting, 2 bytes: entering and exiting selected-label counts.\n"
 		" *\n"
 		" * Information request downlinks and responses\n"
 		" * - Port 120, Information Request, 1 byte:\n"
@@ -2299,50 +3130,65 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		" * The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in uplinks.\n"
 		" *\n"
 		" */\n\n"
-		"function byteValue(value) { return value & 0xff; }\n"
-		"function asciiFromBytes(bytes) { return bytes.map(function(value) { return String.fromCharCode(byteValue(value)); }).join(''); }\n"
-		"function numberFromText(value) { var parsed = Number(String(value || '').replace(/[^0-9.-]/g, '')); return Number.isFinite(parsed) ? parsed : null; }\n\n"
-		"function decodeInformationRequest(bytes, fPort) {\n"
-		"  if (bytes.length !== 1) throw new Error('Information Request payload must be 1 byte');\n"
-		"  var code = byteValue(bytes[0]);\n"
-		"  var requests = { 1: { requestName: 'camera_info', requestLabel: 'Camera Info', responsePort: 121 }, 2: { requestName: 'bridge_info', requestLabel: 'Bridge Info', responsePort: 122 }, 3: { requestName: 'signal_quality', requestLabel: 'Signal Quality', responsePort: null } };\n"
-		"  var request = requests[code] || { requestName: 'unknown', requestLabel: 'Unknown', responsePort: null };\n"
-		"  return { port: fPort, messageType: 'information_request', requestCode: code, requestName: request.requestName, requestLabel: request.requestLabel, responsePort: request.responsePort };\n"
-		"}\n\n"
-		"function decodeCameraInfo(bytes, fPort) {\n"
-		"  var text = asciiFromBytes(bytes);\n"
-		"  var fields = text.split(',');\n"
-		"  return { port: fPort, messageType: 'camera_info_response', raw: text, cameraInfo: { model: fields[0] || '', serial: fields[1] || '', firmwareVersion: fields[2] || '', uptimeHours: numberFromText(fields[3]), cpuPercent: numberFromText(fields[4]), appVersion: fields[5] || '' } };\n"
-		"}\n\n"
-		"function decodeBridgeInfo(bytes, fPort) {\n"
-		"  var text = asciiFromBytes(bytes);\n"
-		"  var fields = text.split(',');\n"
-		"  var hardwareParts = String(fields[0] || '').split('/');\n"
-		"  return { port: fPort, messageType: 'bridge_info_response', raw: text, bridgeInfo: { hardware: hardwareParts[0] || '', hardwareVersion: hardwareParts[1] || '', firmwareVersion: fields[1] || '', powerSource: fields[2] || '', temperatureC: numberFromText(fields[3]), restartCounter: numberFromText(fields[4]), devAddr: fields[5] || '' } };\n"
-		"}\n\n"
-		"function decodeRadarOccupancy(bytes, fPort) {\n"
-		"  if (!bytes) throw new Error('Missing bytes');\n"
-		"  if (fPort === 1) {\n"
-		"    if (bytes.length !== 2) throw new Error('Counting payload must be 2 bytes');\n"
-		"    return { port: fPort, messageType: 'counting', useCase: 'counting', useCaseLabel: 'Counting', entering: byteValue(bytes[0]), exiting: byteValue(bytes[1]) };\n"
-		"  }\n"
+		"function Byte(value) { return value & 0xff; }\n"
+		"function HexToBytes(hex) {\n"
+		"  var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n"
+		"  if (!clean.length) throw new Error('Missing hex payload');\n"
+		"  if (clean.length %% 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('Hex payload must be an even-length hexadecimal string');\n"
+		"  var bytes = [];\n"
+		"  for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n"
+		"  return bytes;\n"
+		"}\n"
+		"function Bytes(buffer) {\n"
+		"  if (!buffer) throw new Error('Missing buffer');\n"
+		"  if (typeof buffer === 'string') return HexToBytes(buffer);\n"
+		"  if (Array.isArray(buffer)) return buffer.map(Byte);\n"
+		"  if (typeof Uint8Array !== 'undefined' && buffer instanceof Uint8Array) return Array.prototype.slice.call(buffer).map(Byte);\n"
+		"  if (buffer.bytes) return Bytes(buffer.bytes);\n"
+		"  throw new Error('Payload must be a hex string, array, Buffer, or Uint8Array');\n"
+		"}\n"
+		"function RequireLength(bytes, length, name) {\n"
+		"  if (bytes.length !== length) throw new Error(name + ' payload must be ' + length + ' byte' + (length === 1 ? '' : 's'));\n"
+		"}\n"
+		"function Text(bytes) { return bytes.map(function(value) { return String.fromCharCode(Byte(value)); }).join(''); }\n"
+		"function NumberFromText(value) { var parsed = Number(String(value || '').replace(/[^0-9.-]/g, '')); return Number.isFinite(parsed) ? parsed : null; }\n\n"
+		"function Decode(buffer, port) {\n"
+		"  var bytes = Bytes(buffer);\n"
+		"  var fPort = Number(port);\n\n"
 		"  if (fPort === 2) {\n"
-		"    if (bytes.length !== 1) throw new Error('Occupancy payload must be 1 byte');\n"
-		"    return { port: fPort, messageType: 'occupancy_interval_maximum', useCase: 'occupancy', useCaseLabel: 'Occupancy Interval Maximum', count: byteValue(bytes[0]) };\n"
-		"  }\n"
+		"    RequireLength(bytes, 1, 'Occupancy');\n"
+		"    return { port: fPort, useCase: 'occupancy', maximumObjects: Byte(bytes[0]) };\n"
+		"  }\n\n"
 		"  if (fPort === 3) {\n"
-		"    if (bytes.length !== 1) throw new Error('Detection Alert payload must be 1 byte');\n"
-		"    var count = byteValue(bytes[0]);\n"
-		"    return { port: fPort, messageType: 'detection_alert', useCase: 'alert', useCaseLabel: 'Detection Alert', active: count > 0, count: count };\n"
-		"  }\n"
-		"  if (fPort === 120) return decodeInformationRequest(bytes, fPort);\n"
-		"  if (fPort === 121) return decodeCameraInfo(bytes, fPort);\n"
-		"  if (fPort === 122) return decodeBridgeInfo(bytes, fPort);\n"
+		"    RequireLength(bytes, 1, 'Detection Alert');\n"
+		"    var maximumObjects = Byte(bytes[0]);\n"
+		"    return { port: fPort, useCase: 'detectionAlert', active: maximumObjects > 0, maximumObjects: maximumObjects };\n"
+		"  }\n\n"
+		"  if (fPort === 1) {\n"
+		"    RequireLength(bytes, 2, 'Counting');\n"
+		"    return { port: fPort, useCase: 'counting', enteringObjects: Byte(bytes[0]), exitingObjects: Byte(bytes[1]) };\n"
+		"  }\n\n"
+		"  if (fPort === 120) {\n"
+		"    RequireLength(bytes, 1, 'Information Request');\n"
+		"    var requests = { 1: 'cameraInfo', 2: 'bridgeInfo', 3: 'signalQuality' };\n"
+		"    return { port: fPort, request: requests[Byte(bytes[0])] || 'unknown', requestCode: Byte(bytes[0]) };\n"
+		"  }\n\n"
+		"  if (fPort === 121) {\n"
+		"    var cameraText = Text(bytes);\n"
+		"    var camera = cameraText.split(',');\n"
+		"    return { port: fPort, response: 'cameraInfo', raw: cameraText, model: camera[0] || '', serial: camera[1] || '', firmwareVersion: camera[2] || '', uptimeHours: NumberFromText(camera[3]), cpuPercent: NumberFromText(camera[4]), appVersion: camera[5] || '' };\n"
+		"  }\n\n"
+		"  if (fPort === 122) {\n"
+		"    var bridgeText = Text(bytes);\n"
+		"    var bridge = bridgeText.split(',');\n"
+		"    var hardware = String(bridge[0] || '').split('/');\n"
+		"    return { port: fPort, response: 'bridgeInfo', raw: bridgeText, hardware: hardware[0] || '', hardwareVersion: hardware[1] || '', firmwareVersion: bridge[1] || '', powerSource: bridge[2] || '', temperatureC: NumberFromText(bridge[3]), restartCounter: NumberFromText(bridge[4]), devAddr: bridge[5] || '' };\n"
+		"  }\n\n"
 		"  throw new Error('Unsupported Radar LoRaWAN port: ' + fPort);\n"
 		"}\n\n"
 		"function decodeUplink(input) {\n"
 		"  try {\n"
-		"    return { data: decodeRadarOccupancy(input.bytes, input.fPort) };\n"
+		"    return { data: Decode(input.bytes, input.fPort) };\n"
 		"  } catch (error) {\n"
 		"    return { errors: [error.message] };\n"
 		"  }\n"
@@ -2358,6 +3204,656 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 	         dev_serial, dev_date);
 
 	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", strlen(js));
+	ACAP_HTTP_Respond_String(response, "%s", js);
+}
+
+void
+HTTP_Endpoint_alert_ota_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "GET") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be GET");
+		return;
+	}
+
+	const char* dev_model = ACAP_DEVICE_Prop("model") ? ACAP_DEVICE_Prop("model") : "unknown";
+	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
+	const char* dev_date = ACAP_DEVICE_Date();
+	char js[24000];
+	snprintf(js, sizeof(js),
+		"/**\n"
+		" * AI-B100 Detection Alert OTA Translator\n"
+		" * Device  : %s (serial %s)\n"
+		" * Generated: %s\n"
+		" *\n"
+		" * Port\n"
+		" * - Detection Alert OTA uses dedicated port 133 for both requests and responses.\n"
+		" *\n"
+		" * Commands\n"
+		" * - 0x01: GET_CONFIG request\n"
+		" * - 0x81: GET_CONFIG response\n"
+		" * - 0x02: SET_CONFIG request\n"
+		" * - 0x82: SET_CONFIG ACK/NACK\n"
+		" * - 0x03: GET_CAPS request\n"
+		" * - 0x83: GET_CAPS response\n"
+		" *\n"
+		" * Config body format (48 bytes) for 0x81 and 0x02 body:\n"
+		" * byte[0]   protocolVersion (uint8)\n"
+		" * byte[1]   flags bit0=enabled bit1=labelVehicle bit2=aoiEnabled\n"
+		" * byte[2]   heartbeatMinutes (uint8, 5..60)\n"
+		" * byte[3:4] activeIntervalSeconds (uint16 BE, 60..300)\n"
+		" * byte[5]   transitionSeconds (uint8, 2..20)\n"
+		" * byte[6]   pointCount (uint8, 0 or 3..10)\n"
+		" * byte[7:46] fixed point slots (10 points, each x,y uint16 BE)\n"
+		" * byte[47]  crc8 over bytes[0..46]\n"
+		" *\n"
+		" * Public API\n"
+		" * - Encode_Config(config, command) : JSON -> HEX payload\n"
+		" * - Decode_config(input)           : HEX/bytes -> JSON\n"
+		" */\n\n"
+		"var AI_B100_ALERT_OTA_PORT = 133;\n"
+		"var AI_B100_ALERT_OTA_MAX_POINTS = 10;\n\n"
+		"function aiByte(value) { return value & 0xFF; }\n"
+		"function aiClamp(value, minValue, maxValue) {\n"
+		"  var n = Number(value);\n"
+		"  if (!Number.isFinite(n)) n = minValue;\n"
+		"  if (n < minValue) n = minValue;\n"
+		"  if (n > maxValue) n = maxValue;\n"
+		"  return Math.round(n);\n"
+		"}\n\n"
+		"function aiHexToBytes(hex) {\n"
+		"  var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n"
+		"  if (!clean.length) return [];\n"
+		"  if (clean.length %% 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n"
+		"  var bytes = [];\n"
+		"  for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n"
+		"  return bytes;\n"
+		"}\n\n"
+		"function aiBytesToHex(bytes) {\n"
+		"  return (bytes || []).map(function(value) { return ('0' + aiByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n"
+		"}\n\n"
+		"function aiWriteU16BE(out, value) {\n"
+		"  var v = aiClamp(value, 0, 65535);\n"
+		"  out.push((v >> 8) & 0xFF);\n"
+		"  out.push(v & 0xFF);\n"
+		"}\n\n"
+		"function aiReadU16BE(bytes, index) {\n"
+		"  return (aiByte(bytes[index]) << 8) | aiByte(bytes[index + 1]);\n"
+		"}\n\n"
+		"function aiCrc8(bytes) {\n"
+		"  var crc = 0;\n"
+		"  for (var i = 0; i < bytes.length; i++) {\n"
+		"    crc ^= aiByte(bytes[i]);\n"
+		"    for (var bit = 0; bit < 8; bit++) {\n"
+		"      if (crc & 0x80) crc = ((crc << 1) ^ 0x07) & 0xFF;\n"
+		"      else crc = (crc << 1) & 0xFF;\n"
+		"    }\n"
+		"  }\n"
+		"  return crc & 0xFF;\n"
+		"}\n\n"
+		"function aiBuildConfigBody(config) {\n"
+		"  var cfg = config || {};\n"
+		"  var aoi = cfg.area || cfg.aoi || {};\n"
+		"  var points = (aoi.points || []).slice(0, AI_B100_ALERT_OTA_MAX_POINTS).map(function(point) {\n"
+		"    return { x: aiClamp(point.x, 0, 1000), y: aiClamp(point.y, 0, 1000) };\n"
+		"  });\n"
+		"  var aoiEnabled = !!aoi.enabled;\n"
+		"  if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');\n"
+		"\n"
+		"  var body = [];\n"
+		"  body.push(aiClamp(cfg.protocolVersion || 1, 1, 255));\n"
+		"  body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));\n"
+		"  body.push(aiClamp(cfg.heartbeatMin || cfg.heartbeatMinutes, 5, 60));\n"
+		"  aiWriteU16BE(body, aiClamp(cfg.activeIntervalSec || cfg.activeIntervalSeconds, 60, 300));\n"
+		"  body.push(aiClamp(cfg.transitionSec || cfg.transitionSeconds, 2, 20));\n"
+		"  body.push(aoiEnabled ? points.length : 0);\n"
+		"\n"
+		"  for (var i = 0; i < AI_B100_ALERT_OTA_MAX_POINTS; i++) {\n"
+		"    var point = i < points.length ? points[i] : { x: 0, y: 0 };\n"
+		"    aiWriteU16BE(body, point.x);\n"
+		"    aiWriteU16BE(body, point.y);\n"
+		"  }\n"
+		"  body.push(aiCrc8(body));\n"
+		"  if (body.length !== 48) throw new Error('Config body must be 48 bytes');\n"
+		"  return body;\n"
+		"}\n\n"
+		"function aiParseConfigBody(body) {\n"
+		"  if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');\n"
+		"  if (aiCrc8(body.slice(0, 47)) !== aiByte(body[47])) throw new Error('Config CRC mismatch');\n"
+		"\n"
+		"  var flags = aiByte(body[1]);\n"
+		"  var pointCount = aiByte(body[6]);\n"
+		"  if (pointCount > AI_B100_ALERT_OTA_MAX_POINTS) throw new Error('Invalid pointCount');\n"
+		"  if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');\n"
+		"\n"
+		"  var points = [];\n"
+		"  for (var i = 0; i < AI_B100_ALERT_OTA_MAX_POINTS; i++) {\n"
+		"    var base = 7 + (i * 4);\n"
+		"    var x = aiReadU16BE(body, base);\n"
+		"    var y = aiReadU16BE(body, base + 2);\n"
+		"    if (i < pointCount) points.push({ x: x, y: y });\n"
+		"  }\n"
+		"\n"
+		"  return {\n"
+		"    version: aiByte(body[0]),\n"
+		"    enabled: (flags & 0x01) !== 0,\n"
+		"    label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',\n"
+		"    heartbeatMin: aiByte(body[2]),\n"
+		"    activeIntervalSec: aiReadU16BE(body, 3),\n"
+		"    transitionSec: aiByte(body[5]),\n"
+		"    area: { enabled: (flags & 0x04) !== 0, points: points },\n"
+		"    crc8: aiByte(body[47])\n"
+		"  };\n"
+		"}\n\n"
+		"function Encode_Config(config, command) {\n"
+		"  var cmd = aiByte(command);\n"
+		"  if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n"
+		"  if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n"
+		"  return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n"
+		"}\n\n"
+		"function Decode_config(input) {\n"
+		"  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n"
+		"  if (!bytes.length) throw new Error('Empty payload');\n"
+		"  var command = aiByte(bytes[0]);\n"
+		"  var names = { 0x01: 'GET_CONFIG', 0x02: 'SET_CONFIG', 0x03: 'GET_CAPS', 0x81: 'GET_CONFIG_RESP', 0x82: 'SET_CONFIG_ACK', 0x83: 'GET_CAPS_RESP' };\n"
+		"\n"
+		"  if (command === 0x01) return { port: AI_B100_ALERT_OTA_PORT, cmd: command, cmdName: names[command], type: 'request' };\n"
+		"  if (command === 0x03) return { port: AI_B100_ALERT_OTA_PORT, cmd: command, cmdName: names[command], type: 'request' };\n"
+		"\n"
+		"  if (command === 0x02 || command === 0x81) {\n"
+		"    if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');\n"
+		"    return {\n"
+		"      port: AI_B100_ALERT_OTA_PORT,\n"
+		"      cmd: command,\n"
+		"      cmdName: names[command],\n"
+		"      type: command === 0x02 ? 'request' : 'response',\n"
+		"      settings: aiParseConfigBody(bytes.slice(1))\n"
+		"    };\n"
+		"  }\n"
+		"\n"
+		"  if (command === 0x82) {\n"
+		"    if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n"
+		"    if (aiCrc8(bytes.slice(0, 4)) !== aiByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n"
+		"    return {\n"
+		"      port: AI_B100_ALERT_OTA_PORT,\n"
+		"      cmd: command,\n"
+		"      cmdName: names[command],\n"
+		"      type: 'ack',\n"
+		"      version: aiByte(bytes[1]),\n"
+		"      ackFor: aiByte(bytes[2]),\n"
+		"      status: aiByte(bytes[3]),\n"
+		"      success: aiByte(bytes[3]) === 0\n"
+		"    };\n"
+		"  }\n"
+		"\n"
+		"  if (command === 0x83) {\n"
+		"    if (bytes.length < 13) throw new Error('Capabilities response must be 13 bytes');\n"
+		"    var payload = bytes.slice(1);\n"
+		"    if (aiCrc8(payload.slice(0, 11)) !== aiByte(payload[11])) throw new Error('Capabilities CRC mismatch');\n"
+		"    var coordEncoding = aiByte(payload[2]);\n"
+		"    var minHeartbeat = aiByte(payload[3]);\n"
+		"    var maxHeartbeat = aiByte(payload[4]);\n"
+		"    var minActive = aiReadU16BE(payload, 5);\n"
+		"    var maxActive = aiReadU16BE(payload, 7);\n"
+		"    var minTransition = aiByte(payload[9]);\n"
+		"    var maxTransition = aiByte(payload[10]);\n"
+		"    return {\n"
+		"      port: AI_B100_ALERT_OTA_PORT,\n"
+		"      cmd: command,\n"
+		"      cmdName: names[command],\n"
+		"      type: 'response',\n"
+		"      version: aiByte(payload[0]),\n"
+		"      maxPoints: aiByte(payload[1]),\n"
+		"      coordEncoding: coordEncoding,\n"
+		"      coordEncodingName: coordEncoding === 1 ? 'uint16_0_1000' : 'unknown',\n"
+		"      minHeartbeatMin: minHeartbeat,\n"
+		"      maxHeartbeatMin: maxHeartbeat,\n"
+		"      minActiveSec: minActive,\n"
+		"      maxActiveSec: maxActive,\n"
+		"      minTransitionSec: minTransition,\n"
+		"      maxTransitionSec: maxTransition,\n"
+		"      constraints: {\n"
+		"        heartbeatMin: [minHeartbeat, maxHeartbeat],\n"
+		"        activeIntervalSec: [minActive, maxActive],\n"
+		"        transitionSec: [minTransition, maxTransition],\n"
+		"        maxPoints: aiByte(payload[1])\n"
+		"      }\n"
+		"    };\n"
+		"  }\n"
+		"\n"
+		"  throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n"
+		"}\n\n"
+		"var aiB100AlertOtaJsonToHex = Encode_Config;\n"
+		"var aiB100AlertOtaBufferToJson = Decode_config;\n",
+		dev_model, dev_serial, dev_date
+	);
+
+	const char* filename = "AI-B100-Detection-Alert-OTA.js";
+	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", strlen(js));
+	ACAP_HTTP_Respond_String(response, "%s", js);
+}
+
+void
+HTTP_Endpoint_occupancy_ota_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "GET") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be GET");
+		return;
+	}
+
+	const char* dev_model = ACAP_DEVICE_Prop("model") ? ACAP_DEVICE_Prop("model") : "unknown";
+	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
+	const char* dev_date = ACAP_DEVICE_Date();
+	char js[65536];
+	int js_len = snprintf(js, sizeof(js),
+		"/**\n"
+		" * AI-B100 Occupancy OTA Translator\n"
+		" * Device  : %s (serial %s)\n"
+		" * Generated: %s\n"
+		" *\n"
+		" * Port\n"
+		" * - Occupancy OTA uses dedicated port 132 for both requests and responses.\n"
+		" *\n"
+		" * Commands\n"
+		" * - 0x01: GET_CONFIG request\n"
+		" * - 0x81: GET_CONFIG response\n"
+		" * - 0x02: SET_CONFIG request\n"
+		" * - 0x82: SET_CONFIG ACK/NACK\n"
+		" * - 0x03: GET_CAPS request\n"
+		" * - 0x83: GET_CAPS response\n"
+		" *\n"
+		" * Config body format (48 bytes) for 0x81 and 0x02 body:\n"
+		" * byte[0]   protocolVersion (uint8)\n"
+		" * byte[1]   flags bit0=enabled bit1=labelVehicle bit2=aoiEnabled\n"
+		" * byte[2]   intervalMinutes (uint8, 1..60)\n"
+		" * byte[3]   pointCount (uint8, 0 or 3..10)\n"
+		" * byte[4:43] fixed point slots (10 points, each x,y uint16 BE)\n"
+		" * byte[44]  occupancyType (current: 1 = maximum)\n"
+		" * byte[45]  reserved (0)\n"
+		" * byte[46]  reserved (0)\n"
+		" * byte[47]  crc8 over bytes[0..46]\n"
+		" *\n"
+		" * Public API\n"
+		" * - Encode_Config(config, command) : JSON -> HEX payload\n"
+		" * - Decode_config(input)           : HEX/bytes -> JSON\n"
+		" */\n\n"
+		"var AI_B100_OCCUPANCY_OTA_PORT = 132;\n"
+		"var AI_B100_OCCUPANCY_OTA_MAX_POINTS = 10;\n\n"
+		"function aiByte(value) { return value & 255; }\n"
+		"function aiClamp(value, minValue, maxValue) {\n"
+		"  var n = Number(value);\n"
+		"  if (!Number.isFinite(n)) n = minValue;\n"
+		"  if (n < minValue) n = minValue;\n"
+		"  if (n > maxValue) n = maxValue;\n"
+		"  return Math.round(n);\n"
+		"}\n\n"
+		"function aiHexToBytes(hex) {\n"
+		"  var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n"
+		"  if (!clean.length) return [];\n"
+		"  if ((clean.length & 1) !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n"
+		"  var bytes = [];\n"
+		"  for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n"
+		"  return bytes;\n"
+		"}\n\n"
+		"function aiBytesToHex(bytes) {\n"
+		"  return (bytes || []).map(function(value) { return ('0' + aiByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n"
+		"}\n\n"
+		"function aiWriteU16BE(out, value) {\n"
+		"  var v = aiClamp(value, 0, 65535);\n"
+		"  out.push((v >> 8) & 255);\n"
+		"  out.push(v & 255);\n"
+		"}\n\n"
+		"function aiReadU16BE(bytes, index) {\n"
+		"  return (aiByte(bytes[index]) << 8) | aiByte(bytes[index + 1]);\n"
+		"}\n\n"
+		"function aiCrc8(bytes) {\n"
+		"  var crc = 0;\n"
+		"  for (var i = 0; i < bytes.length; i++) {\n"
+		"    crc ^= aiByte(bytes[i]);\n"
+		"    for (var bit = 0; bit < 8; bit++) {\n"
+		"      if (crc & 128) crc = ((crc << 1) ^ 0x07) & 255;\n"
+		"      else crc = (crc << 1) & 255;\n"
+		"    }\n"
+		"  }\n"
+		"  return crc & 255;\n"
+		"}\n\n"
+		"function aiOccupancyTypeCode(value) {\n"
+		"  if (typeof value !== 'string') throw new Error('config.type must be \"Interval Maximum\" or \"Area Balance\"');\n"
+		"  var t = value.trim().toLowerCase();\n"
+		"  if (t === 'area balance') return 2;\n"
+		"  if (t === 'interval maximum') return 1;\n"
+		"  throw new Error('config.type must be \"Interval Maximum\" or \"Area Balance\"');\n"
+		"}\n\n"
+		"function aiOccupancyTypeName(code) {\n"
+		"  if (code === 2) return 'Area Balance';\n"
+		"  if (code === 1) return 'Interval Maximum';\n"
+		"  return 'Unknown';\n"
+		"}\n\n"
+		"function aiBuildConfigBody(config) {\n"
+		"  var cfg = config || {};\n"
+		"  var aoi = cfg.aoi || {};\n"
+		"  var points = (aoi.points || []).slice(0, AI_B100_OCCUPANCY_OTA_MAX_POINTS).map(function(point) {\n"
+		"    return { x: aiClamp(point.x, 0, 1000), y: aiClamp(point.y, 0, 1000) };\n"
+		"  });\n"
+		"  var aoiEnabled = !!aoi.enabled;\n"
+		"  if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');\n"
+		"\n"
+		"  var body = [];\n"
+		"  body.push(aiClamp(cfg.protocolVersion || 1, 1, 255));\n"
+		"  body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));\n"
+		"  body.push(aiClamp(cfg.intervalMin || cfg.intervalMinutes, 1, 60));\n"
+		"  body.push(aoiEnabled ? points.length : 0);\n"
+		"\n"
+		"  for (var i = 0; i < AI_B100_OCCUPANCY_OTA_MAX_POINTS; i++) {\n"
+		"    var point = i < points.length ? points[i] : { x: 0, y: 0 };\n"
+		"    aiWriteU16BE(body, point.x);\n"
+		"    aiWriteU16BE(body, point.y);\n"
+		"  }\n"
+		"\n"
+		"  body.push(aiOccupancyTypeCode(cfg.type));\n"
+		"  body.push(0);\n"
+		"  body.push(0);\n"
+		"  body.push(aiCrc8(body));\n"
+		"  if (body.length !== 48) throw new Error('Config body must be 48 bytes');\n"
+		"  return body;\n"
+		"}\n\n"
+		"function aiParseConfigBody(body) {\n"
+		"  if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');\n"
+		"  if (aiCrc8(body.slice(0, 47)) !== aiByte(body[47])) throw new Error('Config CRC mismatch');\n"
+		"\n"
+		"  var flags = aiByte(body[1]);\n"
+		"  var pointCount = aiByte(body[3]);\n"
+		"  if (pointCount > AI_B100_OCCUPANCY_OTA_MAX_POINTS) throw new Error('Invalid pointCount');\n"
+		"  if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');\n"
+		"\n"
+		"  var points = [];\n"
+		"  for (var i = 0; i < AI_B100_OCCUPANCY_OTA_MAX_POINTS; i++) {\n"
+		"    var base = 4 + (i * 4);\n"
+		"    var x = aiReadU16BE(body, base);\n"
+		"    var y = aiReadU16BE(body, base + 2);\n"
+		"    if (i < pointCount) points.push({ x: x, y: y });\n"
+		"  }\n"
+		"\n"
+		"  var typeCode = aiByte(body[44]);\n"
+		"  var typeName = aiOccupancyTypeName(typeCode);\n"
+		"  return {\n"
+		"    protocolVersion: aiByte(body[0]),\n"
+		"    enabled: (flags & 0x01) !== 0,\n"
+		"    label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',\n"
+		"    intervalMinutes: aiByte(body[2]),\n"
+		"    intervalMin: aiByte(body[2]),\n"
+		"    type: typeName,\n"
+		"    aoi: { enabled: (flags & 0x04) !== 0, pointCount: pointCount, points: points },\n"
+		"    crc8: aiByte(body[47])\n"
+		"  };\n"
+		"}\n\n"
+		"function Encode_Config(config, command) {\n"
+		"  var cmd = aiByte(command);\n"
+		"  if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n"
+		"  if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n"
+		"  return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n"
+		"}\n\n"
+		"function Decode_config(input) {\n"
+		"  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n"
+		"  if (!bytes.length) throw new Error('Empty payload');\n"
+		"  var command = aiByte(bytes[0]);\n"
+		"  var names = { 0x01: 'GET_CONFIG', 0x02: 'SET_CONFIG', 0x03: 'GET_CAPS', 0x81: 'GET_CONFIG_RESP', 0x82: 'SET_CONFIG_ACK', 0x83: 'GET_CAPS_RESP' };\n"
+		"\n"
+		"  if (command === 0x01 || command === 0x03) return {\n"
+		"    port: AI_B100_OCCUPANCY_OTA_PORT,\n"
+		"    command: command,\n"
+		"    type: command === 0x01 ? 'get_config_request' : 'get_caps_request'\n"
+		"  };\n"
+		"\n"
+		"  if (command === 0x02 || command === 0x81) {\n"
+		"    if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');\n"
+		"    return {\n"
+		"      port: AI_B100_OCCUPANCY_OTA_PORT,\n"
+		"      command: command,\n"
+		"      type: command === 0x02 ? 'set_config_request' : 'get_config_response',\n"
+		"      config: aiParseConfigBody(bytes.slice(1))\n"
+		"    };\n"
+		"  }\n"
+		"\n"
+		"  if (command === 0x82) {\n"
+		"    if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n"
+		"    if (aiCrc8(bytes.slice(0, 4)) !== aiByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n"
+		"    return {\n"
+		"      port: AI_B100_OCCUPANCY_OTA_PORT,\n"
+		"      command: command,\n"
+		"      type: 'set_config_ack',\n"
+		"      version: aiByte(bytes[1]),\n"
+		"      ackFor: aiByte(bytes[2]),\n"
+		"      status: aiByte(bytes[3]),\n"
+		"      success: aiByte(bytes[3]) === 0\n"
+		"    };\n"
+		"  }\n"
+		"\n"
+		"  if (command === 0x83) {\n"
+		"    if (bytes.length < 13) throw new Error('Capabilities response must be 13 bytes');\n"
+		"    var payload = bytes.slice(1);\n"
+		"    if (aiCrc8(payload.slice(0, 11)) !== aiByte(payload[11])) throw new Error('Capabilities CRC mismatch');\n"
+		"    var coordEncoding = aiByte(payload[2]);\n"
+		"    var minInterval = aiByte(payload[3]);\n"
+		"    var maxInterval = aiByte(payload[4]);\n"
+		"    var minPoints = aiReadU16BE(payload, 5);\n"
+		"    var maxPoints = aiReadU16BE(payload, 7);\n"
+		"    var minType = aiByte(payload[9]);\n"
+		"    var maxType = aiByte(payload[10]);\n"
+		"    return {\n"
+		"      port: AI_B100_OCCUPANCY_OTA_PORT,\n"
+		"      command: command,\n"
+		"      type: 'get_caps_response',\n"
+		"      version: aiByte(payload[0]),\n"
+		"      maxPolygonPoints: aiByte(payload[1]),\n"
+		"      coordEncoding: coordEncoding,\n"
+		"      coordEncodingName: coordEncoding === 1 ? 'uint16_0_1000' : 'unknown',\n"
+		"      minIntervalMin: minInterval,\n"
+		"      maxIntervalMin: maxInterval,\n"
+		"      minAreaPoints: minPoints,\n"
+		"      maxAreaPoints: maxPoints,\n"
+		"      minType: minType,\n"
+		"      maxType: maxType,\n"
+		"      minTypeName: aiOccupancyTypeName(minType),\n"
+		"      maxTypeName: aiOccupancyTypeName(maxType),\n"
+		"      constraints: {\n"
+		"        intervalMin: [minInterval, maxInterval],\n"
+		"        areaPoints: [minPoints, maxPoints],\n"
+		"        occupancyType: [minType, maxType],\n"
+		"        occupancyTypeName: [aiOccupancyTypeName(minType), aiOccupancyTypeName(maxType)],\n"
+		"        maxPolygonPoints: aiByte(payload[1])\n"
+		"      }\n"
+		"    };\n"
+		"  }\n"
+		"\n"
+		"  throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n"
+		"}\n\n"
+		"var aiB100OccupancyOtaJsonToHex = Encode_Config;\n"
+		"var aiB100OccupancyOtaBufferToJson = Decode_config;\n",
+		dev_model, dev_serial, dev_date
+	);
+
+	if (js_len < 0) {
+		LOG_WARN("Occupancy OTA translator: snprintf failed\n");
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to generate Occupancy OTA translator");
+		return;
+	}
+	if ((size_t)js_len >= sizeof(js)) {
+		LOG_WARN("Occupancy OTA translator: output truncated (len=%d, cap=%zu)\n", js_len, sizeof(js));
+		ACAP_HTTP_Respond_Error(response, 500, "Occupancy OTA translator too large");
+		return;
+	}
+
+	const char* filename = "AI-B100-Occupancy-OTA.js";
+	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", (size_t)js_len);
+	ACAP_HTTP_Respond_String(response, "%s", js);
+}
+
+void
+HTTP_Endpoint_radar_ota_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	const char* method = ACAP_HTTP_Get_Method(request);
+	if (!method || strcmp(method, "GET") != 0) {
+		ACAP_HTTP_Respond_Error(response, 400, "Method must be GET");
+		return;
+	}
+
+	const char* dev_model = ACAP_DEVICE_Prop("model") ? ACAP_DEVICE_Prop("model") : "unknown";
+	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
+	const char* dev_date = ACAP_DEVICE_Date();
+	char js[32768];
+	int js_len = snprintf(js, sizeof(js),
+		"/**\n"
+		" * AI-B100 Radar OTA Translator\n"
+		" * Device  : %s (serial %s)\n"
+		" * Generated: %s\n"
+		" *\n"
+		" * Port\n"
+		" * - Radar OTA uses dedicated port 130 for both requests and responses.\n"
+		" *\n"
+		" * Commands\n"
+		" * - 0x01: GET_CONFIG request\n"
+		" * - 0x81: GET_CONFIG response\n"
+		" * - 0x02: SET_CONFIG request\n"
+		" * - 0x82: SET_CONFIG ACK/NACK\n"
+		" * - 0x03: GET_CAPS request\n"
+		" * - 0x83: GET_CAPS response\n"
+		" *\n"
+		" * Config body format (8 bytes) for 0x81 and 0x02 body:\n"
+		" * byte[0]   protocolVersion (uint8)\n"
+		" * byte[1:2] fieldMask (uint16 BE, bit 0x0001 = detectionSensitivity)\n"
+		" * byte[3]   detectionSensitivity (1=low, 2=medium, 3=high)\n"
+		" * byte[4:6] reserved (0)\n"
+		" * byte[7]   crc8 over bytes[0..6]\n"
+		" *\n"
+		" * Public API\n"
+		" * - Encode_Config(config, command) : JSON -> HEX payload\n"
+		" * - Decode_config(input)           : HEX/bytes -> JSON\n"
+		" */\n\n"
+		"var AI_B100_RADAR_OTA_PORT = 130;\n"
+		"var RADAR_OTA_FIELD_DETECTION_SENSITIVITY = 0x0001;\n\n"
+		"function aiByte(value) { return value & 255; }\n"
+		"function aiClamp(value, minValue, maxValue) {\n"
+		"  var n = Number(value);\n"
+		"  if (!Number.isFinite(n)) n = minValue;\n"
+		"  if (n < minValue) n = minValue;\n"
+		"  if (n > maxValue) n = maxValue;\n"
+		"  return Math.round(n);\n"
+		"}\n\n"
+		"function aiHexToBytes(hex) {\n"
+		"  var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n"
+		"  if (!clean.length) return [];\n"
+		"  if ((clean.length & 1) !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n"
+		"  var bytes = [];\n"
+		"  for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n"
+		"  return bytes;\n"
+		"}\n\n"
+		"function aiBytesToHex(bytes) {\n"
+		"  return (bytes || []).map(function(value) { return ('0' + aiByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n"
+		"}\n\n"
+		"function aiWriteU16BE(out, value) {\n"
+		"  var v = aiClamp(value, 0, 65535);\n"
+		"  out.push((v >> 8) & 255);\n"
+		"  out.push(v & 255);\n"
+		"}\n\n"
+		"function aiReadU16BE(bytes, index) {\n"
+		"  return (aiByte(bytes[index]) << 8) | aiByte(bytes[index + 1]);\n"
+		"}\n\n"
+		"function aiCrc8(bytes) {\n"
+		"  var crc = 0;\n"
+		"  for (var i = 0; i < bytes.length; i++) {\n"
+		"    crc ^= aiByte(bytes[i]);\n"
+		"    for (var bit = 0; bit < 8; bit++) {\n"
+		"      if (crc & 128) crc = ((crc << 1) ^ 0x07) & 255;\n"
+		"      else crc = (crc << 1) & 255;\n"
+		"    }\n"
+		"  }\n"
+		"  return crc & 255;\n"
+		"}\n\n"
+		"function aiSensitivityCode(value) {\n"
+		"  var s = String(value || '').trim().toLowerCase();\n"
+		"  if (s === 'low') return 1;\n"
+		"  if (s === 'medium') return 2;\n"
+		"  if (s === 'high') return 3;\n"
+		"  throw new Error('detectionSensitivity must be low, medium, or high');\n"
+		"}\n\n"
+		"function aiSensitivityName(code) {\n"
+		"  if (code === 1) return 'low';\n"
+		"  if (code === 2) return 'medium';\n"
+		"  if (code === 3) return 'high';\n"
+		"  return 'unknown';\n"
+		"}\n\n"
+		"function aiBuildConfigBody(config) {\n"
+		"  var cfg = config || {};\n"
+		"  var body = [];\n"
+		"  body.push(aiClamp(cfg.protocolVersion || 1, 1, 255));\n"
+		"  aiWriteU16BE(body, RADAR_OTA_FIELD_DETECTION_SENSITIVITY);\n"
+		"  body.push(aiSensitivityCode(cfg.detectionSensitivity));\n"
+		"  body.push(0);\n"
+		"  body.push(0);\n"
+		"  body.push(0);\n"
+		"  body.push(aiCrc8(body));\n"
+		"  if (body.length !== 8) throw new Error('Config body must be 8 bytes');\n"
+		"  return body;\n"
+		"}\n\n"
+		"function aiParseConfigBody(body) {\n"
+		"  if (!body || body.length !== 8) throw new Error('Config body must be 8 bytes');\n"
+		"  if (aiCrc8(body.slice(0, 7)) !== aiByte(body[7])) throw new Error('Config CRC mismatch');\n"
+		"  var fieldMask = aiReadU16BE(body, 1);\n"
+		"  var sensitivityCode = aiByte(body[3]);\n"
+		"  return {\n"
+		"    protocolVersion: aiByte(body[0]),\n"
+		"    fieldMask: fieldMask,\n"
+		"    detectionSensitivity: aiSensitivityName(sensitivityCode),\n"
+		"    fields: { detectionSensitivity: aiSensitivityName(sensitivityCode) },\n"
+		"    reserved: [aiByte(body[4]), aiByte(body[5]), aiByte(body[6])],\n"
+		"    crc8: aiByte(body[7])\n"
+		"  };\n"
+		"}\n\n"
+		"function Encode_Config(config, command) {\n"
+		"  var cmd = aiByte(command);\n"
+		"  if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n"
+		"  if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n"
+		"  return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n"
+		"}\n\n"
+		"function Decode_config(input) {\n"
+		"  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n"
+		"  if (!bytes.length) throw new Error('Empty payload');\n"
+		"  var command = aiByte(bytes[0]);\n"
+		"  if (command === 0x01 || command === 0x03) return { port: AI_B100_RADAR_OTA_PORT, command: command, type: command === 0x01 ? 'get_config_request' : 'get_caps_request' };\n"
+		"  if (command === 0x02 || command === 0x81) {\n"
+		"    if (bytes.length !== 9) throw new Error('Config request/response must be 9 bytes');\n"
+		"    return { port: AI_B100_RADAR_OTA_PORT, command: command, type: command === 0x02 ? 'set_config_request' : 'get_config_response', config: aiParseConfigBody(bytes.slice(1)) };\n"
+		"  }\n"
+		"  if (command === 0x82) {\n"
+		"    if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n"
+		"    if (aiCrc8(bytes.slice(0, 4)) !== aiByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n"
+		"    return { port: AI_B100_RADAR_OTA_PORT, command: command, type: 'set_config_ack', version: aiByte(bytes[1]), ackFor: aiByte(bytes[2]), status: aiByte(bytes[3]), success: aiByte(bytes[3]) === 0 };\n"
+		"  }\n"
+		"  if (command === 0x83) {\n"
+		"    if (bytes.length !== 8) throw new Error('Capabilities response must be 8 bytes');\n"
+		"    var payload = bytes.slice(1);\n"
+		"    if (aiCrc8(payload.slice(0, 6)) !== aiByte(payload[6])) throw new Error('Capabilities CRC mismatch');\n"
+		"    return { port: AI_B100_RADAR_OTA_PORT, command: command, type: 'get_caps_response', protocolVersion: aiByte(payload[0]), fields: [{ id: aiReadU16BE(payload, 1), name: 'detectionSensitivity', values: ['low', 'medium', 'high'] }], detectionSensitivity: { minCode: aiByte(payload[3]), maxCode: aiByte(payload[4]), values: ['low', 'medium', 'high'] } };\n"
+		"  }\n"
+		"  throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n"
+		"}\n\n"
+		"var aiB100RadarOtaJsonToHex = Encode_Config;\n"
+		"var aiB100RadarOtaBufferToJson = Decode_config;\n",
+		dev_model, dev_serial, dev_date
+	);
+
+	if (js_len < 0) {
+		LOG_WARN("Radar OTA translator: snprintf failed\n");
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to generate Radar OTA translator");
+		return;
+	}
+	if ((size_t)js_len >= sizeof(js)) {
+		LOG_WARN("Radar OTA translator: output truncated (len=%d, cap=%zu)\n", js_len, sizeof(js));
+		ACAP_HTTP_Respond_Error(response, 500, "Radar OTA translator too large");
+		return;
+	}
+
+	const char* filename = "AI-B100-Radar-OTA.js";
+	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", (size_t)js_len);
 	ACAP_HTTP_Respond_String(response, "%s", js);
 }
 
@@ -2521,6 +4017,9 @@ int main(void) {
 	ACAP_HTTP_Node("radar_reset", HTTP_Endpoint_radar_reset);
     ACAP_HTTP_Node("publish", HTTP_Endpoint_publish);
     ACAP_HTTP_Node("translator", HTTP_Endpoint_translator);
+	ACAP_HTTP_Node("radar_ota_translator", HTTP_Endpoint_radar_ota_translator);
+	ACAP_HTTP_Node("occupancy_ota_translator", HTTP_Endpoint_occupancy_ota_translator);
+	ACAP_HTTP_Node("alert_ota_translator", HTTP_Endpoint_alert_ota_translator);
     ACAP_HTTP_Node("receive", HTTP_Endpoint_receive);
 	ACAP_HTTP_Node(B100_STATUS_CALLBACK_NODE, HTTP_Endpoint_B100_Status_Callback);
 	ACAP_HTTP_Node(B100_RECEIVE_CALLBACK_NODE, HTTP_Endpoint_B100_Receive_Callback);

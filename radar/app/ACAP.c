@@ -718,8 +718,19 @@ int ACAP_HTTP_Respond_Error(ACAP_HTTP_Response response, int code, const char* m
 int ACAP_HTTP_Respond_Text(ACAP_HTTP_Response response, const char* message) {
     if (!response || !message)
         return 0;
-    return ACAP_HTTP_Header_TEXT(response) &&
-           ACAP_HTTP_Respond_String(response, "%s", message);
+
+    size_t message_len = strlen(message);
+    int result = ACAP_HTTP_Respond_String(response,
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Content-Length: %zu\r\n\r\n"
+        "%s",
+        message_len, message);
+
+    if (response->fcgi && response->fcgi->out)
+        FCGX_FFlush(response->fcgi->out);
+
+    return result;
 }
 
 /*=====================================================

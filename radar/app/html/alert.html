@@ -15,6 +15,7 @@
 		#video-view { width: 100%; max-width: 960px; aspect-ratio: 16 / 9; background: #000; position: relative; overflow: hidden; }
 		#video { position: absolute; inset: 0; width: 100%; height: 100%; }
 		#settings-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 10; pointer-events: auto; }
+		.ota-code { font-family: 'Courier New', monospace; font-size: 0.85rem; }
 	</style>
 </head>
 <body>
@@ -35,7 +36,13 @@
 
 	<div class="page-content">
 		<div class="card mb-4">
-			<div class="card-header"><h5 class="card-title mb-0">Detection Alert</h5></div>
+			<div class="card-header d-flex justify-content-between align-items-center">
+				<h5 class="card-title mb-0">Detection Alert</h5>
+				<div class="d-flex gap-2">
+					<button id="open-ota-dialog" class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#otaTranslatorModal">Open Encoder/Decoder</button>
+					<button id="download-ota-translator" class="btn btn-sm btn-outline-primary">Download OTA Configuration translator</button>
+				</div>
+			</div>
 			<div class="card-body">
 				<div class="row g-3 align-items-end">
 					<div class="col-12 col-md-3">
@@ -77,6 +84,48 @@
 				</div>
 			</div>
 		</div>
+
+	</div>
+
+	<div class="modal fade" id="otaTranslatorModal" tabindex="-1" aria-labelledby="otaTranslatorModalLabel" aria-hidden="true">
+		<div class="modal-dialog modal-xl modal-dialog-scrollable">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="otaTranslatorModalLabel">Detection Alert OTA Encoder/Decoder</h5>
+					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+				</div>
+				<div class="modal-body">
+					<p class="text-muted mb-3">Installer/Integrator tool to build and parse Detection Alert OTA frames on port <strong>133</strong>.</p>
+					<div class="row g-3">
+						<div class="col-12 col-lg-6">
+							<label for="ota-json-input" class="form-label">JSON Input (for Set Config)</label>
+							<textarea id="ota-json-input" class="form-control ota-code" rows="14"></textarea>
+							<div class="mt-2 d-flex gap-2 flex-wrap">
+								<button id="ota-json-from-form" class="btn btn-outline-secondary btn-sm">Load JSON From Form</button>
+								<button id="ota-build-set" class="btn btn-primary btn-sm">Build Set Config (0x02)</button>
+								<button id="ota-build-get" class="btn btn-outline-primary btn-sm">Build Get Config (0x01)</button>
+								<button id="ota-build-caps" class="btn btn-outline-primary btn-sm">Build Get Caps (0x03)</button>
+							</div>
+						</div>
+						<div class="col-12 col-lg-6">
+							<label for="ota-hex-output" class="form-label">Generated Hex Payload</label>
+							<input id="ota-hex-output" class="form-control ota-code" type="text" readonly>
+							<div class="form-text">Transmit on port <strong>133</strong>.</div>
+							<label for="ota-hex-input" class="form-label mt-3">Decode Hex Payload</label>
+							<input id="ota-hex-input" class="form-control ota-code" type="text" placeholder="e.g. 810105000F003C0201F4...">
+							<div class="mt-2 d-flex gap-2 flex-wrap">
+								<button id="ota-decode" class="btn btn-success btn-sm">Decode</button>
+							</div>
+							<label for="ota-json-output" class="form-label mt-3">Decoded JSON</label>
+							<textarea id="ota-json-output" class="form-control ota-code" rows="10" readonly></textarea>
+						</div>
+					</div>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
 	</div>
 
 <script>
@@ -98,6 +147,19 @@ $(document).ready(function() {
 	$('#transitionSeconds').on('input', function() { $('#transitionValue').text($(this).val()); });
 	$('#aoiEnabled').on('change', function() { if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked')); });
 	$('#saveAlert').on('click', saveAlert);
+	$('#download-ota-translator').on('click', function() {
+		window.location.href = 'alert_ota_translator';
+	});
+	$('#open-ota-dialog').on('click', function() {
+		loadOtaJsonFromForm(false);
+		$('#ota-hex-input').val('');
+		$('#ota-json-output').val('');
+	});
+	$('#ota-json-from-form').on('click', loadOtaJsonFromForm);
+	$('#ota-build-set').on('click', buildOtaSetFromJson);
+	$('#ota-build-get').on('click', function() { setOtaHexOutput(alertOtaBytesToHex([0x01])); });
+	$('#ota-build-caps').on('click', function() { setOtaHexOutput(alertOtaBytesToHex([0x03])); });
+	$('#ota-decode').on('click', decodeOtaHexInput);
 	setInterval(pollLoraStatus, 10000);
 	pollLoraStatus();
 });
@@ -117,7 +179,7 @@ function playVideo(aspect) {
 }
 function initPolygonSelector() {
 	if (polygonSelector) return;
-	polygonSelector = new PolygonSelector('settings-canvas', { minPoints: 3, maxPoints: 8, enabled: $('#aoiEnabled').is(':checked'), onchange: function() {} });
+	polygonSelector = new PolygonSelector('settings-canvas', { minPoints: 3, maxPoints: 10, enabled: $('#aoiEnabled').is(':checked'), onchange: function() {} });
 }
 function loadSettings() {
 	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
@@ -137,6 +199,7 @@ function loadSettings() {
 				{ x: aoi.x2 ?? 1000, y: aoi.y2 ?? 1000 },
 				{ x: aoi.x1 ?? 0, y: aoi.y2 ?? 1000 }
 			]);
+			loadOtaJsonFromForm(false);
 		}
 	});
 }
@@ -170,6 +233,274 @@ function saveAlert() {
 		error: function(xhr, status, error) { showToast('Failed to save Detection Alert: ' + error, 'danger'); }
 	});
 }
+
+function readAlertFormConfig() {
+	let points = readPolygonPoints() || [];
+	points = points.slice(0, 10);
+	return {
+		protocolVersion: 1,
+		enabled: !!((currentSettings.transmission || {}).alert || {}).enabled,
+		label: $('input[name="alertLabel"]:checked').val() || 'human',
+		heartbeatMinutes: parseInt($('#heartbeatMinutes').val(), 10),
+		activeIntervalSeconds: parseInt($('#activeIntervalSeconds').val(), 10),
+		transitionSeconds: parseInt($('#transitionSeconds').val(), 10),
+		aoi: {
+			enabled: $('#aoiEnabled').is(':checked'),
+			points: points
+		}
+	};
+}
+
+function loadOtaJsonFromForm(notify) {
+	const config = readAlertFormConfig();
+	$('#ota-json-input').val(JSON.stringify(config, null, 2));
+	if (notify !== false) showToast('Translator JSON loaded from form', 'info');
+}
+
+function setOtaHexOutput(hex) {
+	$('#ota-hex-output').val(hex);
+}
+
+/*
+ * Detection Alert OTA Protocol (port 133)
+ *
+ * Requests:
+ * - 0x01: Get Config
+ * - 0x02: Set Config
+ * - 0x03: Get Capabilities
+ *
+ * Responses:
+ * - 0x81: Get Config response
+ * - 0x82: Set Config ACK/NACK
+ * - 0x83: Capabilities response
+ *
+ * Config payload body (48 bytes) for 0x81 response and 0x02 request body:
+ * byte[0]   : protocolVersion (uint8)
+ * byte[1]   : flags bit0=enabled bit1=labelVehicle bit2=aoiEnabled
+ * byte[2]   : heartbeatMinutes (uint8, 5..60)
+ * byte[3..4]: activeIntervalSeconds (uint16 BE, 60..300)
+ * byte[5]   : transitionSeconds (uint8, 2..20)
+ * byte[6]   : pointCount (uint8, 0 or 3..10)
+ * byte[7..46]: fixed 10 point slots, each point is x,y as uint16 BE (4 bytes/point)
+ * byte[47]  : crc8 over bytes[0..46]
+ */
+function alertOtaCrc8(bytes) {
+	let crc = 0x00;
+	for (let i = 0; i < bytes.length; i++) {
+		crc ^= (bytes[i] & 0xff);
+		for (let bit = 0; bit < 8; bit++) {
+			crc = (crc & 0x80) ? (((crc << 1) ^ 0x07) & 0xff) : ((crc << 1) & 0xff);
+		}
+	}
+	return crc & 0xff;
+}
+
+function alertOtaClamp(value, minValue, maxValue) {
+	const number = Number(value);
+	if (!Number.isFinite(number)) return minValue;
+	if (number < minValue) return minValue;
+	if (number > maxValue) return maxValue;
+	return Math.round(number);
+}
+
+function alertOtaWriteU16BE(out, value) {
+	const v = alertOtaClamp(value, 0, 65535);
+	out.push((v >> 8) & 0xff);
+	out.push(v & 0xff);
+}
+
+function alertOtaReadU16BE(bytes, index) {
+	return ((bytes[index] & 0xff) << 8) | (bytes[index + 1] & 0xff);
+}
+
+function alertOtaBytesToHex(bytes) {
+	return (bytes || []).map(function(b) { return ('0' + ((b || 0) & 0xff).toString(16)).slice(-2); }).join('').toUpperCase();
+}
+
+function alertOtaHexToBytes(hex) {
+	const clean = String(hex || '').replace(/\s+/g, '').toUpperCase();
+	if (clean.length === 0) return [];
+	if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('Hex input must be even-length hex characters');
+	const bytes = [];
+	for (let i = 0; i < clean.length; i += 2) {
+		bytes.push(parseInt(clean.substr(i, 2), 16));
+	}
+	return bytes;
+}
+
+function alertOtaBuildConfigBodyFromJson(config) {
+	const version = alertOtaClamp(config.protocolVersion || 1, 1, 255);
+	const enabled = !!config.enabled;
+	const labelVehicle = String(config.label || 'human').toLowerCase() === 'vehicle';
+	const aoiEnabled = !!(config.aoi && config.aoi.enabled);
+	const heartbeat = alertOtaClamp(config.heartbeatMinutes, 5, 60);
+	const activeInterval = alertOtaClamp(config.activeIntervalSeconds, 60, 300);
+	const transition = alertOtaClamp(config.transitionSeconds, 2, 20);
+	let points = ((config.aoi && config.aoi.points) || []).slice(0, 10);
+	points = points.map(function(point) {
+		return {
+			x: alertOtaClamp(point.x, 0, 1000),
+			y: alertOtaClamp(point.y, 0, 1000)
+		};
+	});
+	if (aoiEnabled && points.length < 3) {
+		throw new Error('AOI enabled requires 3 to 10 points');
+	}
+	const pointCount = aoiEnabled ? points.length : 0;
+
+	const body = [];
+	body.push(version);
+	body.push((enabled ? 1 : 0) | (labelVehicle ? 2 : 0) | (aoiEnabled ? 4 : 0));
+	body.push(heartbeat);
+	alertOtaWriteU16BE(body, activeInterval);
+	body.push(transition);
+	body.push(pointCount);
+
+	for (let i = 0; i < 10; i++) {
+		const point = i < points.length ? points[i] : { x: 0, y: 0 };
+		alertOtaWriteU16BE(body, point.x);
+		alertOtaWriteU16BE(body, point.y);
+	}
+	body.push(alertOtaCrc8(body));
+	if (body.length !== 48) throw new Error('Internal error: config body must be 48 bytes');
+	return body;
+}
+
+function alertOtaParseConfigBody(body) {
+	if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');
+	const expected = alertOtaCrc8(body.slice(0, 47));
+	if (expected !== body[47]) throw new Error('CRC mismatch for config body');
+
+	const flags = body[1] & 0xff;
+	const pointCount = body[6] & 0xff;
+	if (pointCount > 10) throw new Error('Invalid point count: ' + pointCount);
+	if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with point count below 3');
+
+	const points = [];
+	for (let i = 0; i < 10; i++) {
+		const base = 7 + (i * 4);
+		const x = alertOtaReadU16BE(body, base);
+		const y = alertOtaReadU16BE(body, base + 2);
+		if (i < pointCount) points.push({ x: x, y: y });
+	}
+
+	return {
+		protocolVersion: body[0] & 0xff,
+		enabled: (flags & 0x01) !== 0,
+		label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',
+		heartbeatMinutes: body[2] & 0xff,
+		activeIntervalSeconds: alertOtaReadU16BE(body, 3),
+		transitionSeconds: body[5] & 0xff,
+		aoi: {
+			enabled: (flags & 0x04) !== 0,
+			pointCount: pointCount,
+			points: points
+		},
+		crc8: body[47] & 0xff
+	};
+}
+
+function alertOtaJsonToHex(config, command) {
+	const cmd = alertOtaClamp(command, 0, 255);
+	if (cmd === 0x01 || cmd === 0x03) return alertOtaBytesToHex([cmd]);
+	if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode: 0x' + cmd.toString(16));
+	const body = alertOtaBuildConfigBodyFromJson(config);
+	return alertOtaBytesToHex([0x02].concat(body));
+}
+
+/*
+ * Decode one OTA frame from a byte buffer or hex string into JSON.
+ */
+function alertOtaBufferToJson(input) {
+	const bytes = Array.isArray(input) ? input.slice() : alertOtaHexToBytes(input);
+	if (!bytes.length) throw new Error('Empty payload');
+	const command = bytes[0] & 0xff;
+
+	if (command === 0x01) return { command: command, type: 'get_config_request' };
+	if (command === 0x03) return { command: command, type: 'get_caps_request' };
+
+	if (command === 0x02 || command === 0x81) {
+		if (bytes.length !== 49) throw new Error('Command 0x' + command.toString(16).toUpperCase() + ' must be 49 bytes');
+		return {
+			command: command,
+			type: command === 0x02 ? 'set_config_request' : 'get_config_response',
+			config: alertOtaParseConfigBody(bytes.slice(1))
+		};
+	}
+
+	if (command === 0x82) {
+		if (bytes.length !== 5) throw new Error('Set ACK/NACK (0x82) must be 5 bytes');
+		const expected = alertOtaCrc8(bytes.slice(0, 4));
+		if (expected !== (bytes[4] & 0xff)) throw new Error('CRC mismatch for 0x82 frame');
+		return {
+			command: command,
+			type: 'set_config_ack',
+			protocolVersion: bytes[1] & 0xff,
+			echoedCommand: bytes[2] & 0xff,
+			statusCode: bytes[3] & 0xff,
+			ok: (bytes[3] & 0xff) === 0
+		};
+	}
+
+	if (command === 0x83) {
+		if (bytes.length < 2) throw new Error('Caps response must include at least version');
+		const payload = bytes.slice(1);
+		const expected = alertOtaCrc8(payload.slice(0, payload.length - 1));
+		if (expected !== payload[payload.length - 1]) throw new Error('CRC mismatch for 0x83 frame');
+		const coordEncoding = payload[2] & 0xff;
+		const minHeartbeat = payload[3] & 0xff;
+		const maxHeartbeat = payload[4] & 0xff;
+		const minActive = alertOtaReadU16BE(payload, 5);
+		const maxActive = alertOtaReadU16BE(payload, 7);
+		const minTransition = payload[9] & 0xff;
+		const maxTransition = payload[10] & 0xff;
+		return {
+			command: command,
+			type: 'get_caps_response',
+			protocolVersion: payload[0] & 0xff,
+			maxPoints: payload[1] & 0xff,
+			coordEncoding: coordEncoding,
+			coordEncodingName: coordEncoding === 1 ? 'uint16_0_1000' : 'unknown',
+			minHeartbeatMinutes: minHeartbeat,
+			maxHeartbeatMinutes: maxHeartbeat,
+			minActiveIntervalSeconds: minActive,
+			maxActiveIntervalSeconds: maxActive,
+			minTransitionSeconds: minTransition,
+			maxTransitionSeconds: maxTransition,
+			constraints: {
+				heartbeatMinutes: [minHeartbeat, maxHeartbeat],
+				activeIntervalSeconds: [minActive, maxActive],
+				transitionSeconds: [minTransition, maxTransition],
+				maxPoints: payload[1] & 0xff
+			}
+		};
+	}
+
+	throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());
+}
+
+function buildOtaSetFromJson() {
+	try {
+		const parsed = JSON.parse($('#ota-json-input').val() || '{}');
+		const hex = alertOtaJsonToHex(parsed, 0x02);
+		setOtaHexOutput(hex);
+		showToast('Set Config payload built for port 133', 'success');
+	} catch (error) {
+		showToast('Failed to build Set Config payload: ' + error.message, 'danger');
+	}
+}
+
+function decodeOtaHexInput() {
+	try {
+		const decoded = alertOtaBufferToJson($('#ota-hex-input').val() || '');
+		$('#ota-json-output').val(JSON.stringify(decoded, null, 2));
+		showToast('Payload decoded', 'success');
+	} catch (error) {
+		$('#ota-json-output').val('');
+		showToast('Decode failed: ' + error.message, 'danger');
+	}
+}
+
 function pollLoraStatus() {
 	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
 		success: function(d) { const dot = $('#lora-nav-dot'); const lw = d && d.lorawan; dot.removeClass('lora-joined lora-connected lora-disconnected'); if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined'); else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined'); else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected'); }

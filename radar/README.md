@@ -111,7 +111,7 @@ Each use case has a fixed LoRaWAN port, so compact payloads do not include a mod
 | `1` | Counting | Reserved; hidden in the UI until developed |
 | `2` | Occupancy Interval Maximum | 1 byte: `[selected_label_interval_max]` |
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
-| `3` | Detection Alert active | 1 byte: `[selected_label_count]` |
+| `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
 
 The decoder is available in two places:
 
@@ -150,6 +150,21 @@ Port 110 commands use two bytes: `[command, value]`.
 | `0x02` | 122 | Bridge info: hardware, firmware, power source, temperature, restart count, DevAddr |
 | `0x03` | Local status | Signal quality: data rate, max payload, RSSI, SNR, frame counters up/down |
 
+### Port 130 - Radar OTA Configuration
+
+Radar OTA uses port 130 for both requests and responses. The first supported field is Radar Detection Sensitivity; the payload includes a 16-bit field mask so future Radar-tab settings can be added without changing the command structure.
+
+| Command | Direction | Payload |
+|---------|-----------|---------|
+| `0x01` | Downlink | Get current Radar configuration |
+| `0x81` | Uplink | Get configuration response: command byte plus 8-byte config body |
+| `0x02` | Downlink | Set Radar configuration: command byte plus 8-byte config body |
+| `0x82` | Uplink | Set ACK/NACK: `[0x82, version, echoedCommand, status, crc8]` |
+| `0x03` | Downlink | Get Radar OTA capabilities |
+| `0x83` | Uplink | Capabilities response for supported Radar fields |
+
+The 8-byte config body is `[version, fieldMaskHi, fieldMaskLo, detectionSensitivity, reserved, reserved, reserved, crc8]`. Field mask `0x0001` enables `detectionSensitivity`, where `1=low`, `2=medium`, and `3=high`.
+
 ## HTTP Endpoints
 
 The app uses the shared AI-B100 package path:
@@ -170,6 +185,7 @@ Important endpoints include:
 | `radar_reset` | POST | Reset retained radar occupancy state |
 | `publish?stream=counting|occupancy|alert` | POST | Publish a specific use case immediately |
 | `translator` | GET | Download JavaScript LoRaWAN payload decoder |
+| `radar_ota_translator` | GET | Download JavaScript Radar OTA encoder/decoder for port 130 |
 | `b100_status` | POST | AI-B100 status callback endpoint |
 | `b100_receive` | POST | AI-B100 downlink callback endpoint |
 | `b100_gps` | POST | AI-B100 GPS callback endpoint |

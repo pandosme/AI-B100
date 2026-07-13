@@ -1,0 +1,530 @@
+[
+    {
+        "id": "94d49944e4af4e2e",
+        "type": "tab",
+        "label": "B100 - Radar",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "218638cf17225f47",
+        "type": "group",
+        "z": "94d49944e4af4e2e",
+        "name": "Radar Config OTA Decoder",
+        "style": {
+            "stroke": "#000000",
+            "fill": "#ffffbf",
+            "label": true,
+            "color": "#000000"
+        },
+        "nodes": [
+            "633fd20598de06b3",
+            "2498bfda41a1f7c1",
+            "607fff0995a27690"
+        ],
+        "x": 254,
+        "y": 379,
+        "w": 472,
+        "h": 142
+    },
+    {
+        "id": "c5e79af6d40efaf9",
+        "type": "group",
+        "z": "94d49944e4af4e2e",
+        "name": "Radar Config OTA Encoder",
+        "style": {
+            "stroke": "#000000",
+            "fill": "#bfdbef",
+            "label": true,
+            "color": "#000000"
+        },
+        "nodes": [
+            "e871282d76cf6a8b",
+            "e0735aa78af5074f",
+            "19cadfa5cf2d1d3e",
+            "cf152011751b3b04"
+        ],
+        "x": 254,
+        "y": 599,
+        "w": 592,
+        "h": 122
+    },
+    {
+        "id": "1edb333414f623f9",
+        "type": "group",
+        "z": "94d49944e4af4e2e",
+        "name": "Normal operation \"Radar Decoder\"",
+        "style": {
+            "label": true,
+            "stroke": "#000000",
+            "fill": "#ffffbf",
+            "color": "#000000"
+        },
+        "nodes": [
+            "a97faaefb5b2ad7e"
+        ],
+        "x": 254,
+        "y": 199,
+        "w": 252,
+        "h": 82
+    },
+    {
+        "id": "2498bfda41a1f7c1",
+        "type": "junction",
+        "z": "94d49944e4af4e2e",
+        "g": "218638cf17225f47",
+        "x": 280,
+        "y": 420,
+        "wires": [
+            [
+                "633fd20598de06b3",
+                "607fff0995a27690"
+            ]
+        ]
+    },
+    {
+        "id": "633fd20598de06b3",
+        "type": "function",
+        "z": "94d49944e4af4e2e",
+        "g": "218638cf17225f47",
+        "name": "Port 133: Detection Alert Settings",
+        "func": "/**\n * AI-B100 Detection Alert OTA Translator\n * Device  : D2110-VE (serial ACCC8EF33E99)\n * Generated: 2026-07-12\n *\n * Port\n * - Detection Alert OTA uses dedicated port 133 for both requests and responses.\n *\n * Commands\n * - 0x01: GET_CONFIG request\n * - 0x81: GET_CONFIG response\n * - 0x02: SET_CONFIG request\n * - 0x82: SET_CONFIG ACK/NACK\n * - 0x03: GET_CAPS request\n * - 0x83: GET_CAPS response\n *\n * Config body format (48 bytes) for 0x81 and 0x02 body:\n * byte[0]   protocolVersion (uint8)\n * byte[1]   flags bit0=enabled bit1=labelVehicle bit2=aoiEnabled\n * byte[2]   heartbeatMinutes (uint8, 5..60)\n * byte[3:4] activeIntervalSeconds (uint16 BE, 60..300)\n * byte[5]   transitionSeconds (uint8, 2..20)\n * byte[6]   pointCount (uint8, 0 or 3..10)\n * byte[7:46] fixed point slots (10 points, each x,y uint16 BE)\n * byte[47]  crc8 over bytes[0..46]\n *\n * Public API\n * - aiB100AlertOtaJsonToHex(config, command) : JSON -> HEX payload\n * - aiB100AlertOtaBufferToJson(input)        : HEX/bytes -> JSON\n */\n\nvar AI_B100_ALERT_OTA_PORT = 133;\nvar AI_B100_ALERT_OTA_MAX_POINTS = 10;\n\nfunction aiByte(value) { return value & 0xFF; }\nfunction aiClamp(value, minValue, maxValue) {\n    var n = Number(value);\n    if (!Number.isFinite(n)) n = minValue;\n    if (n < minValue) n = minValue;\n    if (n > maxValue) n = maxValue;\n    return Math.round(n);\n}\n\nfunction aiHexToBytes(hex) {\n    var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n    if (!clean.length) return [];\n    if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n    var bytes = [];\n    for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n    return bytes;\n}\n\nfunction aiBytesToHex(bytes) {\n    return (bytes || []).map(function (value) { return ('0' + aiByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n}\n\nfunction aiWriteU16BE(out, value) {\n    var v = aiClamp(value, 0, 65535);\n    out.push((v >> 8) & 0xFF);\n    out.push(v & 0xFF);\n}\n\nfunction aiReadU16BE(bytes, index) {\n    return (aiByte(bytes[index]) << 8) | aiByte(bytes[index + 1]);\n}\n\nfunction aiCrc8(bytes) {\n    var crc = 0;\n    for (var i = 0; i < bytes.length; i++) {\n        crc ^= aiByte(bytes[i]);\n        for (var bit = 0; bit < 8; bit++) {\n            if (crc & 0x80) crc = ((crc << 1) ^ 0x07) & 0xFF;\n            else crc = (crc << 1) & 0xFF;\n        }\n    }\n    return crc & 0xFF;\n}\n\nfunction aiBuildConfigBody(config) {\n    var cfg = config || {};\n    var aoi = cfg.aoi || {};\n    var points = (aoi.points || []).slice(0, AI_B100_ALERT_OTA_MAX_POINTS).map(function (point) {\n        return { x: aiClamp(point.x, 0, 1000), y: aiClamp(point.y, 0, 1000) };\n    });\n    var aoiEnabled = !!aoi.enabled;\n    if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');\n\n    var body = [];\n    body.push(aiClamp(cfg.protocolVersion || 1, 1, 255));\n    body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));\n    body.push(aiClamp(cfg.heartbeatMinutes, 5, 60));\n    aiWriteU16BE(body, aiClamp(cfg.activeIntervalSeconds, 60, 300));\n    body.push(aiClamp(cfg.transitionSeconds, 2, 20));\n    body.push(aoiEnabled ? points.length : 0);\n\n    for (var i = 0; i < AI_B100_ALERT_OTA_MAX_POINTS; i++) {\n        var point = i < points.length ? points[i] : { x: 0, y: 0 };\n        aiWriteU16BE(body, point.x);\n        aiWriteU16BE(body, point.y);\n    }\n    body.push(aiCrc8(body));\n    if (body.length !== 48) throw new Error('Config body must be 48 bytes');\n    return body;\n}\n\nfunction aiParseConfigBody(body) {\n    if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');\n    if (aiCrc8(body.slice(0, 47)) !== aiByte(body[47])) throw new Error('Config CRC mismatch');\n\n    var flags = aiByte(body[1]);\n    var pointCount = aiByte(body[6]);\n    if (pointCount > AI_B100_ALERT_OTA_MAX_POINTS) throw new Error('Invalid pointCount');\n    if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');\n\n    var points = [];\n    for (var i = 0; i < AI_B100_ALERT_OTA_MAX_POINTS; i++) {\n        var base = 7 + (i * 4);\n        var x = aiReadU16BE(body, base);\n        var y = aiReadU16BE(body, base + 2);\n        if (i < pointCount) points.push({ x: x, y: y });\n    }\n\n    return {\n        protocolVersion: aiByte(body[0]),\n        enabled: (flags & 0x01) !== 0,\n        label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',\n        heartbeatMinutes: aiByte(body[2]),\n        activeIntervalSeconds: aiReadU16BE(body, 3),\n        transitionSeconds: aiByte(body[5]),\n        aoi: { enabled: (flags & 0x04) !== 0, pointCount: pointCount, points: points },\n        crc8: aiByte(body[47])\n    };\n}\n\nfunction aiB100AlertOtaJsonToHex(config, command) {\n    var cmd = aiByte(command);\n    if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n    if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n    return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n}\n\nfunction aiB100AlertOtaBufferToJson(input) {\n    var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n    if (!bytes.length) throw new Error('Empty payload');\n    var command = aiByte(bytes[0]);\n\n    if (command === 0x01) return { port: AI_B100_ALERT_OTA_PORT, command: command, type: 'get_config_request' };\n    if (command === 0x03) return { port: AI_B100_ALERT_OTA_PORT, command: command, type: 'get_caps_request' };\n\n    if (command === 0x02 || command === 0x81) {\n        if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');\n        return {\n            port: AI_B100_ALERT_OTA_PORT,\n            command: command,\n            type: command === 0x02 ? 'set_config_request' : 'get_config_response',\n            config: aiParseConfigBody(bytes.slice(1))\n        };\n    }\n\n    if (command === 0x82) {\n        if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n        if (aiCrc8(bytes.slice(0, 4)) !== aiByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n        return {\n            port: AI_B100_ALERT_OTA_PORT,\n            command: command,\n            type: 'set_config_ack',\n            protocolVersion: aiByte(bytes[1]),\n            echoedCommand: aiByte(bytes[2]),\n            statusCode: aiByte(bytes[3]),\n            ok: aiByte(bytes[3]) === 0\n        };\n    }\n\n    if (command === 0x83) {\n        if (bytes.length < 13) throw new Error('Capabilities response must be 13 bytes');\n        var payload = bytes.slice(1);\n        if (aiCrc8(payload.slice(0, 11)) !== aiByte(payload[11])) throw new Error('Capabilities CRC mismatch');\n        return {\n            port: AI_B100_ALERT_OTA_PORT,\n            command: command,\n            type: 'get_caps_response',\n            protocolVersion: aiByte(payload[0]),\n            maxPoints: aiByte(payload[1]),\n            coordinateEncoding: aiByte(payload[2]),\n            minHeartbeatMinutes: aiByte(payload[3]),\n            maxHeartbeatMinutes: aiByte(payload[4]),\n            minActiveIntervalSeconds: aiReadU16BE(payload, 5),\n            maxActiveIntervalSeconds: aiReadU16BE(payload, 7),\n            minTransitionSeconds: aiByte(payload[9]),\n            maxTransitionSeconds: aiByte(payload[10])\n        };\n    }\n\n    throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n}\n\nvar port = parseInt(msg.topic);\nconst buffer = Buffer.from(msg.payload, 'hex');\nif (port === AI_B100_ALERT_OTA_PORT) {\n    msg.payload = aiB100AlertOtaBufferToJson(msg.payload);\n    return msg;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 480,
+        "wires": [
+            [
+                "4ead0a9c29b4bb2d"
+            ]
+        ]
+    },
+    {
+        "id": "4ead0a9c29b4bb2d",
+        "type": "debug",
+        "z": "94d49944e4af4e2e",
+        "name": "debug 20",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 860,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "e871282d76cf6a8b",
+        "type": "function",
+        "z": "94d49944e4af4e2e",
+        "g": "c5e79af6d40efaf9",
+        "name": "Radar Occupancy Config Encode ",
+        "func": "/**\n * AI-B100 Occupancy OTA Translator\n * Generated: 2026-07-13\n *\n * Port\n * - Occupancy OTA uses dedicated port 132 for both requests and responses.\n *\n * Public API\n * - Encode_Config(config, command) : JSON -> HEX payload\n * - Decode_config(input)           : HEX/bytes -> JSON\n */\n\nvar AI_B100_OCCUPANCY_OTA_PORT = 132;\n\nvar AI_B100_OCCUPANCY_OTA_MAX_POINTS = 10;\n\nfunction occupancyOtaByte(value) { return value & 0xff; }\n\nfunction occupancyClamp(value, minValue, maxValue) {\n    const n = Number(value);\n    if (!Number.isFinite(n)) return minValue;\n    if (n < minValue) return minValue;\n    if (n > maxValue) return maxValue;\n    return Math.round(n);\n}\n\nfunction occupancyOtaBytesToHex(bytes) {\n    return (bytes || []).map(function (value) { return ('0' + occupancyOtaByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n}\n\nfunction occupancyOtaHexToBytes(hex) {\n    const clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n    if (!clean.length) return [];\n    if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n    const bytes = [];\n    for (let i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n    return bytes;\n}\n\nfunction occupancyOtaWriteU16BE(out, value) {\n    const v = occupancyClamp(value, 0, 65535);\n    out.push((v >> 8) & 0xff);\n    out.push(v & 0xff);\n}\n\nfunction occupancyOtaReadU16BE(bytes, index) {\n    return (occupancyOtaByte(bytes[index]) << 8) | occupancyOtaByte(bytes[index + 1]);\n}\n\nfunction occupancyOtaCrc8(bytes) {\n    let crc = 0;\n    for (let i = 0; i < bytes.length; i++) {\n        crc ^= occupancyOtaByte(bytes[i]);\n        for (let bit = 0; bit < 8; bit++) {\n            if (crc & 0x80) crc = ((crc << 1) ^ 0x07) & 0xff;\n            else crc = (crc << 1) & 0xff;\n        }\n    }\n    return crc & 0xff;\n}\n\nfunction occupancyTypeToCode(value) {\n    if (typeof value !== 'string') throw new Error('config.type must be \"Interval Maximum\" or \"Area Balance\"');\n    const t = value.trim().toLowerCase();\n    if (t === 'area balance') return 2;\n    if (t === 'interval maximum') return 1;\n    throw new Error('config.type must be \"Interval Maximum\" or \"Area Balance\"');\n}\n\nfunction occupancyCodeToTypeName(code) {\n    if (code === 2) return 'Area Balance';\n    if (code === 1) return 'Interval Maximum';\n    return 'Unknown';\n}\n\nfunction occupancyBuildConfigBody(config) {\n    const cfg = config || {};\n    const aoi = cfg.aoi || {};\n    const points = (aoi.points || []).slice(0, 10).map(function (point) {\n        return { x: occupancyClamp(point.x, 0, 1000), y: occupancyClamp(point.y, 0, 1000) };\n    });\n    const aoiEnabled = !!aoi.enabled;\n    if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');\n\n    const body = [];\n    body.push(occupancyClamp(cfg.protocolVersion || 1, 1, 255));\n    body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));\n    body.push(occupancyClamp(cfg.intervalMin || cfg.intervalMinutes, 1, 60));\n    body.push(aoiEnabled ? points.length : 0);\n\n    for (let i = 0; i < 10; i++) {\n        const point = i < points.length ? points[i] : { x: 0, y: 0 };\n        occupancyOtaWriteU16BE(body, point.x);\n        occupancyOtaWriteU16BE(body, point.y);\n    }\n    body.push(occupancyTypeToCode(cfg.type));\n    body.push(0);\n    body.push(0);\n    body.push(occupancyOtaCrc8(body));\n\n    if (body.length !== 48) throw new Error('Config body must be 48 bytes');\n    return body;\n}\n\nfunction occupancyParseConfigBody(body) {\n    if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');\n    if (occupancyOtaCrc8(body.slice(0, 47)) !== occupancyOtaByte(body[47])) throw new Error('Config CRC mismatch');\n\n    const flags = occupancyOtaByte(body[1]);\n    const pointCount = occupancyOtaByte(body[3]);\n    if (pointCount > 10) throw new Error('Invalid pointCount');\n    if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');\n\n    const points = [];\n    for (let i = 0; i < 10; i++) {\n        const base = 4 + (i * 4);\n        const x = occupancyOtaReadU16BE(body, base);\n        const y = occupancyOtaReadU16BE(body, base + 2);\n        if (i < pointCount) points.push({ x, y });\n    }\n\n    return {\n        protocolVersion: occupancyOtaByte(body[0]),\n        enabled: (flags & 0x01) !== 0,\n        label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',\n        intervalMinutes: occupancyOtaByte(body[2]),\n        intervalMin: occupancyOtaByte(body[2]),\n        type: occupancyCodeToTypeName(occupancyOtaByte(body[44])),\n        aoi: { enabled: (flags & 0x04) !== 0, pointCount, points },\n        crc8: occupancyOtaByte(body[47])\n    };\n}\n\nfunction Encode_Config(config, command) {\n    const cmd = occupancyOtaByte(command);\n    if (cmd === 0x01 || cmd === 0x03) return occupancyOtaBytesToHex([cmd]);\n    if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n    return occupancyOtaBytesToHex([0x02].concat(occupancyBuildConfigBody(config || {})));\n}\n\nfunction Decode_config(input) {\n    const bytes = Array.isArray(input) ? input.slice() : occupancyOtaHexToBytes(input);\n    if (!bytes.length) throw new Error('Empty payload');\n\n    const cmd = occupancyOtaByte(bytes[0]);\n    const names = {\n        0x01: 'GET_CONFIG',\n        0x02: 'SET_CONFIG',\n        0x03: 'GET_CAPS',\n        0x81: 'GET_CONFIG_RESP',\n        0x82: 'SET_CONFIG_ACK',\n        0x83: 'GET_CAPS_RESP'\n    };\n\n    if (cmd === 0x01 || cmd === 0x03) return {\n        port: 132,\n        command: cmd,\n        type: cmd === 0x01 ? 'get_config_request' : 'get_caps_request'\n    };\n\n    if (cmd === 0x02 || cmd === 0x81) {\n        if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');\n        return {\n            port: 132,\n            command: cmd,\n            type: cmd === 0x02 ? 'set_config_request' : 'get_config_response',\n            config: occupancyParseConfigBody(bytes.slice(1))\n        };\n    }\n\n    if (cmd === 0x82) {\n        if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n        if (occupancyOtaCrc8(bytes.slice(0, 4)) !== occupancyOtaByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n        return {\n            port: 132,\n            command: cmd,\n            type: 'set_config_ack',\n            version: occupancyOtaByte(bytes[1]),\n            ackFor: occupancyOtaByte(bytes[2]),\n            status: occupancyOtaByte(bytes[3]),\n            success: occupancyOtaByte(bytes[3]) === 0\n        };\n    }\n\n    if (cmd === 0x83) {\n        if (bytes.length !== 13) throw new Error('Capabilities response must be 13 bytes');\n        const payload = bytes.slice(1);\n        if (occupancyOtaCrc8(payload.slice(0, 11)) !== occupancyOtaByte(payload[11])) throw new Error('Capabilities CRC mismatch');\n        return {\n            port: 132,\n            command: cmd,\n            type: 'get_caps_response',\n            version: occupancyOtaByte(payload[0]),\n            maxPolygonPoints: occupancyOtaByte(payload[1]),\n            coordEncoding: occupancyOtaByte(payload[2]),\n            coordEncodingName: occupancyOtaByte(payload[2]) === 1 ? 'uint16_0_1000' : 'unknown',\n            minIntervalMin: occupancyOtaByte(payload[3]),\n            maxIntervalMin: occupancyOtaByte(payload[4]),\n            minAreaPoints: occupancyOtaReadU16BE(payload, 5),\n            maxAreaPoints: occupancyOtaReadU16BE(payload, 7),\n            minType: occupancyOtaByte(payload[9]),\n            maxType: occupancyOtaByte(payload[10]),\n            minTypeName: occupancyCodeToTypeName(occupancyOtaByte(payload[9])),\n            maxTypeName: occupancyCodeToTypeName(occupancyOtaByte(payload[10])),\n            constraints: {\n                intervalMin: [occupancyOtaByte(payload[3]), occupancyOtaByte(payload[4])],\n                areaPoints: [occupancyOtaReadU16BE(payload, 5), occupancyOtaReadU16BE(payload, 7)],\n                occupancyType: [occupancyOtaByte(payload[9]), occupancyOtaByte(payload[10])],\n                occupancyTypeName: [occupancyCodeToTypeName(occupancyOtaByte(payload[9])), occupancyCodeToTypeName(occupancyOtaByte(payload[10]))],\n                maxPolygonPoints: occupancyOtaByte(payload[1])\n            }\n        };\n    }\n\n    throw new Error('Unsupported command byte: 0x' + cmd.toString(16).toUpperCase());\n}\n\nmsg.payload = Encode_Config(msg.payload,0x02);\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 680,
+        "y": 640,
+        "wires": [
+            [
+                "5ea8e2d404144505"
+            ]
+        ]
+    },
+    {
+        "id": "87df1759a1e390dc",
+        "type": "inject",
+        "z": "94d49944e4af4e2e",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 160,
+        "y": 640,
+        "wires": [
+            [
+                "cf152011751b3b04"
+            ]
+        ]
+    },
+    {
+        "id": "5ea8e2d404144505",
+        "type": "debug",
+        "z": "94d49944e4af4e2e",
+        "name": "debug 36",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 940,
+        "y": 640,
+        "wires": []
+    },
+    {
+        "id": "607fff0995a27690",
+        "type": "function",
+        "z": "94d49944e4af4e2e",
+        "g": "218638cf17225f47",
+        "name": "Port 132: Occupancy Settings",
+        "func": "/**\n * AI-B100 Occupancy OTA Translator\n * Generated: 2026-07-13\n *\n * Port\n * - Occupancy OTA uses dedicated port 132 for both requests and responses.\n *\n * Public API\n * - Encode_Config(config, command) : JSON -> HEX payload\n * - Decode_config(input)           : HEX/bytes -> JSON\n */\n\nvar AI_B100_OCCUPANCY_OTA_PORT = 132;\n\nvar AI_B100_OCCUPANCY_OTA_MAX_POINTS = 10;\n\nfunction occupancyOtaByte(value) { return value & 0xff; }\n\nfunction occupancyClamp(value, minValue, maxValue) {\n    const n = Number(value);\n    if (!Number.isFinite(n)) return minValue;\n    if (n < minValue) return minValue;\n    if (n > maxValue) return maxValue;\n    return Math.round(n);\n}\n\nfunction occupancyOtaBytesToHex(bytes) {\n    return (bytes || []).map(function (value) { return ('0' + occupancyOtaByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n}\n\nfunction occupancyOtaHexToBytes(hex) {\n    const clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n    if (!clean.length) return [];\n    if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n    const bytes = [];\n    for (let i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n    return bytes;\n}\n\nfunction occupancyOtaWriteU16BE(out, value) {\n    const v = occupancyClamp(value, 0, 65535);\n    out.push((v >> 8) & 0xff);\n    out.push(v & 0xff);\n}\n\nfunction occupancyOtaReadU16BE(bytes, index) {\n    return (occupancyOtaByte(bytes[index]) << 8) | occupancyOtaByte(bytes[index + 1]);\n}\n\nfunction occupancyOtaCrc8(bytes) {\n    let crc = 0;\n    for (let i = 0; i < bytes.length; i++) {\n        crc ^= occupancyOtaByte(bytes[i]);\n        for (let bit = 0; bit < 8; bit++) {\n            if (crc & 0x80) crc = ((crc << 1) ^ 0x07) & 0xff;\n            else crc = (crc << 1) & 0xff;\n        }\n    }\n    return crc & 0xff;\n}\n\nfunction occupancyTypeToCode(value) {\n    if (typeof value !== 'string') throw new Error('config.type must be \"Interval Maximum\" or \"Area Balance\"');\n    const t = value.trim().toLowerCase();\n    if (t === 'area balance') return 2;\n    if (t === 'interval maximum') return 1;\n    throw new Error('config.type must be \"Interval Maximum\" or \"Area Balance\"');\n}\n\nfunction occupancyCodeToTypeName(code) {\n    if (code === 2) return 'Area Balance';\n    if (code === 1) return 'Interval Maximum';\n    return 'Unknown';\n}\n\nfunction occupancyBuildConfigBody(config) {\n    const cfg = config || {};\n    const aoi = cfg.aoi || {};\n    const points = (aoi.points || []).slice(0, 10).map(function (point) {\n        return { x: occupancyClamp(point.x, 0, 1000), y: occupancyClamp(point.y, 0, 1000) };\n    });\n    const aoiEnabled = !!aoi.enabled;\n    if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');\n\n    const body = [];\n    body.push(occupancyClamp(cfg.protocolVersion || 1, 1, 255));\n    body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));\n    body.push(occupancyClamp(cfg.intervalMin || cfg.intervalMinutes, 1, 60));\n    body.push(aoiEnabled ? points.length : 0);\n\n    for (let i = 0; i < 10; i++) {\n        const point = i < points.length ? points[i] : { x: 0, y: 0 };\n        occupancyOtaWriteU16BE(body, point.x);\n        occupancyOtaWriteU16BE(body, point.y);\n    }\n    body.push(occupancyTypeToCode(cfg.type));\n    body.push(0);\n    body.push(0);\n    body.push(occupancyOtaCrc8(body));\n\n    if (body.length !== 48) throw new Error('Config body must be 48 bytes');\n    return body;\n}\n\nfunction occupancyParseConfigBody(body) {\n    if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');\n    if (occupancyOtaCrc8(body.slice(0, 47)) !== occupancyOtaByte(body[47])) throw new Error('Config CRC mismatch');\n\n    const flags = occupancyOtaByte(body[1]);\n    const pointCount = occupancyOtaByte(body[3]);\n    if (pointCount > 10) throw new Error('Invalid pointCount');\n    if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');\n\n    const points = [];\n    for (let i = 0; i < 10; i++) {\n        const base = 4 + (i * 4);\n        const x = occupancyOtaReadU16BE(body, base);\n        const y = occupancyOtaReadU16BE(body, base + 2);\n        if (i < pointCount) points.push({ x, y });\n    }\n\n    return {\n        protocolVersion: occupancyOtaByte(body[0]),\n        enabled: (flags & 0x01) !== 0,\n        label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',\n        intervalMinutes: occupancyOtaByte(body[2]),\n        intervalMin: occupancyOtaByte(body[2]),\n        type: occupancyCodeToTypeName(occupancyOtaByte(body[44])),\n        aoi: { enabled: (flags & 0x04) !== 0, pointCount, points },\n        crc8: occupancyOtaByte(body[47])\n    };\n}\n\nfunction Encode_Config(config, command) {\n    const cmd = occupancyOtaByte(command);\n    if (cmd === 0x01 || cmd === 0x03) return occupancyOtaBytesToHex([cmd]);\n    if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n    return occupancyOtaBytesToHex([0x02].concat(occupancyBuildConfigBody(config || {})));\n}\n\nfunction Decode_config(input) {\n    const bytes = Array.isArray(input) ? input.slice() : occupancyOtaHexToBytes(input);\n    if (!bytes.length) throw new Error('Empty payload');\n\n    const cmd = occupancyOtaByte(bytes[0]);\n    const names = {\n        0x01: 'GET_CONFIG',\n        0x02: 'SET_CONFIG',\n        0x03: 'GET_CAPS',\n        0x81: 'GET_CONFIG_RESP',\n        0x82: 'SET_CONFIG_ACK',\n        0x83: 'GET_CAPS_RESP'\n    };\n\n    if (cmd === 0x01 || cmd === 0x03) return {\n        port: 132,\n        command: cmd,\n        type: cmd === 0x01 ? 'get_config_request' : 'get_caps_request'\n    };\n\n    if (cmd === 0x02 || cmd === 0x81) {\n        if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');\n        return {\n            port: 132,\n            command: cmd,\n            type: cmd === 0x02 ? 'set_config_request' : 'get_config_response',\n            config: occupancyParseConfigBody(bytes.slice(1))\n        };\n    }\n\n    if (cmd === 0x82) {\n        if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n        if (occupancyOtaCrc8(bytes.slice(0, 4)) !== occupancyOtaByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n        return {\n            port: 132,\n            command: cmd,\n            type: 'set_config_ack',\n            version: occupancyOtaByte(bytes[1]),\n            ackFor: occupancyOtaByte(bytes[2]),\n            status: occupancyOtaByte(bytes[3]),\n            success: occupancyOtaByte(bytes[3]) === 0\n        };\n    }\n\n    if (cmd === 0x83) {\n        if (bytes.length !== 13) throw new Error('Capabilities response must be 13 bytes');\n        const payload = bytes.slice(1);\n        if (occupancyOtaCrc8(payload.slice(0, 11)) !== occupancyOtaByte(payload[11])) throw new Error('Capabilities CRC mismatch');\n        return {\n            port: 132,\n            command: cmd,\n            type: 'get_caps_response',\n            version: occupancyOtaByte(payload[0]),\n            maxPolygonPoints: occupancyOtaByte(payload[1]),\n            coordEncoding: occupancyOtaByte(payload[2]),\n            coordEncodingName: occupancyOtaByte(payload[2]) === 1 ? 'uint16_0_1000' : 'unknown',\n            minIntervalMin: occupancyOtaByte(payload[3]),\n            maxIntervalMin: occupancyOtaByte(payload[4]),\n            minAreaPoints: occupancyOtaReadU16BE(payload, 5),\n            maxAreaPoints: occupancyOtaReadU16BE(payload, 7),\n            minType: occupancyOtaByte(payload[9]),\n            maxType: occupancyOtaByte(payload[10]),\n            minTypeName: occupancyCodeToTypeName(occupancyOtaByte(payload[9])),\n            maxTypeName: occupancyCodeToTypeName(occupancyOtaByte(payload[10])),\n            constraints: {\n                intervalMin: [occupancyOtaByte(payload[3]), occupancyOtaByte(payload[4])],\n                areaPoints: [occupancyOtaReadU16BE(payload, 5), occupancyOtaReadU16BE(payload, 7)],\n                occupancyType: [occupancyOtaByte(payload[9]), occupancyOtaByte(payload[10])],\n                occupancyTypeName: [occupancyCodeToTypeName(occupancyOtaByte(payload[9])), occupancyCodeToTypeName(occupancyOtaByte(payload[10]))],\n                maxPolygonPoints: occupancyOtaByte(payload[1])\n            }\n        };\n    }\n\n    throw new Error('Unsupported command byte: 0x' + cmd.toString(16).toUpperCase());\n}\n\nvar port = parseInt(msg.topic);\nconst buffer = Buffer.from(msg.payload, 'hex');\nif (port === 132) {\n    msg.payload = Decode_config(msg.payload)\n    return msg;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 550,
+        "y": 420,
+        "wires": [
+            [
+                "d64abe5f0d745487"
+            ]
+        ]
+    },
+    {
+        "id": "d64abe5f0d745487",
+        "type": "debug",
+        "z": "94d49944e4af4e2e",
+        "name": "debug 39",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 860,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "e0735aa78af5074f",
+        "type": "function",
+        "z": "94d49944e4af4e2e",
+        "g": "c5e79af6d40efaf9",
+        "name": "Radar Alert Config Encode ",
+        "func": "/**\n * AI-B100 Detection Alert OTA Translator\n * Device  : D2110-VE (serial ACCC8EF33E99)\n * Generated: 2026-07-12\n *\n * Port\n * - Detection Alert OTA uses dedicated port 133 for both requests and responses.\n *\n * Commands\n * - 0x01: GET_CONFIG request\n * - 0x81: GET_CONFIG response\n * - 0x02: SET_CONFIG request\n * - 0x82: SET_CONFIG ACK/NACK\n * - 0x03: GET_CAPS request\n * - 0x83: GET_CAPS response\n *\n * Config body format (48 bytes) for 0x81 and 0x02 body:\n * byte[0]   protocolVersion (uint8)\n * byte[1]   flags bit0=enabled bit1=labelVehicle bit2=aoiEnabled\n * byte[2]   heartbeatMinutes (uint8, 5..60)\n * byte[3:4] activeIntervalSeconds (uint16 BE, 60..300)\n * byte[5]   transitionSeconds (uint8, 2..20)\n * byte[6]   pointCount (uint8, 0 or 3..10)\n * byte[7:46] fixed point slots (10 points, each x,y uint16 BE)\n * byte[47]  crc8 over bytes[0..46]\n *\n * Public API\n * - aiB100AlertOtaJsonToHex(config, command) : JSON -> HEX payload\n * - aiB100AlertOtaBufferToJson(input)        : HEX/bytes -> JSON\n */\n\nvar AI_B100_ALERT_OTA_PORT = 133;\nvar AI_B100_ALERT_OTA_MAX_POINTS = 10;\n\nfunction aiByte(value) { return value & 0xFF; }\nfunction aiClamp(value, minValue, maxValue) {\n    var n = Number(value);\n    if (!Number.isFinite(n)) n = minValue;\n    if (n < minValue) n = minValue;\n    if (n > maxValue) n = maxValue;\n    return Math.round(n);\n}\n\nfunction aiHexToBytes(hex) {\n    var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n    if (!clean.length) return [];\n    if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');\n    var bytes = [];\n    for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n    return bytes;\n}\n\nfunction aiBytesToHex(bytes) {\n    return (bytes || []).map(function (value) { return ('0' + aiByte(value).toString(16)).slice(-2); }).join('').toUpperCase();\n}\n\nfunction aiWriteU16BE(out, value) {\n    var v = aiClamp(value, 0, 65535);\n    out.push((v >> 8) & 0xFF);\n    out.push(v & 0xFF);\n}\n\nfunction aiReadU16BE(bytes, index) {\n    return (aiByte(bytes[index]) << 8) | aiByte(bytes[index + 1]);\n}\n\nfunction aiCrc8(bytes) {\n    var crc = 0;\n    for (var i = 0; i < bytes.length; i++) {\n        crc ^= aiByte(bytes[i]);\n        for (var bit = 0; bit < 8; bit++) {\n            if (crc & 0x80) crc = ((crc << 1) ^ 0x07) & 0xFF;\n            else crc = (crc << 1) & 0xFF;\n        }\n    }\n    return crc & 0xFF;\n}\n\nfunction aiBuildConfigBody(config) {\n    var cfg = config || {};\n    var aoi = cfg.aoi || {};\n    var points = (aoi.points || []).slice(0, AI_B100_ALERT_OTA_MAX_POINTS).map(function (point) {\n        return { x: aiClamp(point.x, 0, 1000), y: aiClamp(point.y, 0, 1000) };\n    });\n    var aoiEnabled = !!aoi.enabled;\n    if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');\n\n    var body = [];\n    body.push(aiClamp(cfg.protocolVersion || 1, 1, 255));\n    body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));\n    body.push(aiClamp(cfg.heartbeatMinutes, 5, 60));\n    aiWriteU16BE(body, aiClamp(cfg.activeIntervalSeconds, 60, 300));\n    body.push(aiClamp(cfg.transitionSeconds, 2, 20));\n    body.push(aoiEnabled ? points.length : 0);\n\n    for (var i = 0; i < AI_B100_ALERT_OTA_MAX_POINTS; i++) {\n        var point = i < points.length ? points[i] : { x: 0, y: 0 };\n        aiWriteU16BE(body, point.x);\n        aiWriteU16BE(body, point.y);\n    }\n    body.push(aiCrc8(body));\n    if (body.length !== 48) throw new Error('Config body must be 48 bytes');\n    return body;\n}\n\nfunction aiParseConfigBody(body) {\n    if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');\n    if (aiCrc8(body.slice(0, 47)) !== aiByte(body[47])) throw new Error('Config CRC mismatch');\n\n    var flags = aiByte(body[1]);\n    var pointCount = aiByte(body[6]);\n    if (pointCount > AI_B100_ALERT_OTA_MAX_POINTS) throw new Error('Invalid pointCount');\n    if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');\n\n    var points = [];\n    for (var i = 0; i < AI_B100_ALERT_OTA_MAX_POINTS; i++) {\n        var base = 7 + (i * 4);\n        var x = aiReadU16BE(body, base);\n        var y = aiReadU16BE(body, base + 2);\n        if (i < pointCount) points.push({ x: x, y: y });\n    }\n\n    return {\n        protocolVersion: aiByte(body[0]),\n        enabled: (flags & 0x01) !== 0,\n        label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',\n        heartbeatMinutes: aiByte(body[2]),\n        activeIntervalSeconds: aiReadU16BE(body, 3),\n        transitionSeconds: aiByte(body[5]),\n        aoi: { enabled: (flags & 0x04) !== 0, pointCount: pointCount, points: points },\n        crc8: aiByte(body[47])\n    };\n}\n\nfunction aiB100AlertOtaJsonToHex(config, command) {\n    var cmd = aiByte(command);\n    if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n    if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n    return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n}\n\nfunction aiB100AlertOtaBufferToJson(input) {\n    var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n    if (!bytes.length) throw new Error('Empty payload');\n    var command = aiByte(bytes[0]);\n\n    if (command === 0x01) return { port: AI_B100_ALERT_OTA_PORT, command: command, type: 'get_config_request' };\n    if (command === 0x03) return { port: AI_B100_ALERT_OTA_PORT, command: command, type: 'get_caps_request' };\n\n    if (command === 0x02 || command === 0x81) {\n        if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');\n        return {\n            port: AI_B100_ALERT_OTA_PORT,\n            command: command,\n            type: command === 0x02 ? 'set_config_request' : 'get_config_response',\n            config: aiParseConfigBody(bytes.slice(1))\n        };\n    }\n\n    if (command === 0x82) {\n        if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');\n        if (aiCrc8(bytes.slice(0, 4)) !== aiByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');\n        return {\n            port: AI_B100_ALERT_OTA_PORT,\n            command: command,\n            type: 'set_config_ack',\n            protocolVersion: aiByte(bytes[1]),\n            echoedCommand: aiByte(bytes[2]),\n            statusCode: aiByte(bytes[3]),\n            ok: aiByte(bytes[3]) === 0\n        };\n    }\n\n    if (command === 0x83) {\n        if (bytes.length < 13) throw new Error('Capabilities response must be 13 bytes');\n        var payload = bytes.slice(1);\n        if (aiCrc8(payload.slice(0, 11)) !== aiByte(payload[11])) throw new Error('Capabilities CRC mismatch');\n        return {\n            port: AI_B100_ALERT_OTA_PORT,\n            command: command,\n            type: 'get_caps_response',\n            protocolVersion: aiByte(payload[0]),\n            maxPoints: aiByte(payload[1]),\n            coordinateEncoding: aiByte(payload[2]),\n            minHeartbeatMinutes: aiByte(payload[3]),\n            maxHeartbeatMinutes: aiByte(payload[4]),\n            minActiveIntervalSeconds: aiReadU16BE(payload, 5),\n            maxActiveIntervalSeconds: aiReadU16BE(payload, 7),\n            minTransitionSeconds: aiByte(payload[9]),\n            maxTransitionSeconds: aiByte(payload[10])\n        };\n    }\n\n    throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n}\n\n\n\nmsg.payload = aiB100AlertOtaJsonToHex(msg.payload, 0x02)\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 660,
+        "y": 680,
+        "wires": [
+            [
+                "7a021692f8e04b5d"
+            ]
+        ]
+    },
+    {
+        "id": "af3afe65a0706584",
+        "type": "inject",
+        "z": "94d49944e4af4e2e",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 160,
+        "y": 680,
+        "wires": [
+            [
+                "19cadfa5cf2d1d3e"
+            ]
+        ]
+    },
+    {
+        "id": "7a021692f8e04b5d",
+        "type": "debug",
+        "z": "94d49944e4af4e2e",
+        "name": "debug 40",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 940,
+        "y": 680,
+        "wires": []
+    },
+    {
+        "id": "19cadfa5cf2d1d3e",
+        "type": "template",
+        "z": "94d49944e4af4e2e",
+        "g": "c5e79af6d40efaf9",
+        "name": "Alert Configuration",
+        "field": "payload",
+        "fieldType": "msg",
+        "format": "handlebars",
+        "syntax": "mustache",
+        "template": "{\n    \"protocolVersion\": 1,\n    \"enabled\": true,\n    \"label\": \"human\",\n    \"heartbeatMinutes\": 53,\n    \"activeIntervalSeconds\": 92,\n    \"transitionSeconds\": 5,\n    \"aoi\": {\n        \"enabled\": true,\n        \"points\": [\n            {\n                \"x\": 98,\n                \"y\": 622\n            },\n            {\n                \"x\": 197,\n                \"y\": 455\n            },\n            {\n                \"x\": 370,\n                \"y\": 761\n            },\n            {\n                \"x\": 281,\n                \"y\": 877\n            }\n        ]\n    }\n}",
+        "output": "json",
+        "x": 370,
+        "y": 680,
+        "wires": [
+            [
+                "e0735aa78af5074f"
+            ]
+        ]
+    },
+    {
+        "id": "cf152011751b3b04",
+        "type": "template",
+        "z": "94d49944e4af4e2e",
+        "g": "c5e79af6d40efaf9",
+        "name": "Occupancy Configuration",
+        "field": "payload",
+        "fieldType": "msg",
+        "format": "handlebars",
+        "syntax": "mustache",
+        "template": "{\n    \"enabled\": true,\n    \"protocolVersion\": 1,\n    \"label\": \"human\",\n    \"intervalMinutes\": 5,\n    \"intervalMin\": 5,\n    \"type\": \"Interval Maximum\",\n    \"aoi\": {\n        \"enabled\": true,\n        \"pointCount\": 4,\n        \"points\": [\n            {\n                \"x\": 62,\n                \"y\": 69\n            },\n            {\n                \"x\": 118,\n                \"y\": 56\n            },\n            {\n                \"x\": 654,\n                \"y\": 943\n            },\n            {\n                \"x\": 545,\n                \"y\": 947\n            }\n        ]\n    }\n}\n",
+        "output": "json",
+        "x": 390,
+        "y": 640,
+        "wires": [
+            [
+                "e871282d76cf6a8b"
+            ]
+        ]
+    },
+    {
+        "id": "a97faaefb5b2ad7e",
+        "type": "function",
+        "z": "94d49944e4af4e2e",
+        "g": "1edb333414f623f9",
+        "name": "Data and Info Decoder",
+        "func": "/**\n * Radar LoRaWAN Decoder\n * Device  : D2110-VE  (serial ACCC8EF33E99)\n * Generated: 2026-07-13\n *\n * Payloads\n * - Port 2, Occupancy, 1 byte: maximum selected-label objects during the interval.\n * - Port 3, Detection Alert, 1 byte: maximum selected-label objects while alert is active.\n *   Value 0 on port 3 means inactive or heartbeat.\n * - Port 1, Counting, 2 bytes: entering and exiting selected-label counts.\n *\n * Information request downlinks and responses\n * - Port 120, Information Request, 1 byte:\n *   byte[0] = 0x01 request Camera Info, response on port 121\n *   byte[0] = 0x02 request Bridge Info, response on port 122\n *   byte[0] = 0x03 request Signal Quality, local status update only\n * - Port 121, Camera Info response, ASCII CSV:\n *   model, serial, firmwareVersion, uptimeHours with h suffix, cpuPercent with percent suffix, appVersion\n * - Port 122, Bridge Info response, ASCII CSV:\n *   hardware/hardwareVersion, firmwareVersion, powerSource, temperatureC with C suffix, restartCounter with R prefix, devAddr\n *\n * The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in uplinks.\n *\n */\n\nfunction Byte(value) { return value & 0xff; }\nfunction HexToBytes(hex) {\n    var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n    if (!clean.length) throw new Error('Missing hex payload');\n    if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('Hex payload must be an even-length hexadecimal string');\n    var bytes = [];\n    for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n    return bytes;\n}\nfunction Bytes(buffer) {\n    if (!buffer) throw new Error('Missing buffer');\n    if (typeof buffer === 'string') return HexToBytes(buffer);\n    if (Array.isArray(buffer)) return buffer.map(Byte);\n    if (typeof Uint8Array !== 'undefined' && buffer instanceof Uint8Array) return Array.prototype.slice.call(buffer).map(Byte);\n    if (buffer.bytes) return Bytes(buffer.bytes);\n    throw new Error('Payload must be a hex string, array, Buffer, or Uint8Array');\n}\nfunction RequireLength(bytes, length, name) {\n    if (bytes.length !== length) throw new Error(name + ' payload must be ' + length + ' byte' + (length === 1 ? '' : 's'));\n}\nfunction Text(bytes) { return bytes.map(function (value) { return String.fromCharCode(Byte(value)); }).join(''); }\nfunction NumberFromText(value) { var parsed = Number(String(value || '').replace(/[^0-9.-]/g, '')); return Number.isFinite(parsed) ? parsed : null; }\n\nfunction Decode(buffer, port) {\n    var bytes = Bytes(buffer);\n    var fPort = Number(port);\n\n    if (fPort === 2) {\n        RequireLength(bytes, 1, 'Occupancy');\n        return { port: fPort, useCase: 'occupancy', maximumObjects: Byte(bytes[0]) };\n    }\n\n    if (fPort === 3) {\n        RequireLength(bytes, 1, 'Detection Alert');\n        var maximumObjects = Byte(bytes[0]);\n        return { port: fPort, useCase: 'detectionAlert', active: maximumObjects > 0, maximumObjects: maximumObjects };\n    }\n\n    if (fPort === 1) {\n        RequireLength(bytes, 2, 'Counting');\n        return { port: fPort, useCase: 'counting', enteringObjects: Byte(bytes[0]), exitingObjects: Byte(bytes[1]) };\n    }\n\n    if (fPort === 120) {\n        RequireLength(bytes, 1, 'Information Request');\n        var requests = { 1: 'cameraInfo', 2: 'bridgeInfo', 3: 'signalQuality' };\n        return { port: fPort, request: requests[Byte(bytes[0])] || 'unknown', requestCode: Byte(bytes[0]) };\n    }\n\n    if (fPort === 121) {\n        var cameraText = Text(bytes);\n        var camera = cameraText.split(',');\n        return { port: fPort, response: 'cameraInfo', raw: cameraText, model: camera[0] || '', serial: camera[1] || '', firmwareVersion: camera[2] || '', uptimeHours: NumberFromText(camera[3]), cpuPercent: NumberFromText(camera[4]), appVersion: camera[5] || '' };\n    }\n\n    if (fPort === 122) {\n        var bridgeText = Text(bytes);\n        var bridge = bridgeText.split(',');\n        var hardware = String(bridge[0] || '').split('/');\n        return { port: fPort, response: 'bridgeInfo', raw: bridgeText, hardware: hardware[0] || '', hardwareVersion: hardware[1] || '', firmwareVersion: bridge[1] || '', powerSource: bridge[2] || '', temperatureC: NumberFromText(bridge[3]), restartCounter: NumberFromText(bridge[4]), devAddr: bridge[5] || '' };\n    }\n\n    throw new Error('Unsupported Radar LoRaWAN port: ' + fPort);\n}\n\nfunction decodeUplink(input) {\n    try {\n        return { data: Decode(input.bytes, input.fPort) };\n    } catch (error) {\n        return { errors: [error.message] };\n    }\n}\n\nfunction decodeDownlink(input) {\n    return decodeUplink(input);\n}\n\nvar port = parseInt(msg.topic);\nmsg.payload = Decode(msg.payload, port);\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 240,
+        "wires": [
+            [
+                "166b18692b7938ac"
+            ]
+        ]
+    },
+    {
+        "id": "002de1c3964a3711",
+        "type": "change",
+        "z": "94d49944e4af4e2e",
+        "name": "Parse Payload and Port",
+        "rules": [
+            {
+                "t": "set",
+                "p": "topic",
+                "pt": "msg",
+                "to": "payload.event.rawData.fPort",
+                "tot": "msg"
+            },
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "payload.event.rawData.data",
+                "tot": "msg"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 370,
+        "y": 80,
+        "wires": [
+            [
+                "481ffc61886c05fc"
+            ]
+        ]
+    },
+    {
+        "id": "5391adf9ca0b6ec9",
+        "type": "link out",
+        "z": "94d49944e4af4e2e",
+        "name": "link out 2",
+        "mode": "link",
+        "links": [
+            "be757a9f7c04bb9b",
+            "12ef8df7ccf980c5",
+            "7a6dceabe1669f26"
+        ],
+        "x": 955,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "12ef8df7ccf980c5",
+        "type": "link in",
+        "z": "94d49944e4af4e2e",
+        "name": "link in 2",
+        "links": [
+            "5391adf9ca0b6ec9"
+        ],
+        "x": 115,
+        "y": 420,
+        "wires": [
+            [
+                "2498bfda41a1f7c1"
+            ]
+        ]
+    },
+    {
+        "id": "481ffc61886c05fc",
+        "type": "base64",
+        "z": "94d49944e4af4e2e",
+        "name": "",
+        "action": "",
+        "property": "payload",
+        "x": 600,
+        "y": 80,
+        "wires": [
+            [
+                "e6e45930c427a4f8"
+            ]
+        ]
+    },
+    {
+        "id": "e6e45930c427a4f8",
+        "type": "function",
+        "z": "94d49944e4af4e2e",
+        "name": "Buffer to hex string",
+        "func": "//const buffer = Buffer.from(\"Hello\");\nconst buffer = Buffer.from(msg.payload);\n\nmsg.payload = buffer.toString('hex').match(/../g).join('');\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 790,
+        "y": 80,
+        "wires": [
+            [
+                "5391adf9ca0b6ec9",
+                "b7b4040dba380449"
+            ]
+        ]
+    },
+    {
+        "id": "7a6dceabe1669f26",
+        "type": "link in",
+        "z": "94d49944e4af4e2e",
+        "name": "link in 1",
+        "links": [
+            "5391adf9ca0b6ec9"
+        ],
+        "x": 115,
+        "y": 240,
+        "wires": [
+            [
+                "a97faaefb5b2ad7e"
+            ]
+        ]
+    },
+    {
+        "id": "166b18692b7938ac",
+        "type": "debug",
+        "z": "94d49944e4af4e2e",
+        "name": "debug 15",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 760,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "b7b4040dba380449",
+        "type": "debug",
+        "z": "94d49944e4af4e2e",
+        "name": "debug 18",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1000,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "11cd6140c7f7afdc",
+        "type": "mqtt in",
+        "z": "94d49944e4af4e2e",
+        "name": "",
+        "topic": "",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 80,
+        "wires": [
+            [
+                "002de1c3964a3711"
+            ]
+        ]
+    },
+    {
+        "id": "1e4efc726dc9f8e5",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-node-base64": "1.0.0"
+        }
+    }
+]

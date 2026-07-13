@@ -108,6 +108,15 @@
     { "port": 110, "byte": 3, "enabled": true  },
     { "port": 120, "byte": 1, "enabled": true  },
     { "port": 120, "byte": 2, "enabled": true  },
-    { "port": 120, "byte": 3, "enabled": true  }
+    { "port": 120, "byte": 3, "enabled": true  },
+    { "port": 130, "byte": 1, "enabled": true  },
+    { "port": 130, "byte": 2, "enabled": true  },
+    { "port": 130, "byte": 3, "enabled": true  },
+    { "port": 132, "byte": 1, "enabled": true  },
+    { "port": 132, "byte": 2, "enabled": true  },
+    { "port": 132, "byte": 3, "enabled": true  },
+    { "port": 133, "byte": 1, "enabled": true  },
+    { "port": 133, "byte": 2, "enabled": true  },
+    { "port": 133, "byte": 3, "enabled": true  }
   ]
 }

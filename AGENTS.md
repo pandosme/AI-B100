@@ -237,7 +237,7 @@ Detection Alert:
 - Supports Human or Vehicle label selection and optional area of interest.
 - Has inactive heartbeat publishing and active-state publishing.
 - Inactive payload is one byte `0x00`.
-- Active payload is one byte `[selected_label_count]`.
+- Active payload is one byte `[selected_label_active_max]`.
 
 ### Radar UI Pages
 
@@ -246,11 +246,28 @@ Detection Alert:
 | Publish | Enable/disable Occupancy and Detection Alert, show fixed ports/timers, manual publish, recent uplinks, decoder download |
 | Occupancy | Select label, publish frequency, and optional area of interest for port 2 |
 | Detection Alert | Select label, heartbeat, active interval, hold time, and optional area of interest for port 3 |
-| Radar | Live stream and Radar Detection Sensitivity |
+| Radar | Live stream, Radar Detection Sensitivity, and Radar OTA encoder/decoder for port 130 |
 | LoRA Bridge | Bridge configuration and bridge actions |
 | LoRA Downlink | Downlink log and command enablement |
 | GPS | GPS callback data |
 | About | App/device/bridge report and decoder download |
+
+### Radar OTA Configuration
+
+Radar OTA configuration uses fixed port `130` for both requests and responses. It is separate from Occupancy OTA port `132` and Detection Alert OTA port `133`.
+
+Commands:
+
+| Command | Purpose |
+| --- | --- |
+| `0x01` | GET_CONFIG request |
+| `0x81` | GET_CONFIG response |
+| `0x02` | SET_CONFIG request |
+| `0x82` | SET_CONFIG ACK/NACK |
+| `0x03` | GET_CAPS request |
+| `0x83` | GET_CAPS response |
+
+The Radar config body is 8 bytes: `version`, `fieldMask` as uint16 BE, `detectionSensitivity`, three reserved zero bytes, and CRC8 over the first seven bytes. Field mask `0x0001` is Radar Detection Sensitivity, encoded as `1=low`, `2=medium`, `3=high`. Keep the Radar page modal and generated `radar_ota_translator` endpoint aligned with this format when adding future Radar-tab fields.
 
 ### Radar Payload Contract
 
@@ -259,7 +276,7 @@ Detection Alert:
 | `1` | Counting | Reserved; hidden in UI until developed |
 | `2` | Occupancy Interval Maximum | 1 byte: `[selected_label_interval_max]` |
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
-| `3` | Detection Alert active | 1 byte: `[selected_label_count]` |
+| `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
 
 The static `radar/translator.js` and generated `/translator` output must match this contract. Do not re-add `Occupancy Area Balance` or a two-byte port 2 decoder branch while the use case is hidden.
 

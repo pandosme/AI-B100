@@ -35,13 +35,20 @@
 
 	<div class="page-content">
 		<div class="card mb-4">
-			<div class="card-header"><h5 class="card-title mb-0">Occupancy</h5></div>
+			<div class="card-header d-flex justify-content-between align-items-center">
+				<h5 class="card-title mb-0">Occupancy</h5>
+				<div class="d-flex gap-2">
+					<button id="open-occupancy-dialog" class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#occupancyTranslatorModal">Open Encoder/Decoder</button>
+					<button id="download-occupancy-ota-translator" class="btn btn-sm btn-outline-primary">Download OTA Configuration translator</button>
+				</div>
+			</div>
 			<div class="card-body">
 				<div class="row g-3 align-items-end">
 					<div class="col-12 col-md-3">
 						<label for="occupancyType" class="form-label">Occupancy Type</label>
 						<select id="occupancyType" class="form-select">
 							<option value="maximum">Interval Maximum</option>
+							<option value="areaBalance">Area balance (AOI only)</option>
 						</select>
 					</div>
 					<div class="col-12 col-md-3">
@@ -82,6 +89,53 @@
 		</div>
 	</div>
 
+	<div class="modal fade" id="occupancyTranslatorModal" tabindex="-1" aria-labelledby="occupancyTranslatorModalLabel" aria-hidden="true">
+		<div class="modal-dialog modal-lg modal-dialog-scrollable">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="occupancyTranslatorModalLabel">Occupancy OTA Encoder/Decoder</h5>
+					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+				</div>
+				<div class="modal-body">
+					<p class="text-muted mb-3">Installer/Integrator tool to build and parse Occupancy OTA frames on port <strong>132</strong>.</p>
+					<div class="row g-3">
+						<div class="col-12">
+							<label for="occupancy-json-input" class="form-label">JSON Input (for Set Config)</label>
+							<textarea id="occupancy-json-input" class="form-control" rows="8"></textarea>
+							<div class="d-flex gap-2 flex-wrap mt-2">
+								<button id="occupancy-json-from-form" class="btn btn-outline-secondary btn-sm">Load JSON From Form</button>
+								<button id="occupancy-build-set" class="btn btn-primary btn-sm">Build Set Config (0x02)</button>
+								<button id="occupancy-build-get" class="btn btn-outline-primary btn-sm">Build Get Config (0x01)</button>
+								<button id="occupancy-build-caps" class="btn btn-outline-primary btn-sm">Build Get Caps (0x03)</button>
+							</div>
+						</div>
+						<div class="col-12">
+							<label for="occupancy-hex-output" class="form-label">Generated HEX</label>
+							<input id="occupancy-hex-output" class="form-control" type="text" readonly>
+							<div class="form-text">Transmit on port <strong>132</strong>.</div>
+						</div>
+						<div class="col-12">
+							<label for="occupancy-hex-input" class="form-label">Decode HEX</label>
+							<input id="occupancy-hex-input" class="form-control" type="text" placeholder="e.g. 81010504... or 82010200xx">
+						</div>
+						<div class="col-12">
+							<div class="d-flex gap-2 flex-wrap">
+								<button id="occupancy-decode" class="btn btn-success btn-sm">Decode</button>
+							</div>
+						</div>
+						<div class="col-12">
+							<label for="occupancy-json-output" class="form-label">Decoded JSON</label>
+							<textarea id="occupancy-json-output" class="form-control" rows="8" readonly></textarea>
+						</div>
+					</div>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
 <script>
 let currentSettings = {};
 let polygonSelector = null;
@@ -98,8 +152,22 @@ $(document).ready(function() {
 	});
 	$('#occupancyInterval').on('input', function() { $('#occupancyIntervalValue').text($(this).val()); });
 	$('#occupancyType').on('change', updateModeControls);
-	$('#aoiEnabled').on('change', function() { if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked')); });
+	$('#aoiEnabled').on('change', function() {
+		if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked'));
+		updateModeControls();
+	});
 	$('#saveOccupancy').on('click', saveOccupancy);
+	$('#download-occupancy-ota-translator').on('click', downloadOccupancyOtaTranslator);
+	$('#open-occupancy-dialog').on('click', function() {
+		loadOccupancyTranslatorJsonFromForm(false);
+		$('#occupancy-hex-input').val('');
+		$('#occupancy-json-output').val('');
+	});
+	$('#occupancy-json-from-form').on('click', loadOccupancyTranslatorJsonFromForm);
+	$('#occupancy-build-set').on('click', buildOccupancySetFromJson);
+	$('#occupancy-build-get').on('click', function() { setOccupancyHexOutput(occupancyOtaBytesToHex([0x01])); });
+	$('#occupancy-build-caps').on('click', function() { setOccupancyHexOutput(occupancyOtaBytesToHex([0x03])); });
+	$('#occupancy-decode').on('click', decodeOccupancyHexInput);
 	setInterval(updateOccupancyStatus, 3000);
 	setInterval(pollLoraStatus, 10000);
 	pollLoraStatus();
@@ -148,14 +216,32 @@ function loadSettings() {
 }
 
 function normalizeOccupancyType(value) {
-	return 'maximum';
+	const normalized = String(value || '').toLowerCase();
+	return normalized === 'areabalance' ? 'areaBalance' : 'maximum';
 }
 
 function updateModeControls() {
-	$('.area-balance-value').hide();
-	$('#intervalMaximumWrap').show();
+	const aoiEnabled = $('#aoiEnabled').is(':checked');
+	const typeSelect = $('#occupancyType');
+	const selectedType = normalizeOccupancyType(typeSelect.val());
+	typeSelect.find('option[value="areaBalance"]').prop('disabled', !aoiEnabled);
+
+	let effectiveType = selectedType;
+	if (!aoiEnabled && selectedType === 'areaBalance') {
+		effectiveType = 'maximum';
+		typeSelect.val('maximum');
+	}
+
+	if (effectiveType === 'areaBalance') {
+		$('.area-balance-value').show();
+		$('#intervalMaximumWrap').hide();
+	} else {
+		$('.area-balance-value').hide();
+		$('#intervalMaximumWrap').show();
+	}
+
 	$('#aoiEnabled').prop('disabled', false);
-	if (polygonSelector) polygonSelector.setEnabled($('#aoiEnabled').is(':checked'));
+	if (polygonSelector) polygonSelector.setEnabled(aoiEnabled);
 }
 
 function setPolygonPoints(points) {
@@ -177,10 +263,10 @@ function polygonBounds(points) {
 function saveOccupancy() {
 	const transmission = currentSettings.transmission || {};
 	const existingOccupancy = transmission.occupancy || {};
-	const type = normalizeOccupancyType($('#occupancyType').val());
+	const aoiEnabled = $('#aoiEnabled').is(':checked');
+	const type = (aoiEnabled ? normalizeOccupancyType($('#occupancyType').val()) : 'maximum');
 	const points = readPolygonPoints();
 	const bounds = polygonBounds(points);
-	const aoiEnabled = $('#aoiEnabled').is(':checked');
 	transmission.occupancy = Object.assign({ port: 2, enabled: false }, existingOccupancy, {
 		type: type,
 		label: $('input[name="occupancyLabel"]:checked').val() || 'human',
@@ -191,6 +277,317 @@ function saveOccupancy() {
 		success: function() { currentSettings.transmission = transmission; showToast('Occupancy saved', 'success'); },
 		error: function(xhr, status, error) { showToast('Failed to save Occupancy: ' + error, 'danger'); }
 	});
+}
+
+function readOccupancyTranslatorConfig() {
+	const points = (readPolygonPoints() || []).slice(0, 10);
+	const intervalMinutes = parseInt($('#occupancyInterval').val(), 10) || 15;
+	return {
+		enabled: true,
+		protocolVersion: 1,
+		label: $('input[name="occupancyLabel"]:checked').val() || 'human',
+		intervalMinutes: intervalMinutes,
+		intervalMin: intervalMinutes,
+		type: occupancyTypeNameFromUiValue($('#occupancyType').val()),
+		aoi: { enabled: $('#aoiEnabled').is(':checked'), pointCount: points.length, points: points }
+	};
+}
+
+function occupancyOtaByte(value) { return value & 0xff; }
+
+function occupancyClamp(value, minValue, maxValue) {
+	const n = Number(value);
+	if (!Number.isFinite(n)) return minValue;
+	if (n < minValue) return minValue;
+	if (n > maxValue) return maxValue;
+	return Math.round(n);
+}
+
+function occupancyOtaBytesToHex(bytes) {
+	return (bytes || []).map(function(value) { return ('0' + occupancyOtaByte(value).toString(16)).slice(-2); }).join('').toUpperCase();
+}
+
+function occupancyOtaHexToBytes(hex) {
+	const clean = String(hex || '').replace(/\s+/g, '').toUpperCase();
+	if (!clean.length) return [];
+	if (clean.length % 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('HEX must be even-length hexadecimal string');
+	const bytes = [];
+	for (let i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));
+	return bytes;
+}
+
+function occupancyOtaWriteU16BE(out, value) {
+	const v = occupancyClamp(value, 0, 65535);
+	out.push((v >> 8) & 0xff);
+	out.push(v & 0xff);
+}
+
+function occupancyOtaReadU16BE(bytes, index) {
+	return (occupancyOtaByte(bytes[index]) << 8) | occupancyOtaByte(bytes[index + 1]);
+}
+
+function occupancyOtaCrc8(bytes) {
+	let crc = 0;
+	for (let i = 0; i < bytes.length; i++) {
+		crc ^= occupancyOtaByte(bytes[i]);
+		for (let bit = 0; bit < 8; bit++) {
+			if (crc & 0x80) crc = ((crc << 1) ^ 0x07) & 0xff;
+			else crc = (crc << 1) & 0xff;
+		}
+	}
+	return crc & 0xff;
+}
+
+function occupancyTypeNameFromUiValue(value) {
+	return normalizeOccupancyType(value) === 'areaBalance' ? 'Area Balance' : 'Interval Maximum';
+}
+
+function occupancyTypeToCode(value) {
+	if (typeof value !== 'string') throw new Error('config.type must be "Interval Maximum" or "Area Balance"');
+	const t = value.trim().toLowerCase();
+	if (t === 'area balance') return 2;
+	if (t === 'interval maximum') return 1;
+	throw new Error('config.type must be "Interval Maximum" or "Area Balance"');
+}
+
+function occupancyCodeToTypeName(code) {
+	if (code === 2) return 'Area Balance';
+	if (code === 1) return 'Interval Maximum';
+	return 'Unknown';
+}
+
+function occupancyBuildConfigBody(config) {
+	const cfg = config || {};
+	const aoi = cfg.aoi || {};
+	const points = (aoi.points || []).slice(0, 10).map(function(point) {
+		return { x: occupancyClamp(point.x, 0, 1000), y: occupancyClamp(point.y, 0, 1000) };
+	});
+	const aoiEnabled = !!aoi.enabled;
+	if (aoiEnabled && points.length < 3) throw new Error('AOI enabled requires 3 to 10 points');
+
+	const body = [];
+	body.push(occupancyClamp(cfg.protocolVersion || 1, 1, 255));
+	body.push((cfg.enabled ? 1 : 0) | (String(cfg.label || 'human').toLowerCase() === 'vehicle' ? 2 : 0) | (aoiEnabled ? 4 : 0));
+	body.push(occupancyClamp(cfg.intervalMin || cfg.intervalMinutes, 1, 60));
+	body.push(aoiEnabled ? points.length : 0);
+
+	for (let i = 0; i < 10; i++) {
+		const point = i < points.length ? points[i] : { x: 0, y: 0 };
+		occupancyOtaWriteU16BE(body, point.x);
+		occupancyOtaWriteU16BE(body, point.y);
+	}
+	body.push(occupancyTypeToCode(cfg.type));
+	body.push(0);
+	body.push(0);
+	body.push(occupancyOtaCrc8(body));
+
+	if (body.length !== 48) throw new Error('Config body must be 48 bytes');
+	return body;
+}
+
+function occupancyParseConfigBody(body) {
+	if (!body || body.length !== 48) throw new Error('Config body must be 48 bytes');
+	if (occupancyOtaCrc8(body.slice(0, 47)) !== occupancyOtaByte(body[47])) throw new Error('Config CRC mismatch');
+
+	const flags = occupancyOtaByte(body[1]);
+	const pointCount = occupancyOtaByte(body[3]);
+	if (pointCount > 10) throw new Error('Invalid pointCount');
+	if ((flags & 0x04) && pointCount > 0 && pointCount < 3) throw new Error('AOI enabled with fewer than 3 points');
+
+	const points = [];
+	for (let i = 0; i < 10; i++) {
+		const base = 4 + (i * 4);
+		const x = occupancyOtaReadU16BE(body, base);
+		const y = occupancyOtaReadU16BE(body, base + 2);
+		if (i < pointCount) points.push({ x, y });
+	}
+
+	return {
+		protocolVersion: occupancyOtaByte(body[0]),
+		enabled: (flags & 0x01) !== 0,
+		label: (flags & 0x02) !== 0 ? 'vehicle' : 'human',
+		intervalMinutes: occupancyOtaByte(body[2]),
+		intervalMin: occupancyOtaByte(body[2]),
+		type: occupancyCodeToTypeName(occupancyOtaByte(body[44])),
+		aoi: { enabled: (flags & 0x04) !== 0, pointCount, points },
+		crc8: occupancyOtaByte(body[47])
+	};
+}
+
+function Encode_Config(config, command) {
+	const cmd = occupancyOtaByte(command);
+	if (cmd === 0x01 || cmd === 0x03) return occupancyOtaBytesToHex([cmd]);
+	if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');
+	return occupancyOtaBytesToHex([0x02].concat(occupancyBuildConfigBody(config || {})));
+}
+
+function Decode_config(input) {
+	const bytes = Array.isArray(input) ? input.slice() : occupancyOtaHexToBytes(input);
+	if (!bytes.length) throw new Error('Empty payload');
+
+	const cmd = occupancyOtaByte(bytes[0]);
+	const names = {
+		0x01: 'GET_CONFIG',
+		0x02: 'SET_CONFIG',
+		0x03: 'GET_CAPS',
+		0x81: 'GET_CONFIG_RESP',
+		0x82: 'SET_CONFIG_ACK',
+		0x83: 'GET_CAPS_RESP'
+	};
+
+	if (cmd === 0x01 || cmd === 0x03) return {
+		port: 132,
+		command: cmd,
+		type: cmd === 0x01 ? 'get_config_request' : 'get_caps_request'
+	};
+
+	if (cmd === 0x02 || cmd === 0x81) {
+		if (bytes.length !== 49) throw new Error('Config request/response must be 49 bytes');
+		return {
+			port: 132,
+			command: cmd,
+			type: cmd === 0x02 ? 'set_config_request' : 'get_config_response',
+			config: occupancyParseConfigBody(bytes.slice(1))
+		};
+	}
+
+	if (cmd === 0x82) {
+		if (bytes.length !== 5) throw new Error('ACK/NACK must be 5 bytes');
+		if (occupancyOtaCrc8(bytes.slice(0, 4)) !== occupancyOtaByte(bytes[4])) throw new Error('ACK/NACK CRC mismatch');
+		return {
+			port: 132,
+			command: cmd,
+			type: 'set_config_ack',
+			version: occupancyOtaByte(bytes[1]),
+			ackFor: occupancyOtaByte(bytes[2]),
+			status: occupancyOtaByte(bytes[3]),
+			success: occupancyOtaByte(bytes[3]) === 0
+		};
+	}
+
+	if (cmd === 0x83) {
+		if (bytes.length !== 13) throw new Error('Capabilities response must be 13 bytes');
+		const payload = bytes.slice(1);
+		if (occupancyOtaCrc8(payload.slice(0, 11)) !== occupancyOtaByte(payload[11])) throw new Error('Capabilities CRC mismatch');
+		return {
+			port: 132,
+			command: cmd,
+			type: 'get_caps_response',
+			version: occupancyOtaByte(payload[0]),
+			maxPolygonPoints: occupancyOtaByte(payload[1]),
+			coordEncoding: occupancyOtaByte(payload[2]),
+			coordEncodingName: occupancyOtaByte(payload[2]) === 1 ? 'uint16_0_1000' : 'unknown',
+			minIntervalMin: occupancyOtaByte(payload[3]),
+			maxIntervalMin: occupancyOtaByte(payload[4]),
+			minAreaPoints: occupancyOtaReadU16BE(payload, 5),
+			maxAreaPoints: occupancyOtaReadU16BE(payload, 7),
+			minType: occupancyOtaByte(payload[9]),
+			maxType: occupancyOtaByte(payload[10]),
+			minTypeName: occupancyCodeToTypeName(occupancyOtaByte(payload[9])),
+			maxTypeName: occupancyCodeToTypeName(occupancyOtaByte(payload[10])),
+			constraints: {
+				intervalMin: [occupancyOtaByte(payload[3]), occupancyOtaByte(payload[4])],
+				areaPoints: [occupancyOtaReadU16BE(payload, 5), occupancyOtaReadU16BE(payload, 7)],
+				occupancyType: [occupancyOtaByte(payload[9]), occupancyOtaByte(payload[10])],
+				occupancyTypeName: [occupancyCodeToTypeName(occupancyOtaByte(payload[9])), occupancyCodeToTypeName(occupancyOtaByte(payload[10]))],
+				maxPolygonPoints: occupancyOtaByte(payload[1])
+			}
+		};
+	}
+
+	throw new Error('Unsupported command byte: 0x' + cmd.toString(16).toUpperCase());
+}
+
+function loadOccupancyTranslatorJsonFromForm(notify) {
+	const config = readOccupancyTranslatorConfig();
+	$('#occupancy-json-input').val(JSON.stringify(config, null, 2));
+	if (notify !== false) showToast('Encoder/Decoder JSON loaded from form', 'info');
+}
+
+function setOccupancyHexOutput(hex) {
+	$('#occupancy-hex-output').val(String(hex || '').toUpperCase());
+}
+
+function buildOccupancyOtaTranslatorScript() {
+	const generatedDate = new Date().toISOString().slice(0, 10);
+	const header = [
+		'/**',
+		' * AI-B100 Occupancy OTA Translator',
+		' * Generated: ' + generatedDate,
+		' *',
+		' * Port',
+		' * - Occupancy OTA uses dedicated port 132 for both requests and responses.',
+		' *',
+		' * Public API',
+		' * - Encode_Config(config, command) : JSON -> HEX payload',
+		' * - Decode_config(input)           : HEX/bytes -> JSON',
+		' */'
+	].join('\n');
+
+	const parts = [
+		header,
+		'var AI_B100_OCCUPANCY_OTA_PORT = 132;',
+		'var AI_B100_OCCUPANCY_OTA_MAX_POINTS = 10;',
+		occupancyOtaByte.toString(),
+		occupancyClamp.toString(),
+		occupancyOtaBytesToHex.toString(),
+		occupancyOtaHexToBytes.toString(),
+		occupancyOtaWriteU16BE.toString(),
+		occupancyOtaReadU16BE.toString(),
+		occupancyOtaCrc8.toString(),
+		occupancyTypeToCode.toString(),
+		occupancyCodeToTypeName.toString(),
+		occupancyBuildConfigBody.toString(),
+		occupancyParseConfigBody.toString(),
+		Encode_Config.toString(),
+		Decode_config.toString(),
+		'var aiB100OccupancyOtaJsonToHex = Encode_Config;',
+		'var aiB100OccupancyOtaBufferToJson = Decode_config;'
+	];
+
+	return parts.join('\n\n') + '\n';
+}
+
+function downloadOccupancyOtaTranslator() {
+	try {
+		const text = buildOccupancyOtaTranslatorScript();
+		if (!text.trim().length) throw new Error('Generated translator is empty');
+		if (text.indexOf('function Encode_Config') === -1 || text.indexOf('function Decode_config') === -1) throw new Error('Generated translator is invalid');
+
+		const blob = new Blob([text], { type: 'application/javascript' });
+		const url = URL.createObjectURL(blob);
+		const link = document.createElement('a');
+		link.href = url;
+		link.download = 'AI-B100-Occupancy-OTA.js';
+		document.body.appendChild(link);
+		link.click();
+		link.remove();
+		URL.revokeObjectURL(url);
+		showToast('Occupancy OTA translator downloaded', 'success');
+	} catch (error) {
+		showToast('Failed to download Occupancy OTA translator: ' + error.message, 'danger');
+	}
+}
+
+function buildOccupancySetFromJson() {
+	try {
+		const parsed = JSON.parse($('#occupancy-json-input').val() || '{}');
+		setOccupancyHexOutput(Encode_Config(parsed, 0x02));
+		showToast('Occupancy OTA Set Config built for port 132', 'success');
+	} catch (error) {
+		showToast('Failed to build Occupancy OTA Set Config: ' + error.message, 'danger');
+	}
+}
+
+function decodeOccupancyHexInput() {
+	try {
+		const decoded = Decode_config($('#occupancy-hex-input').val() || '');
+		$('#occupancy-json-output').val(JSON.stringify(decoded, null, 2));
+		showToast('Payload decoded', 'success');
+	} catch (error) {
+		$('#occupancy-json-output').val('');
+		showToast('Decode failed: ' + error.message, 'danger');
+	}
 }
 
 function updateOccupancyStatus() {

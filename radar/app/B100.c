@@ -18,7 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
+#include <ctype.h>
 #include <curl/curl.h>
 #include <syslog.h>
 
@@ -86,6 +88,23 @@ static size_t http_write_callback(void* contents, size_t size, size_t nmemb, voi
     resp->size += realsize;
     resp->data[resp->size] = '\0';
     return realsize;
+}
+
+static void B100_Url_Encode_QueryComponent(const char* in, char* out, size_t out_sz) {
+    size_t o = 0;
+    const unsigned char* p = (const unsigned char*)(in ? in : "");
+    while (*p && o + 1 < out_sz) {
+        unsigned char c = *p;
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        } else {
+            if (o + 3 >= out_sz) break;
+            snprintf(out + o, out_sz - o, "%%%02X", c);
+            o += 3;
+        }
+        p++;
+    }
+    out[o] = '\0';
 }
 
 // Perform HTTP GET request. Accepts 200 and 202 responses.
@@ -598,6 +617,139 @@ int B100_Request_Status(void) {
 // when the B100 POSTs status or downlink data
 // ==================================================================
 
+static int B100_Infer_Payload_Length(cJSON* payload_item) {
+    if (!payload_item) return 0;
+
+    if (cJSON_IsString(payload_item))
+        return (int)strlen(payload_item->valuestring ? payload_item->valuestring : "");
+
+    if (cJSON_IsArray(payload_item))
+        return cJSON_GetArraySize(payload_item);
+
+    if (cJSON_IsObject(payload_item)) {
+        cJSON* data = cJSON_GetObjectItem(payload_item, "data");
+        if (data && cJSON_IsArray(data))
+            return cJSON_GetArraySize(data);
+    }
+
+    return 0;
+}
+
+static int B100_String_Is_Hex(const char* value) {
+    if (!value || !*value)
+        return 0;
+    int hex_chars = 0;
+    for (const char* p = value; *p; p++) {
+        if (isspace((unsigned char)*p))
+            continue;
+        if (!isxdigit((unsigned char)*p))
+            return 0;
+        hex_chars++;
+    }
+    return hex_chars > 0 && (hex_chars % 2) == 0;
+}
+
+static int B100_Dispatch_Downlink_From_JSON(cJSON* json) {
+    if (!json || !g_downlink_callback)
+        return 0;
+
+    cJSON* payload_item = cJSON_GetObjectItem(json, "payload");
+    if (!payload_item)
+        return 0;
+
+    cJSON* payload_type_item = cJSON_GetObjectItem(json, "payload_type");
+    if (!payload_type_item)
+        payload_type_item = cJSON_GetObjectItem(json, "payloadType");
+    const char* supplied_payload_type = (payload_type_item && cJSON_IsString(payload_type_item)) ? payload_type_item->valuestring : NULL;
+    int payload_is_hex = (supplied_payload_type && strcasecmp(supplied_payload_type, "HEX") == 0);
+    int payload_is_ascii = (supplied_payload_type && strcasecmp(supplied_payload_type, "ASCII") == 0);
+
+    cJSON* length_item = cJSON_GetObjectItem(json, "length");
+    int payload_length = (length_item && cJSON_IsNumber(length_item)) ? length_item->valueint : 0;
+    if (payload_length <= 0 && cJSON_IsString(payload_item) && (payload_is_hex || B100_String_Is_Hex(payload_item->valuestring)))
+        payload_length = (int)strlen(payload_item->valuestring ? payload_item->valuestring : "") / 2;
+    if (payload_length <= 0)
+        payload_length = B100_Infer_Payload_Length(payload_item);
+
+    if (payload_length <= 0) {
+        LOG("Callback payload present but length resolved to 0, fcntDown=%u\n", g_status.fcntDown);
+        return 0;
+    }
+
+    cJSON* fcnt_item = cJSON_GetObjectItem(json, "fcntDown");
+    int has_this_fcnt = (fcnt_item && cJSON_IsNumber(fcnt_item));
+    unsigned int this_fcnt = has_this_fcnt ? (unsigned int)fcnt_item->valueint : 0;
+
+    // Deduplication by fcntDown when available
+    int already_done = 0;
+    pthread_mutex_lock(&g_downlink_dedup_mutex);
+    if (has_this_fcnt && g_downlink_dedup_init && this_fcnt > 0 && g_last_dispatched_fcntDown == this_fcnt)
+        already_done = 1;
+    if (!already_done && has_this_fcnt && this_fcnt > 0) {
+        g_last_dispatched_fcntDown = this_fcnt;
+        g_downlink_dedup_init = 1;
+    }
+    pthread_mutex_unlock(&g_downlink_dedup_mutex);
+
+    if (already_done) {
+        LOG_TRACE("Downlink fcntDown=%u already dispatched\n", this_fcnt);
+        return 0;
+    }
+
+    B100_Downlink* dl = malloc(sizeof(B100_Downlink));
+    if (!dl)
+        return 0;
+
+    memset(dl, 0, sizeof(B100_Downlink));
+
+    // Payload can be HEX/ASCII string, array [1,2,255], or Buffer object.
+    if (cJSON_IsString(payload_item)) {
+        strncpy(dl->payload, payload_item->valuestring ? payload_item->valuestring : "",
+                sizeof(dl->payload) - 1);
+        if (payload_is_hex || (!payload_is_ascii && B100_String_Is_Hex(payload_item->valuestring)))
+            strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
+        else
+            strncpy(dl->payload_type, "ASCII", sizeof(dl->payload_type) - 1);
+    } else if (cJSON_IsArray(payload_item)) {
+        int n = cJSON_GetArraySize(payload_item);
+        int pos = 0;
+        for (int i = 0; i < n && pos < (int)sizeof(dl->payload) - 2; i++) {
+            cJSON* b = cJSON_GetArrayItem(payload_item, i);
+            pos += snprintf(dl->payload + pos, sizeof(dl->payload) - pos,
+                            "%02X", b ? (b->valueint & 0xFF) : 0);
+        }
+        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
+    } else if (cJSON_IsObject(payload_item)) {
+        cJSON* bdata = cJSON_GetObjectItem(payload_item, "data");
+        if (bdata && cJSON_IsArray(bdata)) {
+            int n = cJSON_GetArraySize(bdata);
+            int pos = 0;
+            for (int i = 0; i < n && pos < (int)sizeof(dl->payload) - 2; i++) {
+                cJSON* b = cJSON_GetArrayItem(bdata, i);
+                pos += snprintf(dl->payload + pos, sizeof(dl->payload) - pos,
+                                "%02X", b ? (b->valueint & 0xFF) : 0);
+            }
+        }
+        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
+    } else {
+        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
+    }
+
+    dl->length = payload_length;
+    cJSON* port_item = cJSON_GetObjectItem(json, "port");
+    if (port_item) dl->port = port_item->valueint;
+    dl->rssi = g_status.rssi;
+    dl->snr = g_status.snr;
+    dl->fcntDown = has_this_fcnt ? (int)this_fcnt : 0;
+    dl->confirming = g_status.confirmed;
+
+    LOG("Downlink callback: port=%d, %d bytes, fcntDown=%u%s\n",
+        dl->port, dl->length, this_fcnt, has_this_fcnt ? "" : " (not supplied)");
+    g_downlink_callback(dl);
+    free(dl);
+    return 1;
+}
+
 // Process a status callback POST from the B100.
 // Fields: status, dev_addr, confirmed, fcntUp, data_rate, maxUp, tUnix, next_upload_ms
 int B100_Process_Status_Callback(cJSON* json) {
@@ -635,6 +787,18 @@ int B100_Process_Status_Callback(cJSON* json) {
 
     if ((item = cJSON_GetObjectItem(json, "confirmed")))
         g_status.confirmed = item->valueint;
+    if ((item = cJSON_GetObjectItem(json, "fcntDown"))) {
+        g_status.fcntDown = (unsigned int)item->valueint;
+        g_status.hasFcntDown = 1;
+    }
+    if ((item = cJSON_GetObjectItem(json, "rssi"))) {
+        g_status.rssi = (float)item->valuedouble;
+        g_status.hasRssi = 1;
+    }
+    if ((item = cJSON_GetObjectItem(json, "snr"))) {
+        g_status.snr = (float)item->valuedouble;
+        g_status.hasSnr = 1;
+    }
     if ((item = cJSON_GetObjectItem(json, "fcntUp"))) {
         g_status.fcntUp = (unsigned int)item->valueint;
         g_status.hasFcntUp = 1;
@@ -655,6 +819,9 @@ int B100_Process_Status_Callback(cJSON* json) {
     }
 
     g_status.timestamp = time(NULL);
+
+    // Some firmware/callback paths include downlink payloads on status callbacks.
+    B100_Dispatch_Downlink_From_JSON(json);
 
     if (g_status_callback)
         g_status_callback(&g_status);
@@ -709,85 +876,10 @@ int B100_Process_Receive_Callback(cJSON* json) {
 
     g_status.timestamp = time(NULL);
 
-    // Check for downlink payload
-    cJSON* length_item = cJSON_GetObjectItem(json, "length");
-    int payload_length = length_item ? length_item->valueint : 0;
-
-    if (payload_length == 0) {
-        LOG("Receive callback: no payload (ACK or linkcheck), fcntDown=%u\n", g_status.fcntDown);
-    }
-
-    if (payload_length > 0 && g_downlink_callback) {
+    if (!B100_Dispatch_Downlink_From_JSON(json)) {
         cJSON* payload_item = cJSON_GetObjectItem(json, "payload");
         if (!payload_item)
-            LOG_WARN("Receive callback: length=%d but no 'payload' field in JSON\n", payload_length);
-        if (payload_item) {
-            unsigned int this_fcnt = g_status.fcntDown;
-
-            // Deduplication by fcntDown
-            pthread_mutex_lock(&g_downlink_dedup_mutex);
-            int already_done = g_downlink_dedup_init &&
-                               (g_last_dispatched_fcntDown == this_fcnt);
-            if (!already_done) {
-                g_last_dispatched_fcntDown = this_fcnt;
-                g_downlink_dedup_init = 1;
-            }
-            pthread_mutex_unlock(&g_downlink_dedup_mutex);
-
-            if (!already_done) {
-                B100_Downlink* dl = malloc(sizeof(B100_Downlink));
-                if (dl) {
-                    memset(dl, 0, sizeof(B100_Downlink));
-
-                    // Payload can be string (ASCII), array [1,2,255], or Buffer object
-                    if (cJSON_IsString(payload_item)) {
-                        strncpy(dl->payload, payload_item->valuestring,
-                                sizeof(dl->payload) - 1);
-                        strncpy(dl->payload_type, "ASCII", sizeof(dl->payload_type) - 1);
-                    } else if (cJSON_IsArray(payload_item)) {
-                        // Byte array → hex string for backward compat
-                        int n = cJSON_GetArraySize(payload_item);
-                        int pos = 0;
-                        for (int i = 0; i < n && pos < (int)sizeof(dl->payload) - 2; i++) {
-                            cJSON* b = cJSON_GetArrayItem(payload_item, i);
-                            pos += snprintf(dl->payload + pos, sizeof(dl->payload) - pos,
-                                            "%02X", b ? (b->valueint & 0xFF) : 0);
-                        }
-                        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
-                    } else if (cJSON_IsObject(payload_item)) {
-                        // Node.js Buffer: {"type":"Buffer","data":[1,2,255]}
-                        cJSON* bdata = cJSON_GetObjectItem(payload_item, "data");
-                        if (bdata && cJSON_IsArray(bdata)) {
-                            int n = cJSON_GetArraySize(bdata);
-                            int pos = 0;
-                            for (int i = 0; i < n && pos < (int)sizeof(dl->payload) - 2; i++) {
-                                cJSON* b = cJSON_GetArrayItem(bdata, i);
-                                pos += snprintf(dl->payload + pos, sizeof(dl->payload) - pos,
-                                                "%02X", b ? (b->valueint & 0xFF) : 0);
-                            }
-                        }
-                        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
-                    } else {
-                        strncpy(dl->payload_type, "HEX", sizeof(dl->payload_type) - 1);
-                    }
-
-                    dl->length = payload_length;
-                    cJSON* port_item = cJSON_GetObjectItem(json, "port");
-                    if (port_item) dl->port = port_item->valueint;
-                    dl->rssi = g_status.rssi;
-                    dl->snr = g_status.snr;
-                    dl->fcntDown = (int)this_fcnt;
-                    dl->confirming = g_status.confirmed;
-
-                    LOG("Downlink callback: port=%d, %d bytes, fcntDown=%u\n",
-                        dl->port, dl->length, this_fcnt);
-                    g_downlink_callback(dl);
-                    free(dl);
-                }
-            } else {
-                LOG_TRACE("Downlink fcntDown=%u already dispatched\n", this_fcnt);
-            }
-        }
+            LOG("Receive callback: no payload (ACK or linkcheck), fcntDown=%u\n", g_status.fcntDown);
     }
 
     g_status.receiveTUnix = (unsigned long)time(NULL);
@@ -984,6 +1076,79 @@ int B100_Configure_Callbacks(const char* callback_ip, int callback_port,
 
     int result = B100_Set_Params(params);
     cJSON_Delete(params);
+
+    // Some bridge firmware variants apply HTTP callback settings more reliably
+    // via the same LAN form endpoint used in the web UI: /lan.html?...query...
+    // If /set fails, retry with a LAN-style update payload.
+    if (!result) {
+        cJSON* current = B100_Get_Params(NULL);
+        if (current) {
+            int dhcp_enable = 1;
+            int gps_update_interval = 60;
+            const char* ip_addr = "192.168.1.250";
+            const char* gateway_addr = "192.168.1.1";
+            const char* dns_addr = "192.168.1.1";
+            const char* subnet_mask = "255.255.255.0";
+            const char* callback_gps_uri = "/local/aib100/b100_gps";
+
+            cJSON* item = NULL;
+            if ((item = cJSON_GetObjectItem(current, "dhcp_enable")))
+                dhcp_enable = item->valueint ? 1 : 0;
+            if ((item = cJSON_GetObjectItem(current, "gps_update_interval")))
+                gps_update_interval = item->valueint;
+            if ((item = cJSON_GetObjectItem(current, "ip_addr")) && cJSON_IsString(item) && item->valuestring)
+                ip_addr = item->valuestring;
+            if ((item = cJSON_GetObjectItem(current, "gateway_addr")) && cJSON_IsString(item) && item->valuestring)
+                gateway_addr = item->valuestring;
+            if ((item = cJSON_GetObjectItem(current, "dns_addr")) && cJSON_IsString(item) && item->valuestring)
+                dns_addr = item->valuestring;
+            if ((item = cJSON_GetObjectItem(current, "subnet_mask")) && cJSON_IsString(item) && item->valuestring)
+                subnet_mask = item->valuestring;
+            if ((item = cJSON_GetObjectItem(current, "callback_gps_uri")) && cJSON_IsString(item) && item->valuestring)
+                callback_gps_uri = item->valuestring;
+
+            char cb_status_enc[192], cb_receive_enc[192], cb_gps_enc[192], cb_user_enc[96], cb_pass_enc[96];
+            char cb_addr_enc[96], ip_addr_enc[96], gw_addr_enc[96], dns_addr_enc[96], subnet_enc[96];
+
+            B100_Url_Encode_QueryComponent(status_uri, cb_status_enc, sizeof(cb_status_enc));
+            B100_Url_Encode_QueryComponent(receive_uri, cb_receive_enc, sizeof(cb_receive_enc));
+            B100_Url_Encode_QueryComponent(callback_gps_uri, cb_gps_enc, sizeof(cb_gps_enc));
+            B100_Url_Encode_QueryComponent(digest_user ? digest_user : "", cb_user_enc, sizeof(cb_user_enc));
+            B100_Url_Encode_QueryComponent(digest_password ? digest_password : "", cb_pass_enc, sizeof(cb_pass_enc));
+            B100_Url_Encode_QueryComponent(callback_ip ? callback_ip : "", cb_addr_enc, sizeof(cb_addr_enc));
+            B100_Url_Encode_QueryComponent(ip_addr, ip_addr_enc, sizeof(ip_addr_enc));
+            B100_Url_Encode_QueryComponent(gateway_addr, gw_addr_enc, sizeof(gw_addr_enc));
+            B100_Url_Encode_QueryComponent(dns_addr, dns_addr_enc, sizeof(dns_addr_enc));
+            B100_Url_Encode_QueryComponent(subnet_mask, subnet_enc, sizeof(subnet_enc));
+
+            char endpoint[1600];
+            snprintf(endpoint, sizeof(endpoint),
+                "/lan.html?dhcp_enable=%d"
+                "&ip_addr=%s&gateway_addr=%s&dns_addr=%s&subnet_mask=%s"
+                "&http_api_enable=1"
+                "&callback_addr=%s&callback_port=%d"
+                "&callback_status_uri=%s&callback_receive_uri=%s"
+                "&callback_gps_uri=%s&gps_update_interval=%d"
+                "&callback_digest_user=%s&callback_digest_password=%s",
+                dhcp_enable,
+                ip_addr_enc, gw_addr_enc, dns_addr_enc, subnet_enc,
+                cb_addr_enc, callback_port,
+                cb_status_enc, cb_receive_enc,
+                cb_gps_enc, gps_update_interval,
+                cb_user_enc, cb_pass_enc);
+
+            long lan_http_code = 0;
+            char* lan_response = http_get_ex(endpoint, &lan_http_code);
+            if (lan_response) free(lan_response);
+            if (lan_http_code == 200 || lan_http_code == 202) {
+                result = 1;
+                g_last_error[0] = '\0';
+                LOG("Callbacks configured via /lan.html fallback\n");
+            }
+
+            cJSON_Delete(current);
+        }
+    }
 
     if (result) {
         LOG("Callbacks configured: addr=%s:%d status=%s receive=%s user=%s\n",
