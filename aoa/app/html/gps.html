@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title></title>
+<link rel="stylesheet" href="css/bootstrap.min.css">
+<link rel="stylesheet" href="css/app.css">
+<script src="js/jquery-3.7.1.min.js"></script>
+<script src="js/bootstrap.bundle.min.js"></script>
+<script src="js/toast.js"></script>
+</head>
+<body>
+<header class="app-header">
+<div class="app-name" id="app-name">&nbsp;</div>
+<nav class="nav-bar">
+<a href="index.html">Publish</a>
+<a href="aoa.html">Counting</a>
+<a href="occupancy.html">Occupancy</a>
+<a href="bridge.html">LoRA Bridge</a>
+<a href="downlink.html">LoRA Downlink</a>
+<a href="gps.html" class="active">GPS</a>
+<a href="about.html">About</a>
+<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
+</nav>
+</header>
+
+<div class="page-content">
+<div class="row">
+
+<!-- Status + Position -->
+<div class="col-12 col-md-6">
+<div class="card mb-3">
+<div class="card-header d-flex justify-content-between align-items-center">
+<h5 class="card-title mb-0">GPS Status</h5>
+<span id="gps-status-badge" class="badge fs-6 px-3 py-2 bg-secondary">Checking...</span>
+</div>
+<div class="card-body">
+<div class="info-grid">
+<div class="info-row"><div class="info-label">Fix:</div><div class="info-value"><span id="gps-fix">-</span></div></div>
+<div class="info-row"><div class="info-label">Satellites:</div><div class="info-value"><span id="gps-nosv">-</span></div></div>
+<div class="info-row"><div class="info-label">UTC Time:</div><div class="info-value"><span id="gps-utc" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Date:</div><div class="info-value"><span id="gps-date" style="font-family:monospace">-</span></div></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- DOP -->
+<div class="col-12 col-md-6">
+<div class="card mb-3">
+<div class="card-header">
+<h5 class="card-title mb-0">Dilution of Precision</h5>
+</div>
+<div class="card-body">
+<div class="info-grid">
+<div class="info-row"><div class="info-label">PDOP:</div><div class="info-value"><span id="gps-pdop">-</span></div></div>
+<div class="info-row"><div class="info-label">HDOP:</div><div class="info-value"><span id="gps-hdop">-</span></div></div>
+<div class="info-row"><div class="info-label">VDOP:</div><div class="info-value"><span id="gps-vdop">-</span></div></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Position -->
+<div class="col-12 col-md-6">
+<div class="card mb-3">
+<div class="card-header">
+<h5 class="card-title mb-0">Position</h5>
+</div>
+<div class="card-body">
+<div class="info-grid">
+<div class="info-row"><div class="info-label">Latitude:</div><div class="info-value"><span id="gps-lat">-</span></div></div>
+<div class="info-row"><div class="info-label">Longitude:</div><div class="info-value"><span id="gps-lon">-</span></div></div>
+<div class="info-row"><div class="info-label">Altitude:</div><div class="info-value"><span id="gps-alt">-</span></div></div>
+</div>
+<div id="map-link-wrap" class="mt-2" style="display:none">
+<a id="map-link" href="#" target="_blank" class="btn btn-sm btn-outline-primary">Open in Maps</a>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Motion -->
+<div class="col-12 col-md-6">
+<div class="card mb-3">
+<div class="card-header">
+<h5 class="card-title mb-0">Motion</h5>
+</div>
+<div class="card-body">
+<div class="info-grid">
+<div class="info-row"><div class="info-label">Speed (SOG):</div><div class="info-value"><span id="gps-sog">-</span></div></div>
+<div class="info-row"><div class="info-label">Course (COG):</div><div class="info-value"><span id="gps-cog">-</span></div></div>
+</div>
+</div>
+</div>
+</div>
+
+</div>
+</div>
+
+<script>
+const GPS_STATUS = ['No antenna', 'No fix', '2D fix', '3D fix'];
+const GPS_STATUS_CLASS = ['bg-danger', 'bg-warning text-dark', 'bg-info', 'bg-success'];
+
+$(document).ready(function() {
+	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
+		success: function(data) {
+			document.title = data.manifest.acapPackageConf.setup.friendlyName;
+			$('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
+		}
+	});
+
+	function updateNavDot(data) {
+		const dot = $('#lora-nav-dot');
+		const lw = data && data.lorawan;
+		dot.removeClass('lora-joined lora-connected lora-disconnected');
+		if (lw && lw.joined)         dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+		else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+		else                         dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+	}
+
+	function formatDMS(decimal, posLabel, negLabel) {
+		const sign = decimal >= 0 ? posLabel : negLabel;
+		const abs = Math.abs(decimal);
+		const deg = Math.floor(abs);
+		const minFull = (abs - deg) * 60;
+		const min = Math.floor(minFull);
+		const sec = ((minFull - min) * 60).toFixed(2);
+		return deg + '\u00B0 ' + min + '\' ' + sec + '" ' + sign + '  (' + decimal.toFixed(6) + '\u00B0)';
+	}
+
+	function formatUTC(utcStr) {
+		// "HHMMSS.ss" → "HH:MM:SS"
+		if (!utcStr || utcStr.length < 6) return utcStr || '-';
+		return utcStr.substr(0, 2) + ':' + utcStr.substr(2, 2) + ':' + utcStr.substr(4, 2);
+	}
+
+	function formatDate(dateStr) {
+		// "DDMMYY" → "DD/MM/20YY"
+		if (!dateStr || dateStr.length < 6) return dateStr || '-';
+		return dateStr.substr(0, 2) + '/' + dateStr.substr(2, 2) + '/20' + dateStr.substr(4, 2);
+	}
+
+	function loadGPS() {
+		$.ajax({ type: 'GET', url: 'gps', dataType: 'json', cache: false,
+			success: function(g) {
+				const st = g.gps_status != null ? g.gps_status : -1;
+				const label = GPS_STATUS[st] || 'Unknown';
+				const badgeCls = GPS_STATUS_CLASS[st] || 'bg-secondary';
+				$('#gps-status-badge').text(label).attr('class', 'badge fs-6 px-3 py-2 ' + badgeCls);
+				$('#gps-fix').text(label);
+				$('#gps-nosv').text(g.nosv != null ? g.nosv : '-');
+				$('#gps-utc').text(formatUTC(g.utc));
+				$('#gps-date').text(formatDate(g.date));
+				$('#gps-pdop').text(g.pdop != null ? g.pdop.toFixed(2) : '-');
+				$('#gps-hdop').text(g.hdop != null ? g.hdop.toFixed(2) : '-');
+				$('#gps-vdop').text(g.vdop != null ? g.vdop.toFixed(2) : '-');
+
+				if (st >= 2 && (g.lat !== 0 || g.lon !== 0)) {
+					$('#gps-lat').text(formatDMS(g.lat, 'N', 'S'));
+					$('#gps-lon').text(formatDMS(g.lon, 'E', 'W'));
+					$('#gps-alt').text(g.alt != null ? g.alt.toFixed(1) + ' m' : '-');
+					const mapsUrl = 'https://www.openstreetmap.org/?mlat=' + g.lat + '&mlon=' + g.lon + '&zoom=15';
+					$('#map-link').attr('href', mapsUrl);
+					$('#map-link-wrap').show();
+				} else {
+					$('#gps-lat').text('No fix');
+					$('#gps-lon').text('No fix');
+					$('#gps-alt').text('-');
+					$('#map-link-wrap').hide();
+				}
+
+				$('#gps-sog').text(g.sog != null ? g.sog.toFixed(2) + ' kn' : '-');
+				$('#gps-cog').text(g.cog != null ? g.cog.toFixed(1) + '\u00B0' : '-');
+			},
+			error: function() {
+				$('#gps-status-badge').text('Unavailable').attr('class', 'badge fs-6 px-3 py-2 bg-danger');
+				$('#gps-fix').text('B100 not reachable');
+			}
+		});
+
+		$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
+			success: function(d) { updateNavDot(d); }
+		});
+	}
+
+	loadGPS();
+	setInterval(loadGPS, 10000);
+});
+</script>
+</body>
+</html>

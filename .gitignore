@@ -1,12 +1,14 @@
 # Built ACAP packages
-
+*.eap
+build/
 
 # Runtime / persisted state (not source)
 **/localdata/counters.json
 **/settings/state.json
 
-# Editor / OS
+# Editor / OS / tooling
 .vscode/
+**/.claude/settings.local.json
 *.swp
 *~
 .DS_Store

@@ -1,0 +1,64 @@
+{
+  "settingsVersion": 4,
+  "b100": {
+    "ip": "192.168.1.250",
+    "port": 80,
+    "timeout": 30,
+    "callbackIP": "192.168.1.200",
+    "callbackPort": 80,
+    "callbackDigestUser": "aib100",
+    "callbackDigestPassword": "aib100"
+  },
+  "lorawan": {
+    "port": 1,
+    "confirmed": false,
+    "dataRate": 4,
+    "autoJoin": true
+  },
+  "transmission": {
+    "counting": {
+      "enabled": true,
+      "intervalMinutes": 15,
+      "port": 1,
+      "classes": {
+        "human": true,
+        "car": true,
+        "bike": true,
+        "bus": true,
+        "truck": true,
+        "other": true
+      },
+      "scenarios": {}
+    },
+    "occupancy": {
+      "enabled": false,
+      "intervalMinutes": 15,
+      "port": 2,
+      "value": "average",
+      "classes": {
+        "human": true,
+        "car": true,
+        "bike": true,
+        "bus": true,
+        "truck": true,
+        "other": true
+      },
+      "scenarios": {}
+    }
+  },
+  "polling": {
+    "healthCheckIntervalSeconds": 60
+  },
+  "lines": [],
+  "downlinkCommands": [
+    { "port": 100, "byte": 1, "enabled": true  },
+    { "port": 100, "byte": 2, "enabled": true  },
+    { "port": 100, "byte": 3, "enabled": true  },
+    { "port": 110, "byte": 1, "enabled": true  },
+    { "port": 110, "byte": 2, "enabled": true  },
+    { "port": 110, "byte": 3, "enabled": true  },
+    { "port": 120, "byte": 1, "enabled": true  },
+    { "port": 120, "byte": 2, "enabled": true  },
+    { "port": 120, "byte": 3, "enabled": true  }
+  ]
+}
