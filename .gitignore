@@ -12,3 +12,6 @@ build/
 *.swp
 *~
 .DS_Store
+
+# Build staging (overlay of common/app + app/)
+.stage/

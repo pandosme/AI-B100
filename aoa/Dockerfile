@@ -11,7 +11,7 @@ FROM ${REPO}/${SDK}:${VERSION}-${ARCH}-ubuntu${UBUNTU_VERSION}
 #-------------------------------------------------------------------------------
 
 WORKDIR /opt/app
-COPY ./app .
+COPY ./.stage .
 ARG CHIP=
 
 RUN . /opt/axis/acapsdk/environment-setup* && acap-build . \
