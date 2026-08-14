@@ -115,7 +115,7 @@ Each use case has a fixed LoRaWAN port, so compact payloads do not include a mod
 
 The decoder is available in two places:
 
-- [translator.js](translator.js)
+- [decoder/](decoder/), which holds a generated uplink decoder sample plus the OTA translators for the Radar (`130`), Occupancy (`132`), and Detection Alert (`133`) configuration ports
 - **Publish** or **About** page in the ACAP UI, using **Download JavaScript Translator**
 
 Download a fresh translator after changing enabled use cases, labels, Occupancy type, or area settings.
@@ -270,8 +270,8 @@ cd radar
 
 Output:
 
-- `AI-B100_Radar_1_2_0_aarch64.eap`
-- `AI-B100_Radar_1_2_0_armv7hf.eap`
+- `AI-B100_Radar_1_3_0_aarch64.eap`
+- `AI-B100_Radar_1_3_0_armv7hf.eap`
 
 Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
 
@@ -280,7 +280,7 @@ Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 came
 Upload the correct `.eap` file through the Axis camera Apps page, or use the helper script:
 
 ```bash
-./install.sh <camera-host> AI-B100_Radar_1_2_0_aarch64.eap
+./install.sh <camera-host> AI-B100_Radar_1_3_0_aarch64.eap
 ```
 
 If an older `radaroccupancy` package is still installed, remove it before using this package. Both the Radar and AOA variants now use `appName: "aib100"`; this is intentional so settings and callback paths are reused.

@@ -89,8 +89,8 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 2. Install the ACAP variant that matches the device and use case:
    - `aoa/AI-B100_AOA_1_2_0_aarch64.eap` for AOA on ARTPEC-8 and ARTPEC-9 cameras
    - `aoa/AI-B100_AOA_1_2_0_armv7hf.eap` for AOA on ARTPEC-7 cameras
-   - `radar/AI-B100_Radar_1_2_0_aarch64.eap` for Radar on ARTPEC-8 and ARTPEC-9 cameras
-   - `radar/AI-B100_Radar_1_2_0_armv7hf.eap` for Radar on ARTPEC-7 cameras
+   - `radar/AI-B100_Radar_1_3_0_aarch64.eap` for Radar on ARTPEC-8 and ARTPEC-9 cameras
+   - `radar/AI-B100_Radar_1_3_0_armv7hf.eap` for Radar on ARTPEC-7 cameras
 3. For AOA deployments, start **AXIS Object Analytics**. For Radar deployments, verify that radar analytics are available on the camera.
 4. Go to **System → Accounts → Add Account**. The AI-B100 needs credentials to make HTTP callbacks to the camera.
    - Set username and password with **Viewer** privileges. If this password is compromised, the user can only view video.

@@ -107,7 +107,7 @@ Current package outputs:
 | App | ARTPEC-8/9 | ARTPEC-7 |
 | --- | --- | --- |
 | AOA | `AI-B100_AOA_1_2_0_aarch64.eap` | `AI-B100_AOA_1_2_0_armv7hf.eap` |
-| Radar | `AI-B100_Radar_1_2_0_aarch64.eap` | `AI-B100_Radar_1_2_0_armv7hf.eap` |
+| Radar | `AI-B100_Radar_1_3_0_aarch64.eap` | `AI-B100_Radar_1_3_0_armv7hf.eap` |
 
 Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
 

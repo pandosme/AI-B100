@@ -41,10 +41,10 @@ ai-b100/
 |       |-- settings/    # settings.json, state.json, events.json, subscriptions.json
 |       `-- localdata/   # persisted counters
 |-- radar/
-|   |-- AI-B100_Radar_1_2_0_aarch64.eap
-|   |-- AI-B100_Radar_1_2_0_armv7hf.eap
+|   |-- AI-B100_Radar_1_3_0_aarch64.eap
+|   |-- AI-B100_Radar_1_3_0_armv7hf.eap
 |   |-- build.sh / install.sh / Dockerfile / README.md
-|   |-- translator.js
+|   |-- decoder/        # OTA translators (ports 130/132/133) and a generated uplink decoder sample
 |   `-- app/
 |       |-- main.c, B100.c/h, ACAP.c/h, cJSON.c/h
 |       |-- counting.c/h, occupancy.c/h, alert.c/h
@@ -210,8 +210,8 @@ Friendly name: **AI-B100 Radar**
 
 Package outputs:
 
-- `AI-B100_Radar_1_2_0_aarch64.eap`
-- `AI-B100_Radar_1_2_0_armv7hf.eap`
+- `AI-B100_Radar_1_3_0_aarch64.eap`
+- `AI-B100_Radar_1_3_0_armv7hf.eap`
 
 ### Radar Use Cases
 
@@ -278,7 +278,7 @@ The Radar config body is 8 bytes: `version`, `fieldMask` as uint16 BE, `detectio
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
 | `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
 
-The static `radar/translator.js` and generated `/translator` output must match this contract. Do not re-add `Occupancy Area Balance` or a two-byte port 2 decoder branch while the use case is hidden.
+The reference decoders in `radar/decoder/` and the generated `/translator` output must match this contract. Do not re-add `Occupancy Area Balance` or a two-byte port 2 decoder branch while the use case is hidden.
 
 ### Radar Timer Model
 
