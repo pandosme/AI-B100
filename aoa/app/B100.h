@@ -48,6 +48,7 @@ typedef struct {
     // LoRaWAN Status
     int joined;                 // 1 if joined to network, 0 otherwise
     int statusCode;             // Status code (see B100_STATUS_* defines)
+    int hasStatusCode;          // 1 after status callback supplied statusCode
     char statusText[128];       // Human-readable status
     
     // Device Identity (from /info)
@@ -58,21 +59,28 @@ typedef struct {
     
     // LoRaWAN Parameters
     int dataRate;               // Current uplink data rate (0-5)
+    int hasDataRate;            // 1 after callback supplied data rate
     int maxPayload;             // Maximum payload size in bytes
+    int hasMaxPayload;          // 1 after callback supplied max payload
     int adr;                    // Adaptive Data Rate enabled (1) or not (0)
     
     // Frame Counters
     unsigned int fcntUp;        // Uplink frame counter
+    int hasFcntUp;              // 1 after callback supplied uplink counter
     unsigned int fcntDown;      // Downlink frame counter
+    int hasFcntDown;            // 1 after receive callback supplied downlink counter
     
     // Signal Quality
     float rssi;                 // RSSI in dBm
+    int hasRssi;                // 1 after receive callback supplied RSSI
     float snr;                  // SNR in dB
+    int hasSnr;                 // 1 after receive callback supplied SNR
     
     // Timing
     int confirmed;              // Last message was confirmed
     unsigned long tUnix;        // Network UTC time (0 if not synced)
     unsigned long nextUploadMs; // ms until next upload allowed (duty cycle)
+    int hasNextUploadMs;        // 1 after callback supplied duty-cycle delay
     unsigned long receiveTUnix; // Wall-clock time of last receive callback
     
     // Device Info (from /info endpoint)
@@ -93,7 +101,9 @@ typedef struct {
 
     // Linkcheck results (from receive callback)
     int margin;                 // Link margin from linkcheck
+    int hasMargin;              // 1 after receive/linkcheck callback supplied margin
     int gwCount;                // Gateway count from linkcheck
+    int hasGwCount;             // 1 after receive/linkcheck callback supplied gateway count
 } B100_Status;
 
 // GPS position structure (from /gps endpoint and GPS callback)
