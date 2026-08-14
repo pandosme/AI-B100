@@ -102,6 +102,8 @@ cd ../radar
 ./build.sh
 ```
 
+Each build stages [common/app](common/app) and then the app's own `app/` directory on top, so both apps always compile against the same platform layer. Shared files are edited in `common/app` only; the build refuses to run if an app keeps its own copy of one.
+
 Current package outputs:
 
 | App | ARTPEC-8/9 | ARTPEC-7 |
@@ -117,8 +119,9 @@ Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 came
 
 | Path | Purpose |
 | --- | --- |
-| [aoa/](aoa/) | AI-B100 AOA ACAP source, UI, settings, build script, and packages |
-| [radar/](radar/) | AI-B100 Radar ACAP source, UI, settings, build script, decoder, and packages |
+| [common/](common/) | Platform layer shared by every app: `ACAP.*`, `B100.*`, `cJSON.*`, web assets, and the build driver |
+| [aoa/](aoa/) | AI-B100 AOA app-specific source, UI, settings, build script, and packages |
+| [radar/](radar/) | AI-B100 Radar app-specific source, UI, settings, build script, decoder, and packages |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Shared field deployment guide |
 | [Customization.md](Customization.md) | Notes for cloning and adapting an ACAP variant |
 | [http_api.md](http_api.md) | AI-B100 HTTP API notes |

@@ -30,33 +30,63 @@ ai-b100/
 |-- DEPLOYMENT.md
 |-- Customization.md
 |-- http_api.md
+|-- common/                 # shared by every app; see section 2.1
+|   |-- build.sh            # real build driver, staging overlay
+|   |-- check-shared.sh     # fails the build on shadowed shared files
+|   `-- app/
+|       |-- ACAP.c/h, B100.c/h, cJSON.c/h, LICENSE
+|       |-- html/css/       # app.css, bootstrap.min.css
+|       |-- html/js/        # jquery, bootstrap, media-stream-player, toast.js, events.js
+|       `-- settings/       # events.json
 |-- aoa/
-|   |-- AI-B100_AOA_1_2_0_aarch64.eap
-|   |-- AI-B100_AOA_1_2_0_armv7hf.eap
 |   |-- build.sh / install.sh / Dockerfile / README.md
 |   `-- app/
-|       |-- main.c, B100.c/h, ACAP.c/h, cJSON.c/h, counter.c/h, occupancy.c/h
+|       |-- main.c, counter.c/h, occupancy.c/h
 |       |-- manifest.json, Makefile
-|       |-- html/        # Publish, Counting, Occupancy, Bridge, Downlink, GPS, About
-|       |-- settings/    # settings.json, state.json, events.json, subscriptions.json
-|       `-- localdata/   # persisted counters
+|       |-- html/           # Publish, Counting, Occupancy, Bridge, Downlink, GPS, About
+|       |-- settings/       # settings.json, state.json, subscriptions.json
+|       `-- localdata/      # persisted counters
 |-- radar/
-|   |-- AI-B100_Radar_1_3_0_aarch64.eap
-|   |-- AI-B100_Radar_1_3_0_armv7hf.eap
 |   |-- build.sh / install.sh / Dockerfile / README.md
-|   |-- decoder/        # OTA translators (ports 130/132/133) and a generated uplink decoder sample
+|   |-- decoder/            # OTA translators (ports 130/132/133) and a generated uplink decoder sample
 |   `-- app/
-|       |-- main.c, B100.c/h, ACAP.c/h, cJSON.c/h
-|       |-- counting.c/h, occupancy.c/h, alert.c/h
+|       |-- main.c, counting.c/h, occupancy.c/h, alert.c/h
 |       |-- RadarDetection.*, radarscene.pb-c.*, protobuf-c.*
 |       |-- manifest.json, Makefile
-|       |-- html/        # Publish, Occupancy, Detection Alert, Radar, Bridge, Downlink, GPS, About
+|       |-- html/           # Publish, Occupancy, Detection Alert, Radar, Bridge, Downlink, GPS, About
 |       |-- settings/
 |       `-- localdata/
 `-- images/
 ```
 
-Historical files named `lorawan-counter/` or `AI-B100_AOA_Counter_0_5_0_*` are stale references and should not be reintroduced.
+Built `.eap` packages land in each app directory and are gitignored. Historical files named `lorawan-counter/` or `AI-B100_AOA_Counter_0_5_0_*` are stale references and should not be reintroduced.
+
+### 2.1 The common/ Overlay
+
+Every app shares one copy of the platform layer. There is no per-app copy of `ACAP.c`, `B100.c`, `cJSON.c`, or the web assets.
+
+The ACAP SDK requires a single flat source directory, so the build assembles one:
+
+1. `common/app` is copied into the app's `.stage/`.
+2. The app's own `app/` is copied on top, so app-specific files win.
+3. Docker builds `.stage/`. It is gitignored and removed after a successful build.
+
+Each app's `build.sh` is a wrapper around `common/build.sh`. The documented workflow is unchanged: `cd aoa && ./build.sh`.
+
+Because the overlay lets an app-local file silently shadow a shared one, `common/check-shared.sh` runs first and fails the build if any app keeps its own copy of a file that exists in `common/app`. This is not hypothetical: AOA and Radar previously drifted for months, always with Radar ahead, and nothing caught it.
+
+**Rule: shared files are edited in `common/app` only.** A fix belonging to the platform layer goes there so every app gets it. Never copy a shared file back into an app directory to make a local change.
+
+### 2.2 Adding A New App
+
+1. Create `<name>/` with `app/`, `Dockerfile`, `install.sh`, `README.md`.
+2. Copy an existing app's `build.sh` wrapper verbatim.
+3. In the `Dockerfile`, keep `COPY ./.stage .`.
+4. Put only app-specific sources in `<name>/app/`: `main.c`, use-case modules, `manifest.json`, `Makefile`, `settings/settings.json`, `settings/subscriptions.json`, `localdata/`, and the HTML pages.
+5. Do not copy `ACAP.*`, `B100.*`, `cJSON.*`, `LICENSE`, `settings/events.json`, or anything under `html/css` and `html/js`. The overlay supplies them, and `check-shared.sh` rejects local copies.
+6. List the app's own sources in the `Makefile` `OBJS1` line. The shared C files still need naming there (`ACAP.c cJSON.c B100.c`) because they are staged into the same flat directory.
+
+The new app then tracks the latest shared platform automatically.
 
 ---
 
@@ -115,10 +145,10 @@ Recent B100 clients in both ACAPs are callback-driven. Bridge status, receive/do
 
 Both apps are C ACAP applications using:
 
-- `main.c` for settings, runtime threads, HTTP handlers, payload encoding, and decoder generation.
-- `B100.c/h` for AI-B100 bridge HTTP calls and callback parsing.
-- `ACAP.c/h` for Axis settings/status/events/HTTP wrapper behavior.
-- `cJSON.c/h` for JSON parsing and generation.
+- `main.c` for settings, runtime threads, HTTP handlers, payload encoding, and decoder generation. Per-app.
+- `B100.c/h` for AI-B100 bridge HTTP calls and callback parsing. Shared, in `common/app`.
+- `ACAP.c/h` for Axis settings/status/events/HTTP wrapper behavior. Shared, in `common/app`.
+- `cJSON.c/h` for JSON parsing and generation. Shared, in `common/app`.
 - Bootstrap 5 and jQuery in the static HTML UI.
 - Docker based ACAP SDK builds for `aarch64` and `armv7hf`.
 
@@ -353,4 +383,5 @@ Install through the Axis camera Apps page or the app-specific `install.sh` helpe
 8. For Radar, do not couple Detection Alert settings updates to Occupancy timer resets.
 9. When editing shared runtime state in C, hold the appropriate mutex (`g_publish_mutex`, counter/radar locks, or module-specific locks as used locally).
 10. Rebuild the affected app with `./build.sh` after backend, packaged UI, manifest, settings, or decoder-generation changes.
-11. Do not commit changes unless the user explicitly asks.
+11. Edit shared files in `common/app` only, and never create an app-local copy of one. A change to `ACAP.*`, `B100.*`, `cJSON.*`, or a shared web asset affects every app, so rebuild and check all of them, not just the one being worked on.
+12. Do not commit changes unless the user explicitly asks.
