@@ -7,22 +7,15 @@
 <link rel="stylesheet" href="css/bootstrap.min.css">
 <link rel="stylesheet" href="css/app.css">
 <script src="js/jquery-3.7.1.min.js"></script>
+<script src="js/pages.js"></script>
+<script src="js/chrome.js"></script>
 <script src="js/bootstrap.bundle.min.js"></script>
 <script src="js/toast.js"></script>
 </head>
 <body>
 <header class="app-header">
 <div class="app-name" id="app-name">&nbsp;</div>
-<nav class="nav-bar">
-<a href="index.html">Publish</a>
-<a href="aoa.html">Counting</a>
-<a href="occupancy.html">Occupancy</a>
-<a href="bridge.html" class="active">LoRA Bridge</a>
-<a href="downlink.html">LoRA Downlink</a>
-<a href="gps.html">GPS</a>
-<a href="about.html">About</a>
-<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
-</nav>
+<nav class="nav-bar" id="nav-bar"></nav>
 </header>
 
 <div class="page-content">
@@ -33,7 +26,10 @@
 <div class="card mb-3">
 <div class="card-header d-flex justify-content-between align-items-center">
 <h5 class="card-title mb-0">Status</h5>
-<span id="status-badge" class="badge fs-6 px-3 py-2">Checking...</span>
+<div class="d-flex gap-2">
+<button id="btn-linkcheck" class="btn btn-info btn-sm">Link Check</button>
+<button id="btn-restart" class="btn btn-warning btn-sm">Restart Bridge</button>
+</div>
 </div>
 <div class="card-body">
 <div class="row">
@@ -44,6 +40,7 @@
 <div class="info-row"><div class="info-label">Bridge HTTP:</div><div class="info-value"><span id="s-connection">Checking...</span></div></div>
 <div class="info-row"><div class="info-label">LoRaWAN:</div><div class="info-value"><span id="s-joined">Unknown</span></div></div>
 <div class="info-row"><div class="info-label">Callbacks:</div><div class="info-value"><span id="s-callbacks">-</span></div></div>
+<div class="info-row"><div class="info-label">HTTP API:</div><div class="info-value"><span id="s-httpapi">-</span></div></div>
 <div class="info-row"><div class="info-label">Status:</div><div class="info-value"><span id="s-status-text">-</span></div></div>
 </div>
 </div>
@@ -56,7 +53,7 @@
 <div class="info-row"><div class="info-label">Max Payload:</div><div class="info-value"><span id="s-maxpayload">-</span></div></div>
 <div class="info-row"><div class="info-label">Frame Up:</div><div class="info-value"><span id="s-fcntup">-</span></div></div>
 <div class="info-row"><div class="info-label">Duty Cycle:</div><div class="info-value"><span id="s-dutycycle">-</span></div></div>
-<div class="info-row"><div class="info-label">Last Uplink:</div><div class="info-value"><span id="s-uplink-time">-</span></div></div>
+<div class="info-row"><div class="info-label">Network Time:</div><div class="info-value"><span id="s-uplink-time">-</span></div></div>
 </div>
 </div>
 <!-- Downlink & Signal -->
@@ -66,6 +63,7 @@
 <div class="info-row"><div class="info-label">RSSI:</div><div class="info-value"><span id="s-rssi">-</span></div></div>
 <div class="info-row"><div class="info-label">SNR:</div><div class="info-value"><span id="s-snr">-</span></div></div>
 <div class="info-row"><div class="info-label">Frame Down:</div><div class="info-value"><span id="s-fcntdown">-</span></div></div>
+<div class="info-row"><div class="info-label">Last Port:</div><div class="info-value"><span id="s-downlink-port">-</span></div></div>
 <div class="info-row"><div class="info-label">Last Downlink:</div><div class="info-value"><span id="s-downlink-time">-</span></div></div>
 <div class="info-row"><div class="info-label">Link Margin:</div><div class="info-value"><span id="s-margin">-</span></div></div>
 <div class="info-row"><div class="info-label">Gateways:</div><div class="info-value"><span id="s-gwcount">-</span></div></div>
@@ -75,8 +73,6 @@
 </div>
 <div class="card-footer">
 <button id="btn-join" class="btn btn-primary btn-sm">Join Network</button>
-<button id="btn-linkcheck" class="btn btn-info btn-sm">Link Check</button>
-<button id="btn-restart" class="btn btn-warning btn-sm">Restart Bridge</button>
 </div>
 </div>
 
@@ -222,6 +218,11 @@
 <div class="info-row"><div class="info-label">Restart Count:</div><div class="info-value"><span id="d-restarts">-</span></div></div>
 <div class="info-row"><div class="info-label">MQTT:</div><div class="info-value"><span id="d-mqtt">-</span></div></div>
 <div class="info-row"><div class="info-label">HTTP API:</div><div class="info-value"><span id="d-httpapi">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback Addr:</div><div class="info-value"><span id="d-cbaddr" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback Port:</div><div class="info-value"><span id="d-cbport" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Callback User:</div><div class="info-value"><span id="d-cbuser" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Status URI:</div><div class="info-value"><span id="d-cbstatusuri" style="font-family:monospace">-</span></div></div>
+<div class="info-row"><div class="info-label">Receive URI:</div><div class="info-value"><span id="d-cbreceiveuri" style="font-family:monospace">-</span></div></div>
 <div class="info-row"><div class="info-label">Network Time:</div><div class="info-value"><span id="d-time">-</span></div></div>
 <div class="info-row"><div class="info-label">Tamper:</div><div class="info-value"><span id="d-tamper">-</span></div></div>
 </div>
@@ -237,6 +238,8 @@ const drLabels = ['DR0 \u2014 SF12', 'DR1 \u2014 SF11', 'DR2 \u2014 SF10', 'DR3 
 
 $(document).ready(function() {
 
+let callbackRequestInProgress = false;
+
 $.ajax({
 type: "GET",
 url: 'app',
@@ -247,6 +250,7 @@ document.title = data.manifest.acapPackageConf.setup.friendlyName;
 $('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
 loadSettings(data.settings);
 loadBridgeStatus();
+loadB100Info();
 loadB100Params();
 },
 error: function(response) {
@@ -277,6 +281,43 @@ snr:  (snrLevels.find(l => snr  >= l.min) || snrLevels[4]).label
 };
 }
 
+function hasValue(value) {
+return value !== undefined && value !== null && value !== '';
+}
+
+function statusCodeText(lw) {
+if (!lw) return '-';
+if (hasValue(lw.statusText)) return lw.statusText;
+if (hasValue(lw.statusCode)) return 'Code ' + lw.statusCode;
+return '-';
+}
+
+function signalValueText(value, unit, quality) {
+if (!hasValue(value)) return '-';
+return value + ' ' + unit + (quality ? ' - ' + quality : '');
+}
+
+function pollBridgeStatus(count, delayMs) {
+let checksRemaining = count;
+const checkTimer = setInterval(function() {
+loadBridgeStatus();
+checksRemaining--;
+if (checksRemaining <= 0) clearInterval(checkTimer);
+}, delayMs);
+}
+
+function shouldRepairCallbacks(data) {
+const br = data && data.bridge;
+if (!br || !br.connected) return false;
+return !br.callbacksActive;
+}
+
+function maybeRepairCallbacks(data) {
+if (!shouldRepairCallbacks(data)) return;
+if (callbackRequestInProgress) return;
+configureCallbacksNow(false);
+}
+
 function loadBridgeStatus() {
 $.ajax({
 type: "GET",
@@ -300,6 +341,7 @@ $('#d-deveui').text(br.devEUI || '-');
 $('#d-restarts').text(br.restartCounter != null ? br.restartCounter : '-');
 $('#d-mqtt').text(br.mqttEnabled ? 'Enabled' : 'Disabled');
 $('#d-httpapi').text(br.httpApiEnabled ? 'Enabled' : 'Disabled');
+$('#s-httpapi').text(br.httpApiEnabled ? 'Enabled' : 'Disabled').css('color', br.httpApiEnabled ? 'green' : 'orange');
 const callbackFailed = br.callbackStatus === 'fail';
 const callbacksConfigured = !!br.callbacksActive;
 $('#s-callbacks').text(callbacksConfigured ? 'Active' : (callbackFailed ? 'B100 reports fail' : 'Not configured'))
@@ -310,23 +352,23 @@ $('#d-time').text(new Date(br.tUnix * 1000).toLocaleString());
 $('#d-time').text('Not synchronized');
 }
 $('#d-tamper').text(br.tamper ? 'TAMPERED' : 'OK').css('color', br.tamper ? 'red' : 'green');
+} else {
+$('#s-httpapi').text('-').css('color', '');
+$('#s-callbacks').text('-').css('color', '');
 }
 
 // ---- LoRaWAN status ----
 const lw = data.lorawan;
-const badge = $('#status-badge');
 if (lw && lw.connected) {
 if (lw.joined) {
-badge.text('Joined').removeClass('bg-secondary bg-danger bg-warning').addClass('bg-success');
 $('#s-joined').text('Joined').css('color', 'green');
 $('#btn-join').hide();
 } else {
-badge.text('Not Joined').removeClass('bg-secondary bg-success bg-danger').addClass('bg-warning text-dark');
 $('#s-joined').text('Not joined').css('color', 'orange');
 $('#btn-join').show();
 }
 $('#s-connection').text('Connected').css('color', 'green');
-$('#s-status-text').text(lw.statusText || '-');
+$('#s-status-text').text(statusCodeText(lw));
 $('#s-devaddr').text(lw.devAddr || (br && br.devAddr) || '-');
 
 const drText = lw.dataRate != null ? (drLabels[lw.dataRate] || 'DR' + lw.dataRate) : '-';
@@ -335,46 +377,68 @@ $('#s-maxpayload').text(lw.maxPayload != null ? lw.maxPayload + ' bytes' : '-');
 $('#s-fcntup').text(lw.fcntUp != null ? lw.fcntUp : '-');
 $('#s-fcntdown').text(lw.fcntDown != null ? lw.fcntDown : '-');
 
-if (lw.rssi != null || lw.snr != null) {
-const rq = signalQuality(lw.rssi, lw.snr);
-$('#s-rssi').text(lw.rssi + ' dBm \u2014 ' + rq.rssi);
-$('#s-snr').text(lw.snr + ' dB \u2014 ' + rq.snr);
+if (hasValue(lw.rssi) || hasValue(lw.snr)) {
+const rq = signalQuality(hasValue(lw.rssi) ? lw.rssi : -999, hasValue(lw.snr) ? lw.snr : -99);
+$('#s-rssi').text(signalValueText(lw.rssi, 'dBm', hasValue(lw.rssi) ? rq.rssi : ''));
+$('#s-snr').text(signalValueText(lw.snr, 'dB', hasValue(lw.snr) ? rq.snr : ''));
 } else {
 $('#s-rssi').text('-');
 $('#s-snr').text('-');
 }
 
-if (lw.nextUploadMs > 0) {
+if (hasValue(lw.nextUploadMs) && lw.nextUploadMs > 0) {
 $('#s-dutycycle').text((lw.nextUploadMs / 1000).toFixed(1) + 's until ready').css('color', '#fd7e14');
-} else {
+} else if (hasValue(lw.nextUploadMs)) {
 $('#s-dutycycle').text('Ready').css('color', 'green');
+} else {
+$('#s-dutycycle').text('-').css('color', '');
 }
 
 if (lw.tUnix && lw.tUnix > 0)
 $('#s-uplink-time').text(new Date(lw.tUnix * 1000).toLocaleString());
+else
+$('#s-uplink-time').text('-');
+if (lw.lastDownlinkPort != null)
+$('#s-downlink-port').text(lw.lastDownlinkPort);
+else
+$('#s-downlink-port').text('-');
 if (lw.downlinkTUnix && lw.downlinkTUnix > 0)
 $('#s-downlink-time').text(new Date(lw.downlinkTUnix * 1000).toLocaleString());
-if (lw.margin != null && lw.margin !== 0)
+else
+$('#s-downlink-time').text('-');
+if (lw.margin != null)
 $('#s-margin').text(lw.margin + ' dB');
 else
 $('#s-margin').text('-');
-if (lw.gwCount != null && lw.gwCount > 0)
+if (lw.gwCount != null)
 $('#s-gwcount').text(lw.gwCount);
 else
 $('#s-gwcount').text('-');
 
 } else {
-badge.text('Disconnected').removeClass('bg-success bg-warning bg-secondary').addClass('bg-danger');
 $('#s-connection').text('Disconnected').css('color', 'red');
 $('#s-joined').text('Unknown').css('color', '');
 $('#s-status-text').text('-');
+$('#s-devaddr').text('-');
+$('#s-dr').text('-');
+$('#s-maxpayload').text('-');
+$('#s-fcntup').text('-');
+$('#s-fcntdown').text('-');
+$('#s-rssi').text('-');
+$('#s-snr').text('-');
+$('#s-dutycycle').text('-').css('color', '');
+$('#s-uplink-time').text('-');
+$('#s-downlink-port').text('-');
+$('#s-downlink-time').text('-');
+$('#s-margin').text('-');
+$('#s-gwcount').text('-');
 $('#btn-join').show();
 }
+maybeRepairCallbacks(data);
 },
 error: function() {
 updateNavDot(null);
 $('#s-connection').text('Error').css('color', 'red');
-$('#status-badge').text('Error').removeClass('bg-success bg-warning bg-secondary').addClass('bg-danger');
 }
 });
 }
@@ -397,6 +461,11 @@ $('#d-deveui').text(info.dev_eui || '-');
 $('#d-restarts').text(info.restart_counter != null ? info.restart_counter : '-');
 $('#d-mqtt').text(info.mqtt_enable ? 'Enabled' : 'Disabled');
 $('#d-httpapi').text(info.http_api_enable ? 'Enabled' : 'Disabled');
+$('#d-cbaddr').text(info.callback_configured_addr || '-');
+$('#d-cbport').text(info.callback_configured_port != null ? info.callback_configured_port : '-');
+$('#d-cbuser').text(info.callback_digest_user || '-');
+$('#d-cbstatusuri').text(info.callback_status_uri || '-');
+$('#d-cbreceiveuri').text(info.callback_receive_uri || '-');
 const infoCallbackFailed = info.callback === 'fail';
 $('#s-callbacks').text(info.callbacks_active ? 'Active' : (infoCallbackFailed ? 'B100 reports fail' : 'Not configured'))
 .css('color', info.callbacks_active ? 'green' : (infoCallbackFailed ? '#fd7e14' : 'orange'));
@@ -463,10 +532,37 @@ callbackDigestPassword: $('#callback-password').val()
 }),
 polling: { healthCheckIntervalSeconds: parseInt($('#polling-health').val()) }
 }),
-success: function() { showToast("Settings saved", 'success'); },
+success: function() {
+showToast("Settings saved", 'success');
+configureCallbacksNow();
+},
 error: function(xhr, status, error) { showToast("Failed to save settings: " + error, 'danger'); }
 });
 });
+
+function configureCallbacksNow(showNotifications) {
+if (callbackRequestInProgress) return;
+callbackRequestInProgress = true;
+$.ajax({
+type: "POST",
+url: "b100_request_status",
+success: function() {
+if (showNotifications !== false) showToast("Callback API request sent", 'success');
+loadBridgeStatus();
+loadB100Info();
+loadB100Params();
+pollBridgeStatus(6, 3000);
+},
+error: function(xhr) {
+if (showNotifications !== false) showToast("Callback API request failed: " + xhr.responseText, 'danger');
+loadBridgeStatus();
+loadB100Info();
+},
+complete: function() {
+setTimeout(function() { callbackRequestInProgress = false; }, 3000);
+}
+});
+}
 
 $('#save-b100-params').on('click', function() {
 $.ajax({

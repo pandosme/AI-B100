@@ -7,6 +7,8 @@
 	<link rel="stylesheet" href="css/bootstrap.min.css">
 	<link rel="stylesheet" href="css/app.css">
 	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/pages.js"></script>
+	<script src="js/chrome.js"></script>
 	<script src="js/bootstrap.bundle.min.js"></script>
 	<script src="js/media-stream-player.min.js"></script>
 	<script src="js/toast.js"></script>
@@ -31,17 +33,7 @@
 <body>
 	<header class="app-header">
 		<div class="app-name" id="app-name">&nbsp;</div>
-		<nav class="nav-bar">
-			<a href="index.html">Publish</a>
-			<a href="occupancy.html">Occupancy</a>
-			<a href="alert.html">Detection Alert</a>
-			<a href="aoa.html" class="active">Radar</a>
-			<a href="bridge.html">LoRA Bridge</a>
-			<a href="downlink.html">LoRA Downlink</a>
-			<a href="gps.html">GPS</a>
-			<a href="about.html">About</a>
-			<span id="lora-nav-dot" class="lora-nav-dot" title="LoRaWAN status">&#9679; LoRa</span>
-		</nav>
+		<nav class="nav-bar" id="nav-bar"></nav>
 	</header>
 
 	<div class="page-content">
