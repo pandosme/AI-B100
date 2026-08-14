@@ -35,8 +35,9 @@ ai-b100/
 |   |-- check-shared.sh     # fails the build on shadowed shared files
 |   `-- app/
 |       |-- ACAP.c/h, B100.c/h, cJSON.c/h, LICENSE
+|       |-- html/           # bridge.html, gps.html
 |       |-- html/css/       # app.css, bootstrap.min.css
-|       |-- html/js/        # jquery, bootstrap, media-stream-player, toast.js, events.js
+|       |-- html/js/        # jquery, bootstrap, media-stream-player, toast.js, events.js, chrome.js
 |       `-- settings/       # events.json
 |-- aoa/
 |   |-- build.sh / install.sh / Dockerfile / README.md
@@ -77,14 +78,41 @@ Because the overlay lets an app-local file silently shadow a shared one, `common
 
 **Rule: shared files are edited in `common/app` only.** A fix belonging to the platform layer goes there so every app gets it. Never copy a shared file back into an app directory to make a local change.
 
+### 2.1.1 The Nav Bar
+
+The nav bar is not markup in the pages. `common/app/html/js/chrome.js` renders it from `NAV_PAGES`, which each app declares in its own `html/js/pages.js` as an array of `{ href, label }`. This is what lets `bridge.html` and `gps.html` be shared at all: their only app-specific content was the nav.
+
+Every page therefore needs:
+
+```html
+<script src="js/jquery-3.7.1.min.js"></script>
+<script src="js/pages.js"></script>
+<script src="js/chrome.js"></script>
+```
+
+and an empty `<nav class="nav-bar" id="nav-bar"></nav>` in the header. Load order matters: `chrome.js` registers its ready handler before the page's own scripts, so the nav and `#lora-nav-dot` exist by the time page code runs.
+
+To add, rename, hide, or reorder a page in the nav, edit that app's `pages.js`. Do not put `<a>` tags back into the pages. Radar's `counting.html` is deliberately absent from `NAV_PAGES` because the Counting use case must stay hidden.
+
+Pages that are shared vs per-app:
+
+| Page | Where | Why |
+| --- | --- | --- |
+| `bridge.html`, `gps.html` | `common/app/html/` | Pure platform, no app-specific content |
+| `downlink.html` | per-app | Command tables differ; Radar has OTA ports 130/132/133 |
+| `about.html` | per-app | AOA's installation report queries AXIS Object Analytics |
+| `advanced.html` | per-app | AOA loads counters, Radar loads detection sensitivity |
+| Use-case pages | per-app | `index.html`, `occupancy.html`, `aoa.html`, `alert.html`, `counting.html` |
+
 ### 2.2 Adding A New App
 
 1. Create `<name>/` with `app/`, `Dockerfile`, `install.sh`, `README.md`.
 2. Copy an existing app's `build.sh` wrapper verbatim.
 3. In the `Dockerfile`, keep `COPY ./.stage .`.
-4. Put only app-specific sources in `<name>/app/`: `main.c`, use-case modules, `manifest.json`, `Makefile`, `settings/settings.json`, `settings/subscriptions.json`, `localdata/`, and the HTML pages.
-5. Do not copy `ACAP.*`, `B100.*`, `cJSON.*`, `LICENSE`, `settings/events.json`, or anything under `html/css` and `html/js`. The overlay supplies them, and `check-shared.sh` rejects local copies.
-6. List the app's own sources in the `Makefile` `OBJS1` line. The shared C files still need naming there (`ACAP.c cJSON.c B100.c`) because they are staged into the same flat directory.
+4. Put only app-specific sources in `<name>/app/`: `main.c`, use-case modules, `manifest.json`, `Makefile`, `settings/settings.json`, `settings/subscriptions.json`, `localdata/`, and the app's own HTML pages.
+5. Do not copy `ACAP.*`, `B100.*`, `cJSON.*`, `LICENSE`, `settings/events.json`, `html/bridge.html`, `html/gps.html`, or anything under `html/css` and `html/js`. The overlay supplies them, and `check-shared.sh` rejects local copies.
+6. Add `<name>/app/html/js/pages.js` declaring `NAV_PAGES` for the app's nav, and give every page the three script tags and the empty `<nav id="nav-bar">` described in section 2.1.1.
+7. List the app's own sources in the `Makefile` `OBJS1` line. The shared C files still need naming there (`ACAP.c cJSON.c B100.c`) because they are staged into the same flat directory.
 
 The new app then tracks the latest shared platform automatically.
 
