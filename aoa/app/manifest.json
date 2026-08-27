@@ -1,15 +1,20 @@
-
 {
-    "schemaVersion": "1.7.1",
+    "schemaVersion": "2.2.0",
     "acapPackageConf": {
         "setup": {
             "friendlyName": "AI-B100 AOA",
             "appName": "aib100",
-            "vendor": "Fred Juhlin",
-            "embeddedSdkVersion": "3.0",
+            "vendor": "fred@juhlin.me",
+            "vendorId": "6d8351dbbe",
             "vendorUrl": "https://pandosme.github.io",
             "runMode": "respawn",
-			"version": "1.2.0"
+            "version": "2.0.0",
+            "compatibleOsVersions": [
+                {
+                    "min": "12",
+                    "max": "13"
+                }
+            ]
         },
         "configuration": {
 			"settingPage": "index.html",
@@ -24,6 +29,8 @@
 				{"name": "counters","access": "viewer","type": "fastCgi"},
 				{"name": "publish","access": "viewer","type": "fastCgi"},
 				{"name": "translator","access": "viewer","type": "fastCgi"},
+				{"name": "ota_encoder","access": "viewer","type": "fastCgi"},
+				{"name": "ota_decoder","access": "viewer","type": "fastCgi"},
 				{"name": "delete_counter","access": "viewer","type": "fastCgi"},
 				{"name": "sync_counters","access": "viewer","type": "fastCgi"},
 				{"name": "receive","access": "viewer","type": "fastCgi"},
@@ -38,11 +45,11 @@
 			]
 		}
     },
-	"resources": {
+    "resources": {
 		"dbus": {
 			"requiredMethods": [
 				"com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials"
 			]
 		}
-	}
+    }
 }

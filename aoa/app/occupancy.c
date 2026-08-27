@@ -389,6 +389,18 @@ void Occupancy_Update_ACAP_Status(void) {
 	cJSON_Delete(areas);
 }
 
+void Occupancy_Reset_All(void) {
+	pthread_mutex_lock(&g_occupancy_mutex);
+	for (int index = 0; index < g_occupancy_count; index++) {
+		char scenario[sizeof(g_occupancy[index].scenario)];
+		memcpy(scenario, g_occupancy[index].scenario, sizeof(scenario));
+		memset(&g_occupancy[index], 0, sizeof(g_occupancy[index]));
+		memcpy(g_occupancy[index].scenario, scenario, sizeof(scenario));
+	}
+	pthread_mutex_unlock(&g_occupancy_mutex);
+	Occupancy_Update_ACAP_Status();
+}
+
 int Occupancy_Count(void) {
 	pthread_mutex_lock(&g_occupancy_mutex);
 	int count = g_occupancy_count;

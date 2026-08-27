@@ -317,6 +317,23 @@ $(document).ready(function() {
 		});
 	}
 
+	function addPresenceOccupancyScenarios(lines, aoaConfig, presenceSettings) {
+		const configured = (presenceSettings && presenceSettings.scenarios) || {};
+		const scenarios = (((aoaConfig || {}).data || {}).scenarios || []).filter(function(scenario) {
+			return String(scenario.type).toLowerCase() === 'occupancyinarea' && Object.prototype.hasOwnProperty.call(configured, scenario.name);
+		});
+		if (scenarios.length === 0) {
+			lines.push('AOA Presence Alert Occupancy In Area scenes: none');
+			return;
+		}
+		lines.push('AOA Presence Alert Occupancy In Area scenes:');
+		scenarios.forEach(function(scenario) {
+			const threshold = scenario.thresholdConfiguration || {};
+			const configured = (threshold.thresholds || [])[0] || {};
+			lines.push('  ' + valueText(scenario.name || ('Scenario ' + scenario.id)) + ' (id ' + valueText(scenario.id) + ', objects ' + valueText(Number(configured.level || 0) + 1) + ', trigger ' + valueText(threshold.triggerDelay) + 's)');
+		});
+	}
+
 	function buildInstallationInfo(report) {
 		const app = report.app || {};
 		const settings = app.settings || {};
@@ -327,6 +344,7 @@ $(document).ready(function() {
 		const transmission = settings.transmission || {};
 		const counting = transmission.counting || {};
 		const occupancy = transmission.occupancy || {};
+		const presence = transmission.presence || {};
 		const setup = (((app.manifest || {}).acapPackageConf || {}).setup) || {};
 		const device = app.device || {};
 		const lines = [];
@@ -355,7 +373,7 @@ $(document).ready(function() {
 		lines.push('');
 		lines.push('ACAP bridge settings:');
 		addObjectFields(lines, settings.b100, [
-			['Bridge IP', 'ip'], ['Bridge HTTP port', 'port'], ['HTTP timeout seconds', 'timeout'], ['Callback IP', 'callbackIP'], ['Callback port', 'callbackPort'], ['Callback digest user', 'callbackDigestUser']
+			['Bridge IP', 'ip'], ['Bridge API port', 'port'], ['Bridge API user', 'apiDigestUser'], ['HTTP timeout seconds', 'timeout'], ['Callback IP', 'callbackIP'], ['Callback port', 'callbackPort'], ['Callback digest user', 'callbackDigestUser']
 		]);
 		lines.push('');
 		lines.push('Bridge LoRa settings:');
@@ -399,6 +417,16 @@ $(document).ready(function() {
 		}
 		addOccupancyState(lines, counters.occupancy || []);
 		addAoaScenarios(lines, report.aoaConfig, 'occupancyInArea');
+
+		addSection(lines, 'Presence Alert Settings');
+		addField(lines, 'Publishing enabled', presence.enabled === true);
+		addField(lines, 'Fixed LoRaWAN uplink port', presence.port);
+		lines.push('Presence threshold areas:');
+		Object.keys(presence.scenarios || {}).forEach(function(name) { lines.push('  ' + valueText(name)); });
+		(counters.presence || []).forEach(function(scene) {
+			lines.push('  ' + valueText(scene.scenario) + ': scenarioId=' + valueText(scene.scenarioId) + ', AOA active=' + valueText(scene.aoaActive) + ', retained active=' + valueText(scene.active) + ', clear due=' + valueText(scene.clearDue));
+		});
+		addPresenceOccupancyScenarios(lines, report.aoaConfig, presence);
 
 		if (report.errors.length > 0) {
 			addSection(lines, 'Collection Warnings');

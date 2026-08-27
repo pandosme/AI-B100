@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title></title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/pages.js"></script>
+	<script src="js/chrome.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<script src="js/media-stream-player.min.js"></script>
+	<style>
+		.video-container { position: relative; width: 100%; max-width: 640px; aspect-ratio: 16 / 9; margin: 0 auto; background: #000; }
+		.video-player, .area-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+		.area-canvas { z-index: 10; cursor: crosshair; touch-action: none; }
+		.class-options { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+		.class-options .form-check { margin: 0; }
+	</style>
+</head>
+<body>
+	<header class="app-header">
+		<div class="app-name" id="app-name">&nbsp;</div>
+		<nav class="nav-bar" id="nav-bar"></nav>
+	</header>
+
+	<div class="page-content">
+		<div class="mb-3">
+			<button id="add-alert" class="btn btn-success">Add presence alert</button>
+		</div>
+		<div id="presence-alerts" class="row">
+			<div class="col-12 text-muted">Loading...</div>
+		</div>
+	</div>
+
+<script>
+let fullAoaConfig = null;
+let aoaCapabilities = null;
+let currentSettings = {};
+let presenceAlerts = [];
+let presenceState = {};
+let dragging = null;
+
+const OCCUPANCY_TYPE = 'occupancyInArea';
+const LEGACY_TIME_IN_AREA_CONDITION = 'individualTimeInArea';
+const PRESENCE_PORT = 3;
+const VIDEO_WIDTH = 640;
+const VIDEO_HEIGHT = 360;
+const CLASS_OPTIONS = [
+	{ key: 'human', label: 'Humans', type: 'human' },
+	{ key: 'car', label: 'Cars', type: 'vehicle', subtype: 'car' },
+	{ key: 'bike', label: 'Bikes', type: 'vehicle', subtype: 'motorcycle/bicycle' },
+	{ key: 'bus', label: 'Buses', type: 'vehicle', subtype: 'bus' },
+	{ key: 'truck', label: 'Trucks', type: 'vehicle', subtype: 'truck' },
+	{ key: 'other', label: 'Other Vehicles', type: 'vehicle', subtype: 'unknown' }
+];
+
+$(document).ready(function() {
+	$('#add-alert').on('click', addPresenceAlert);
+	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false }).done(function(app) {
+		document.title = app.manifest.acapPackageConf.setup.friendlyName + ' - Presence Alert';
+		$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
+	});
+	loadPage();
+	setInterval(loadStatus, 2000);
+	requestAnimationFrame(drawAreas);
+});
+
+function aoaRequest(method, params) {
+	const request = { apiVersion: '1.6', context: 'aib100-presence-page', method: method };
+	if (params !== undefined) request.params = params;
+	return $.ajax({
+		type: 'POST',
+		url: '/local/objectanalytics/control.cgi',
+		contentType: 'application/json',
+		dataType: 'json',
+		data: JSON.stringify(request)
+	});
+}
+
+function legacyTimeInAreaCondition(scenario) {
+	for (const trigger of ((scenario && scenario.triggers) || [])) {
+		for (const condition of (trigger.conditions || [])) {
+			if (condition.type === LEGACY_TIME_IN_AREA_CONDITION) return condition;
+		}
+	}
+	return null;
+}
+
+function isPresenceAlert(scenario) {
+	if (!scenario) return false;
+	const owned = Object.prototype.hasOwnProperty.call(presenceConfig().scenarios, scenario.name);
+	if (!owned) return false;
+	if (String(scenario.type).toLowerCase() === 'motion') return legacyTimeInAreaCondition(scenario) !== null;
+	if (String(scenario.type).toLowerCase() !== OCCUPANCY_TYPE.toLowerCase()) return false;
+	return true;
+}
+
+function includeArea(scenario) {
+	return ((scenario && scenario.triggers) || []).find(function(trigger) { return trigger.type === 'includeArea'; }) || null;
+}
+
+function presenceConfig(settings) {
+	const source = settings || currentSettings;
+	const transmission = source.transmission || {};
+	const presence = transmission.presence || {};
+	presence.scenarios = presence.scenarios || {};
+	presence.port = PRESENCE_PORT;
+	transmission.presence = presence;
+	source.transmission = transmission;
+	return presence;
+}
+
+function normalizeAlertSettings(settings) {
+	const presence = presenceConfig(settings);
+	const next = {};
+	presenceAlerts.forEach(function(alert) {
+		next[alert.name] = {};
+	});
+	const changed = JSON.stringify(next) !== JSON.stringify(presence.scenarios) || presence.cooldownSeconds !== undefined || presence.schedule !== undefined;
+	presence.scenarios = next;
+	delete presence.cooldownSeconds;
+	delete presence.schedule;
+	delete presence.triggerSeconds;
+	delete presence.heartbeatMinutes;
+	return changed;
+}
+
+function saveTransmission(settings) {
+	return $.ajax({
+		type: 'POST',
+		url: 'settings',
+		contentType: 'application/json',
+		data: JSON.stringify({ transmission: settings.transmission })
+	});
+}
+
+function loadPage() {
+	$.when(
+		$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false }),
+		aoaRequest('getConfiguration'),
+		aoaRequest('getConfigurationCapabilities')
+	).done(function(settingsResult, configResult, capabilitiesResult) {
+		currentSettings = settingsResult[0] || {};
+		const configResponse = configResult[0] || {};
+		const capabilitiesResponse = capabilitiesResult[0] || {};
+		if (configResponse.error || !configResponse.data || capabilitiesResponse.error || !capabilitiesResponse.data) {
+			showToast('Failed to load AXIS Object Analytics configuration', 'danger');
+			return;
+		}
+		fullAoaConfig = configResponse.data;
+		aoaCapabilities = capabilitiesResponse.data;
+		presenceAlerts = (fullAoaConfig.scenarios || []).filter(isPresenceAlert);
+		const legacyAlerts = presenceAlerts.filter(function(alert) { return String(alert.type).toLowerCase() === 'motion'; });
+		if (legacyAlerts.length > 0) {
+			legacyAlerts.forEach(function(alert) { convertToOccupancyAlert(alert); });
+			setFullConfiguration(fullAoaConfig, function() {
+				showToast('Presence Alerts migrated to Occupancy In Area', 'success');
+				loadPage();
+			}, 'Failed to migrate Presence Alerts');
+			return;
+		}
+		if (normalizeAlertSettings(currentSettings)) {
+			saveTransmission(currentSettings).done(renderAlerts).fail(function(xhr) {
+				showToast('Failed to synchronize Presence Alert settings: ' + xhr.statusText, 'danger');
+			});
+		} else {
+			renderAlerts();
+		}
+		loadStatus();
+	}).fail(function(xhr) {
+		showToast('Failed to load Presence Alert: ' + (xhr.statusText || 'request failed'), 'danger');
+	});
+}
+
+function escapeHtml(value) {
+	return $('<div>').text(value == null ? '' : String(value)).html();
+}
+
+function escapeAttribute(value) {
+	return String(value == null ? '' : value)
+		.replaceAll('&', '&amp;')
+		.replaceAll('"', '&quot;')
+		.replaceAll('<', '&lt;')
+		.replaceAll('>', '&gt;');
+}
+
+function selectedClasses(alert) {
+	const selected = {};
+	const classifications = alert.objectClassifications || [];
+	selected.human = classifications.some(function(item) { return item.type === 'human'; });
+	const vehicle = classifications.find(function(item) { return item.type === 'vehicle'; });
+	const subtypes = vehicle && Array.isArray(vehicle.subTypes) ? vehicle.subTypes.map(function(item) { return item.type; }) : [];
+	CLASS_OPTIONS.filter(function(option) { return option.type === 'vehicle'; }).forEach(function(option) {
+		selected[option.key] = !!vehicle && (subtypes.length === 0 || subtypes.includes(option.subtype));
+	});
+	return selected;
+}
+
+function classCheckboxes(alert) {
+	const selected = selectedClasses(alert);
+	return CLASS_OPTIONS.map(function(option) {
+		const id = 'class-' + alert.id + '-' + option.key;
+		return `<div class="form-check form-check-inline"><input class="form-check-input alert-class" type="checkbox" id="${id}" data-key="${option.key}" ${selected[option.key] ? 'checked' : ''}><label class="form-check-label" for="${id}">${option.label}</label></div>`;
+	}).join('');
+}
+
+function thresholdLimits() {
+	const threshold = (aoaCapabilities && aoaCapabilities.scenarios && aoaCapabilities.scenarios.thresholdConfiguration) || {};
+	return {
+		minObjects: (Number.isFinite(Number(threshold.minLevelWithMoreThanType)) ? Number(threshold.minLevelWithMoreThanType) : 0) + 1,
+		maxObjects: (Number.isFinite(Number(threshold.maxLevel)) ? Number(threshold.maxLevel) : 100) + 1,
+		minDelay: Number.isFinite(Number(threshold.minTriggerDelay)) ? Number(threshold.minTriggerDelay) : 0,
+		maxDelay: Number.isFinite(Number(threshold.maxTriggerDelay)) ? Number(threshold.maxTriggerDelay) : 7200
+	};
+}
+
+function thresholdValues(alert) {
+	const limits = thresholdLimits();
+	const threshold = (alert && alert.thresholdConfiguration) || {};
+	const configured = Array.isArray(threshold.thresholds) ? threshold.thresholds[0] : null;
+	const objects = configured && Number.isFinite(Number(configured.level)) ? Number(configured.level) + 1 : 1;
+	const delay = Number.isFinite(Number(threshold.triggerDelay)) ? Number(threshold.triggerDelay) : 5;
+	return {
+		objects: Math.max(limits.minObjects, Math.min(limits.maxObjects, objects)),
+		delay: Math.max(limits.minDelay, Math.min(limits.maxDelay, delay))
+	};
+}
+
+function convertToOccupancyAlert(alert, objects, delay) {
+	const limits = thresholdLimits();
+	const current = thresholdValues(alert);
+	const objectCount = Math.max(limits.minObjects, Math.min(limits.maxObjects, Number(objects) || current.objects));
+	const triggerDelay = Math.max(limits.minDelay, Math.min(limits.maxDelay, Number.isFinite(Number(delay)) ? Number(delay) : current.delay));
+	alert.type = OCCUPANCY_TYPE;
+	alert.filters = [];
+	alert.triggers = (alert.triggers || []).filter(function(trigger) { return trigger.type === 'includeArea'; }).map(function(trigger) {
+		return { type: 'includeArea', vertices: trigger.vertices };
+	});
+	alert.eventInterval = { enabled: false };
+	alert.thresholdConfiguration = {
+		enabled: true,
+		triggerDelay: triggerDelay,
+		thresholds: [{ level: objectCount - 1, type: 'moreThan' }]
+	};
+}
+
+function renderAlerts() {
+	const container = $('#presence-alerts').empty();
+	if (presenceAlerts.length === 0) {
+		container.html('<div class="col-12 text-muted">No presence alerts configured.</div>');
+		return;
+	}
+	presenceAlerts.forEach(function(alert) {
+		const limits = thresholdLimits();
+		const threshold = thresholdValues(alert);
+		container.append(`<div class="col-12 col-xl-6 mb-3" id="alert-card-${alert.id}"><div class="card h-100 alert-card">
+			<div class="card-header"><div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2"><h5 class="card-title mb-0">${escapeHtml(alert.name)}</h5><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary presence-state" data-name="${escapeAttribute(alert.name)}">Unknown</span><button class="btn btn-sm btn-danger delete-alert" data-id="${alert.id}">Delete</button></div></div><div class="input-group input-group-sm"><span class="input-group-text">Name</span><input class="form-control alert-name" type="text" maxlength="${((aoaCapabilities.scenarios || {}).maxLengthName) || 15}" value="${escapeAttribute(alert.name)}"></div></div>
+			<div class="card-body"><div class="video-container"><div class="video-player" id="video-${alert.id}"></div><canvas class="area-canvas" id="canvas-${alert.id}" width="${VIDEO_WIDTH}" height="${VIDEO_HEIGHT}" data-id="${alert.id}" aria-label="Area of interest editor" title="Drag polygon points to adjust the area"></canvas></div>
+				<div class="mt-3"><label class="form-label d-block">Classes</label><div class="class-options">${classCheckboxes(alert)}</div></div>
+				<div class="row g-2 mt-2"><div class="col-sm-6"><label class="form-label" for="objects-${alert.id}">At least</label><div class="input-group"><input class="form-control threshold-objects" id="objects-${alert.id}" type="number" min="${limits.minObjects}" max="${limits.maxObjects}" value="${threshold.objects}"><span class="input-group-text">objects</span></div></div><div class="col-sm-6"><label class="form-label" for="delay-${alert.id}">Trigger action after</label><div class="input-group"><input class="form-control threshold-delay" id="delay-${alert.id}" type="number" min="${limits.minDelay}" max="${limits.maxDelay}" value="${threshold.delay}"><span class="input-group-text">seconds</span></div></div></div>
+				<div class="small text-muted mt-3 presence-detail" data-name="${escapeAttribute(alert.name)}">State: unknown</div><button class="btn btn-success w-100 mt-3 save-alert" data-id="${alert.id}">Save</button>
+			</div></div></div>`);
+		initVideoPlayer(alert.id);
+	});
+	updateAreaStates();
+}
+
+function initVideoPlayer(alertId) {
+	const secure = location.protocol === 'https:' ? ' secure=true' : '';
+	$('#video-' + alertId).html('<media-stream-player hostname="' + window.location.hostname + '"' + secure + ' format="RTP_H264" compression="40" audio="0" resolution="640x360" variant="basic" autoplay></media-stream-player>');
+}
+
+function aoaToCanvas(vertex) {
+	return { x: (vertex[0] + 1) * VIDEO_WIDTH / 2, y: (1 - vertex[1]) * VIDEO_HEIGHT / 2 };
+}
+
+function drawAreas() {
+	presenceAlerts.forEach(function(alert) {
+		const canvas = document.getElementById('canvas-' + alert.id);
+		const area = includeArea(alert);
+		if (!canvas || !area || !Array.isArray(area.vertices)) return;
+		const context = canvas.getContext('2d');
+		const points = area.vertices.map(aoaToCanvas);
+		context.clearRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+		context.fillStyle = 'rgba(0, 170, 255, 0.22)';
+		context.strokeStyle = '#00aaff';
+		context.lineWidth = 3;
+		context.beginPath();
+		points.forEach(function(point, index) { if (index === 0) context.moveTo(point.x, point.y); else context.lineTo(point.x, point.y); });
+		context.closePath();
+		context.fill();
+		context.stroke();
+		context.fillStyle = '#00aaff';
+		points.forEach(function(point) { context.beginPath(); context.arc(point.x, point.y, 7, 0, Math.PI * 2); context.fill(); });
+	});
+	requestAnimationFrame(drawAreas);
+}
+
+function pointerCoordinates(event, canvas) {
+	const source = event.originalEvent.touches ? event.originalEvent.touches[0] : event;
+	const rect = canvas.getBoundingClientRect();
+	return { x: Math.max(-1, Math.min(1, ((source.clientX - rect.left) / rect.width) * 2 - 1)), y: Math.max(-1, Math.min(1, 1 - ((source.clientY - rect.top) / rect.height) * 2)) };
+}
+
+$(document).on('mousedown touchstart', '.area-canvas', function(event) {
+	const alertId = Number($(this).data('id'));
+	const alert = presenceAlerts.find(function(item) { return item.id === alertId; });
+	const area = includeArea(alert);
+	if (!area) return;
+	const point = pointerCoordinates(event, this);
+	let nearest = -1;
+	let distance = 0.12;
+	area.vertices.forEach(function(vertex, index) {
+		const candidate = Math.hypot(point.x - vertex[0], point.y - vertex[1]);
+		if (candidate < distance) { nearest = index; distance = candidate; }
+	});
+	if (nearest < 0) return;
+	event.preventDefault();
+	dragging = { alertId: alertId, vertex: nearest, canvas: this };
+});
+
+$(document).on('mousemove touchmove', function(event) {
+	if (!dragging) return;
+	event.preventDefault();
+	const alert = presenceAlerts.find(function(item) { return item.id === dragging.alertId; });
+	const point = pointerCoordinates(event, dragging.canvas);
+	includeArea(alert).vertices[dragging.vertex] = [point.x, point.y];
+});
+
+$(document).on('mouseup touchend touchcancel', function() {
+	if (!dragging) return;
+	dragging = null;
+	showToast('Area adjusted. Click Save to apply it.', 'info');
+});
+
+$(document).on('click', '.save-alert', function() { savePresenceAlert(Number($(this).data('id'))); });
+$(document).on('click', '.delete-alert', function() { deletePresenceAlert(Number($(this).data('id'))); });
+
+function applyAlertControls(alert) {
+	const card = $('#alert-card-' + alert.id);
+	const name = card.find('.alert-name').val().trim();
+	if (!name) throw new Error('Enter a name for the presence alert');
+	if (presenceAlerts.some(function(item) { return item.id !== alert.id && item.name === name; })) throw new Error('Presence Alert names must be unique');
+	const selected = CLASS_OPTIONS.filter(function(option) { return card.find('.alert-class[data-key="' + option.key + '"]').is(':checked'); });
+	if (selected.length === 0) throw new Error('Select at least one class');
+	const classifications = [];
+	if (selected.some(function(option) { return option.type === 'human'; })) classifications.push({ type: 'human' });
+	const vehicleSubtypes = selected.filter(function(option) { return option.type === 'vehicle'; }).map(function(option) { return { type: option.subtype }; });
+	if (vehicleSubtypes.length > 0) classifications.push({ type: 'vehicle', subTypes: vehicleSubtypes });
+	alert.name = name;
+	alert.objectClassifications = classifications;
+	convertToOccupancyAlert(alert, card.find('.threshold-objects').val(), card.find('.threshold-delay').val());
+	return {};
+}
+
+function setFullConfiguration(config, success, failurePrefix) {
+	aoaRequest('setConfiguration', config).done(function(response) {
+		if (response && response.error) {
+			showToast(failurePrefix + ': ' + response.error.message + ' (' + response.error.code + ')', 'danger');
+			return;
+		}
+		success();
+	}).fail(function(xhr) { showToast(failurePrefix + ': ' + (xhr.statusText || 'request failed'), 'danger'); });
+}
+
+function savePresenceAlert(alertId) {
+	const localAlert = presenceAlerts.find(function(item) { return item.id === alertId; });
+	if (!localAlert) return;
+	const oldName = localAlert.name;
+	let alertConfig;
+	try { alertConfig = applyAlertControls(localAlert); } catch (error) { showToast(error.message, 'warning'); return; }
+	const button = $('.save-alert[data-id="' + alertId + '"]').prop('disabled', true).text('Saving...');
+	$.when(aoaRequest('getConfiguration'), $.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false })).done(function(configResult, settingsResult) {
+		const response = configResult[0] || {};
+		const settings = settingsResult[0] || {};
+		if (response.error || !response.data) { button.prop('disabled', false).text('Save'); showToast('Failed to refresh AOA configuration', 'danger'); return; }
+		const target = (response.data.scenarios || []).find(function(item) { return item.id === alertId; });
+		if (!target || !isPresenceAlert(target)) { button.prop('disabled', false).text('Save'); showToast('Presence Alert no longer exists', 'warning'); return; }
+		target.name = localAlert.name;
+		target.type = localAlert.type;
+		target.objectClassifications = localAlert.objectClassifications;
+		target.filters = [];
+		target.triggers = localAlert.triggers;
+		target.eventInterval = localAlert.eventInterval;
+		target.thresholdConfiguration = localAlert.thresholdConfiguration;
+		const presence = presenceConfig(settings);
+		if (oldName !== localAlert.name) delete presence.scenarios[oldName];
+		presence.scenarios[localAlert.name] = alertConfig;
+		delete presence.cooldownSeconds;
+		delete presence.schedule;
+		setFullConfiguration(response.data, function() {
+			saveTransmission(settings).done(function() { showToast('Presence Alert saved', 'success'); loadPage(); }).fail(function(xhr) {
+				button.prop('disabled', false).text('Save');
+				showToast('AOA saved, but Presence Alert settings failed: ' + xhr.statusText, 'warning');
+			});
+		}, 'Failed to save Presence Alert');
+	}).fail(function(xhr) { button.prop('disabled', false).text('Save'); showToast('Failed to refresh Presence Alert: ' + xhr.statusText, 'danger'); });
+}
+
+function defaultAreaVertices() {
+	const capability = ((aoaCapabilities && aoaCapabilities.triggers) || []).find(function(item) { return item.type === 'includeArea'; });
+	return JSON.parse(JSON.stringify((capability && capability.defaultInstance) || [[-0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]]));
+}
+
+function addPresenceAlert() {
+	const button = $('#add-alert').prop('disabled', true).text('Adding...');
+	$.when(aoaRequest('getConfiguration'), $.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false })).done(function(configResult, settingsResult) {
+		const response = configResult[0] || {};
+		const settings = settingsResult[0] || {};
+		if (response.error || !response.data) { button.prop('disabled', false).text('Add presence alert'); showToast('Failed to refresh AOA configuration', 'danger'); return; }
+		const config = response.data;
+		const maxId = (config.scenarios || []).reduce(function(maximum, scenario) { return Math.max(maximum, scenario.id || 0); }, 0);
+		const name = 'Presence ' + (maxId + 1);
+		config.scenarios = config.scenarios || [];
+		config.scenarios.push({ id: maxId + 1, name: name, type: OCCUPANCY_TYPE, devices: [{ id: ((aoaCapabilities.scenarios || {}).defaultDeviceId) || 1 }], filters: [], metadataOverlay: null, objectClassifications: [{ type: 'human' }], perspectives: [], presets: [], triggers: [{ type: 'includeArea', vertices: defaultAreaVertices() }], eventInterval: { enabled: false }, thresholdConfiguration: { enabled: true, triggerDelay: 5, thresholds: [{ level: 0, type: 'moreThan' }] } });
+		const presence = presenceConfig(settings);
+		presence.scenarios[name] = {};
+		setFullConfiguration(config, function() {
+			saveTransmission(settings).done(function() { showToast('Presence Alert created', 'success'); loadPage(); }).fail(function(xhr) { showToast('AOA alert created, but settings failed: ' + xhr.statusText, 'warning'); });
+		}, 'Failed to create Presence Alert');
+	}).fail(function(xhr) { button.prop('disabled', false).text('Add presence alert'); showToast('Failed to refresh Presence Alert: ' + xhr.statusText, 'danger'); });
+}
+
+function deletePresenceAlert(alertId) {
+	const alert = presenceAlerts.find(function(item) { return item.id === alertId; });
+	if (!alert || !confirm('Delete this presence alert?')) return;
+	$.when(aoaRequest('getConfiguration'), $.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false })).done(function(configResult, settingsResult) {
+		const response = configResult[0] || {};
+		const settings = settingsResult[0] || {};
+		if (response.error || !response.data) { showToast('Failed to refresh AOA configuration', 'danger'); return; }
+		response.data.scenarios = (response.data.scenarios || []).filter(function(item) { return item.id !== alertId; });
+		delete presenceConfig(settings).scenarios[alert.name];
+		setFullConfiguration(response.data, function() {
+			saveTransmission(settings).done(function() { showToast('Presence Alert deleted', 'success'); loadPage(); }).fail(function(xhr) { showToast('AOA alert deleted, but settings failed: ' + xhr.statusText, 'warning'); });
+		}, 'Failed to delete Presence Alert');
+	});
+}
+
+function loadStatus() {
+	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false }).done(function(status) {
+		presenceState = {};
+		(((((status || {}).presence || {}).state || {}).areas) || []).forEach(function(sample) { presenceState[sample.scenario] = sample; });
+		updateAreaStates();
+		const dot = $('#lora-nav-dot');
+		const lorawan = status && status.lorawan;
+		dot.removeClass('lora-joined lora-connected lora-disconnected');
+		if (lorawan && lorawan.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined');
+		else if (lorawan && lorawan.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined');
+		else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
+	});
+}
+
+function updateAreaStates() {
+	presenceAlerts.forEach(function(alert) {
+		const sample = presenceState[alert.name];
+		const badge = $('.presence-state').filter(function() { return $(this).data('name') === alert.name; });
+		const detail = $('.presence-detail').filter(function() { return $(this).data('name') === alert.name; });
+		badge.removeClass('text-bg-secondary text-bg-success text-bg-danger text-bg-warning');
+		if (!sample || sample.known !== true) { badge.addClass('text-bg-secondary').text('Unknown'); detail.text('State: unknown'); }
+		else if (sample.active === true && sample.aoaActive === true) { badge.addClass('text-bg-danger').text('Alert'); detail.text('State: active'); }
+		else if (sample.active === true) { badge.addClass('text-bg-warning').text('Holding'); detail.text('State: holding until ' + new Date(sample.clearDue * 1000).toLocaleTimeString()); }
+		else { badge.addClass('text-bg-success').text('Clear'); detail.text('State: clear'); }
+	});
+}
+</script>
+</body>
+</html>

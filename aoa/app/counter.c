@@ -329,10 +329,14 @@ void Counting_Load_From_File(void) {
 	LOG("Loaded %d counters from file\n", g_counter_count);
 }
 
-void Counting_Save_To_File(void) {
+int Counting_Save_To_File(void) {
 	pthread_mutex_lock(&g_counter_mutex);
 	LOG("Saving %d counters to file...\n", g_counter_count);
 	cJSON* root = cJSON_CreateArray();
+	if (!root) {
+		pthread_mutex_unlock(&g_counter_mutex);
+		return 0;
+	}
 	for (int i = 0; i < g_counter_count; i++) {
 		CounterState* counter = &g_counters[i];
 		LOG("  - %s (total=%d)\n", counter->scenario, counter->internal_total);
@@ -347,11 +351,16 @@ void Counting_Save_To_File(void) {
 		cJSON_AddNumberToObject(item, "other", counter->internal_other);
 		cJSON_AddItemToArray(root, item);
 	}
-	ACAP_FILE_Write("localdata/counters.json", root);
+	int saved = ACAP_FILE_Write("localdata/counters.json", root);
 	cJSON_Delete(root);
 	pthread_mutex_unlock(&g_counter_mutex);
-	g_last_save_time = time(NULL);
-	LOG("Counters saved to localdata/counters.json\n");
+	if (saved) {
+		g_last_save_time = time(NULL);
+		LOG("Counters saved to localdata/counters.json\n");
+	} else {
+		LOG_WARN("Failed to save counters to localdata/counters.json\n");
+	}
+	return saved;
 }
 
 void Counting_Delete_By_Scenario(const char* scenario) {
@@ -473,6 +482,29 @@ int Counting_Count(void) {
 	int count = g_counter_count;
 	pthread_mutex_unlock(&g_counter_mutex);
 	return count;
+}
+
+int Counting_Has_Scenario(const char* scenario) {
+	if (!scenario) return 0;
+	pthread_mutex_lock(&g_counter_mutex);
+	int found = 0;
+	for (int i = 0; i < g_counter_count; i++) {
+		if (strcmp(g_counters[i].scenario, scenario) == 0) {
+			found = 1;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_counter_mutex);
+	return found;
+}
+
+int Counting_References_Ready(void) {
+	pthread_mutex_lock(&g_counter_mutex);
+	int ready = g_counter_count > 0;
+	for (int i = 0; i < g_counter_count && ready; i++)
+		ready = g_counters[i].has_reference;
+	pthread_mutex_unlock(&g_counter_mutex);
+	return ready;
 }
 
 void Counting_Add_Counters_JSON(cJSON* counters_array) {

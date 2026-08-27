@@ -32,6 +32,12 @@
 		.sig-warn    { color: #fd7e14; }
 		.sig-bad     { color: #dc3545; }
 		#no-messages { font-size: 0.9rem; }
+		#translatorContent {
+			min-height: 65vh;
+			font-family: "Courier New", monospace;
+			font-size: 0.82rem;
+			white-space: pre;
+		}
 	</style>
 </head>
 <body>
@@ -81,7 +87,10 @@
 				<div class="card mb-3">
 					<div class="card-header d-flex justify-content-between align-items-center">
 						<h5 class="card-title mb-0">Downlink Commands</h5>
-						<button id="save-commands" class="btn btn-sm btn-primary">Save</button>
+						<div class="d-flex gap-2">
+							<button class="btn btn-sm btn-secondary open-translator" data-endpoint="ota_encoder" data-title="OTA Encoder">OTA Encoder</button>
+							<button class="btn btn-sm btn-secondary open-translator" data-endpoint="ota_decoder" data-title="OTA Decoder">OTA Decoder</button>
+						</div>
 					</div>
 					<div class="card-body p-0">
 						<table class="table table-sm table-hover mb-0" style="font-size:0.82rem;">
@@ -101,27 +110,64 @@
 		</div>
 	</div>
 
+	<div class="modal fade" id="translatorModal" tabindex="-1" aria-labelledby="translatorModalLabel" aria-hidden="true">
+		<div class="modal-dialog modal-xl modal-dialog-scrollable">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="translatorModalLabel">OTA JavaScript</h5>
+					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+				</div>
+				<div class="modal-body">
+					<textarea id="translatorContent" class="form-control" spellcheck="false" readonly></textarea>
+				</div>
+				<div class="modal-footer">
+					<a id="downloadTranslator" class="btn btn-outline-primary" href="#">Download</a>
+					<button type="button" id="copyTranslator" class="btn btn-primary">Copy</button>
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
 <script>
 // Downlink command definitions — enabled states loaded from settings on init
 const DEFAULT_COMMANDS = [
-	// Port 100 — Actions
-	{ enabled: true,  port: 100, byte: '0x01', message: 'Restart Bridge',       action: 'Restart the AI-B100 LoRaWAN bridge device' },
-	{ enabled: true,  port: 100, byte: '0x02', message: 'Join Network',          action: 'Initiate a new LoRaWAN OTAA join' },
-	{ enabled: true,  port: 100, byte: '0x03', message: 'Reset Counters',        action: 'Reset all AOA and internal counters to zero' },
-	// Port 110 — Configuration (2-byte: byte[0]=command, byte[1]=value)
-	{ enabled: true,  port: 110, byte: '0x01', message: 'Set Interval',          action: 'Set transmission interval; byte 1 = minutes (5–60)' },
-	{ enabled: true,  port: 110, byte: '0x02', message: 'Set Data Rate',         action: 'Set fixed data rate; byte 1 = 0–5 (DR0–DR5)' },
-	{ enabled: true,  port: 110, byte: '0x03', message: 'Set ADR',               action: 'Enable/disable ADR; byte 1 = 1 (on) / 0 (off)' },
-	// Port 120 — Information requests
-	{ enabled: true,  port: 120, byte: '0x01', message: 'Camera Info',   action: 'Reply on port 121: model, serial, firmware, uptime hours, CPU %, ACAP version' },
-	{ enabled: true,  port: 120, byte: '0x02', message: 'Bridge Info',   action: 'Reply on port 122: hardware, firmware, power source, temperature, restart count, DevAddr' },
-	{ enabled: true,  port: 120, byte: '0x03', message: 'Signal Quality',action: 'Update local status with data rate, max payload, RSSI, SNR, frame counters up/down' }
+	{ enabled: true, port: 100, byte: '0x02', message: 'Execute', action: 'Restart Bridge or Reset All Data; response uses port 100' },
+	{ enabled: true, port: 100, byte: '0x03', message: 'Capabilities', action: 'Read supported action codes' },
+	{ enabled: true, port: 110, byte: '0x01', message: 'Get Configuration', action: 'Read Data Rate and ADR; response uses port 110' },
+	{ enabled: true, port: 110, byte: '0x02', message: 'Set Configuration', action: 'Set Data Rate and/or ADR' },
+	{ enabled: true, port: 110, byte: '0x03', message: 'Capabilities', action: 'Read supported Data Rate and ADR ranges' },
+	{ enabled: true, port: 120, byte: '0x01', message: 'Get Information', action: 'Read paged Camera or Bridge information on port 120' },
+	{ enabled: true, port: 120, byte: '0x03', message: 'Capabilities', action: 'Read supported information types' },
+	{ enabled: true, port: 130, byte: '0x01', message: 'Get Configuration', action: 'Read enable state and publish rate by use-case index' },
+	{ enabled: true, port: 130, byte: '0x02', message: 'Set Configuration', action: 'Set enable state and publish rate by use-case index' },
+	{ enabled: true, port: 130, byte: '0x03', message: 'Capabilities', action: 'Read per-use-case publish-rate support' },
+	{ enabled: true, port: 131, byte: '0x01', message: 'Get Counting Scene', action: 'Read one page of an existing Counting scene' },
+	{ enabled: true, port: 131, byte: '0x02', message: 'Set Counting Scene', action: 'Update an existing Counting scene' },
+	{ enabled: true, port: 131, byte: '0x03', message: 'Counting Capabilities', action: 'Read Counting OTA limits' },
+	{ enabled: true, port: 131, byte: '0x04', message: 'List Counting Scenes', action: 'Read stable Counting scene identities' },
+	{ enabled: true, port: 132, byte: '0x01', message: 'Get Occupancy Scene', action: 'Read one page of an existing Occupancy scene' },
+	{ enabled: true, port: 132, byte: '0x02', message: 'Set Occupancy Scene', action: 'Update an existing Occupancy scene' },
+	{ enabled: true, port: 132, byte: '0x03', message: 'Occupancy Capabilities', action: 'Read Occupancy OTA limits' },
+	{ enabled: true, port: 132, byte: '0x04', message: 'List Occupancy Scenes', action: 'Read stable Occupancy scene identities' },
+	{ enabled: true, port: 133, byte: '0x01', message: 'Get Presence Alert', action: 'Read one page of an existing Presence Alert' },
+	{ enabled: true, port: 133, byte: '0x02', message: 'Set Presence Alert', action: 'Update an existing Presence Alert' },
+	{ enabled: true, port: 133, byte: '0x03', message: 'Presence Capabilities', action: 'Read Presence Alert OTA limits' },
+	{ enabled: true, port: 133, byte: '0x04', message: 'List Presence Alerts', action: 'Read stable Presence Alert identities' }
 ];
 
 $(document).ready(function() {
 	let lastRenderedFcnt = -1;
 	let clearedAtFcnt = -2;
 	let commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
+	const translatorModal = new bootstrap.Modal(document.getElementById('translatorModal'));
+
+	$('.open-translator').on('click', function() {
+		openTranslatorDialog(this, $(this).data('endpoint'), $(this).data('title'), translatorModal);
+	});
+	$('#copyTranslator').on('click', copyTranslatorToClipboard);
+	$('#copyTranslator').prop('disabled', true);
+	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true');
 
 	// Load app info and merge saved enabled states from settings
 	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
@@ -187,8 +233,12 @@ $(document).ready(function() {
 
 	const PORT_GROUPS = {
 		100: 'Port 100 — Actions',
-		110: 'Port 110 — Configuration',
-		120: 'Port 120 — Information Requests'
+		110: 'Port 110 — AI-B100 Configuration',
+		120: 'Port 120 — Information',
+		130: 'Port 130 — Use-Case Transmission',
+		131: 'Port 131 — Counting OTA',
+		132: 'Port 132 — Occupancy OTA',
+		133: 'Port 133 — Presence Alert OTA'
 	};
 
 	function renderCommandTable() {
@@ -220,18 +270,6 @@ $(document).ready(function() {
 	}
 
 	renderCommandTable();
-
-	$('#save-commands').on('click', function() {
-		// Persist to settings (Phase 3 will wire these to actual handlers)
-		$.ajax({
-			type: 'POST',
-			url: 'settings',
-			contentType: 'application/json',
-			data: JSON.stringify({ downlinkCommands: commands }),
-			success: function() { showToast('Command settings saved', 'success'); },
-			error: function() { showToast('Failed to save command settings', 'danger'); }
-		});
-	});
 
 	function pollDownlinks() {
 		$.ajax({
@@ -337,6 +375,56 @@ $(document).ready(function() {
 		}
 	}
 });
+
+async function openTranslatorDialog(source, endpoint, title, modal) {
+	const button = $(source);
+	const originalText = button.text();
+	button.prop('disabled', true).text('Loading...');
+	$('#translatorModalLabel').text(title);
+	$('#translatorContent').val('Loading JavaScript...');
+	$('#copyTranslator').prop('disabled', true);
+	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true').attr('href', '#');
+
+	try {
+		const response = await fetch(endpoint, { method: 'GET', cache: 'no-store' });
+		if (!response.ok) throw new Error('HTTP ' + response.status);
+		const text = await response.text();
+		if (!text || text.trim().length === 0) throw new Error('Empty response');
+		$('#translatorContent').val(text);
+		$('#copyTranslator').prop('disabled', false);
+		$('#downloadTranslator').removeClass('disabled').removeAttr('aria-disabled').attr('href', endpoint);
+		modal.show();
+	} catch (error) {
+		$('#translatorContent').val('');
+		showToast('Failed to load ' + title + ': ' + (error.message || 'request failed'), 'danger');
+	} finally {
+		button.prop('disabled', false).text(originalText);
+	}
+}
+
+function copyTranslatorToClipboard() {
+	const text = $('#translatorContent').val() || '';
+	if (!text) return;
+	if (navigator.clipboard && navigator.clipboard.writeText) {
+		navigator.clipboard.writeText(text).then(function() {
+			showToast('JavaScript copied', 'success');
+		}).catch(function() {
+			fallbackCopyTranslatorText(text);
+		});
+		return;
+	}
+	fallbackCopyTranslatorText(text);
+}
+
+function fallbackCopyTranslatorText(text) {
+	const area = document.getElementById('translatorContent');
+	area.focus();
+	area.select();
+	area.setSelectionRange(0, text.length);
+	let copied = false;
+	try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+	showToast(copied ? 'JavaScript copied' : 'Unable to copy automatically', copied ? 'success' : 'warning');
+}
 </script>
 </body>
 </html>

@@ -1,10 +1,10 @@
 #!/bin/sh -eu
 #
-# Install AI-B100 AOA Counter EAP to Axis camera
+# Install AI-B100 AOA EAP to Axis camera
 
 if [ $# -ne 2 ]; then
 	echo "Usage: $0 <camera-host> <eap-file>" >&2
-	echo "Example: $0 back.intern AI-B100_AOA_Counter_1_0_1_aarch64.eap" >&2
+	echo "Example: $0 bullet.internal AI-B100_AOA_2_0_0_aarch64.eap" >&2
 	exit 1
 fi
 

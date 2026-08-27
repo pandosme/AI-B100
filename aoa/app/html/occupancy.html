@@ -255,7 +255,6 @@ function syncOccupancyPublishConfiguration(callback) {
 			changed = true;
 		}
 	});
-
 	if (!changed) {
 		if (callback) callback();
 		return;
@@ -299,12 +298,22 @@ function isOccupancyScenario(scenario) {
 	return scenario && scenario.type && scenario.type.toLowerCase() === OCCUPANCY_TYPE.toLowerCase();
 }
 
+function isPresenceOwnedScenario(scenario) {
+	const transmission = publishSettings.transmission || {};
+	const presence = transmission.presence || {};
+	return !!(scenario && presence.scenarios && Object.prototype.hasOwnProperty.call(presence.scenarios, scenario.name));
+}
+
+function isRegularOccupancyScenario(scenario) {
+	return isOccupancyScenario(scenario) && !isPresenceOwnedScenario(scenario);
+}
+
 function ensureOccupancyEventIntervals() {
 	if (!window.aoaFullConfig || !window.aoaFullConfig.scenarios) return false;
 
 	let changed = false;
 	window.aoaFullConfig.scenarios.forEach(function(scenario) {
-		if (!isOccupancyScenario(scenario)) return;
+		if (!isRegularOccupancyScenario(scenario)) return;
 
 		if (!scenario.eventInterval) {
 			scenario.eventInterval = { enabled: true };
@@ -319,7 +328,7 @@ function ensureOccupancyEventIntervals() {
 }
 
 function loadOccupancyScenarios() {
-	$.ajax({
+	loadPublishSettings(function() { $.ajax({
 		type: "POST",
 		url: "/local/objectanalytics/control.cgi",
 		contentType: 'application/json',
@@ -331,9 +340,9 @@ function loadOccupancyScenarios() {
 		success: function(response) {
 			if (response && response.data && response.data.scenarios) {
 				window.aoaFullConfig = response.data;
-				occupancyScenarios = response.data.scenarios.filter(isOccupancyScenario);
+				occupancyScenarios = response.data.scenarios.filter(isRegularOccupancyScenario);
 				const updatedEventIntervals = ensureOccupancyEventIntervals();
-				const updatedClassifications = ensureAllObjectClassifications(isOccupancyScenario);
+				const updatedClassifications = ensureAllObjectClassifications(isRegularOccupancyScenario);
 				if (updatedEventIntervals || updatedClassifications) {
 					saveFullConfiguration(function() {
 						showToast('AOA Occupancy settings updated', 'success');
@@ -341,18 +350,16 @@ function loadOccupancyScenarios() {
 					}, 'Failed to update AOA Occupancy settings');
 					return;
 				}
-				loadPublishSettings(function() {
-					syncOccupancyPublishConfiguration(function() {
-						renderAllOccupancy();
-						loadOccupancySamples();
-					});
+				syncOccupancyPublishConfiguration(function() {
+					renderAllOccupancy();
+					loadOccupancySamples();
 				});
 			}
 		},
 		error: function(xhr, status, error) {
 			showToast('Failed to load AOA occupancy scenarios: ' + error, 'danger');
 		}
-	});
+	}); });
 }
 
 function renderAllOccupancy() {
@@ -411,7 +418,7 @@ function createOccupancyCard(scenario) {
 
 					<div class="publish-settings mt-3" id="publish-settings-${scenario.id}">
 						<hr>
-						<h6>Publish Settings</h6>
+						<h6>Occupancy Publish Settings</h6>
 						<div class="form-group mb-2">
 							<label for="occupancy-value-${scenario.id}" class="form-label">Value Type</label>
 							<select class="form-select form-select-sm" id="occupancy-value-${scenario.id}">
@@ -720,7 +727,7 @@ function addNewOccupancy() {
 			enabled: false,
 			triggerDelay: 0,
 			thresholds: [{
-				level: 1,
+				level: 0,
 				type: "moreThan"
 			}]
 		}

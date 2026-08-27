@@ -1,13 +1,15 @@
 {
-  "settingsVersion": 4,
+  "settingsVersion": 9,
   "b100": {
     "ip": "192.168.1.250",
-    "port": 80,
+    "port": 81,
     "timeout": 30,
+    "apiDigestUser": "lorabridge",
+    "apiDigestPassword": "lorabridge",
     "callbackIP": "192.168.1.200",
     "callbackPort": 80,
-    "callbackDigestUser": "aib100",
-    "callbackDigestPassword": "aib100"
+    "callbackDigestUser": "lorabridge",
+    "callbackDigestPassword": "lorabridge"
   },
   "lorawan": {
     "port": 1,
@@ -44,6 +46,11 @@
         "other": true
       },
       "scenarios": {}
+    },
+    "presence": {
+      "enabled": false,
+      "port": 3,
+      "scenarios": {}
     }
   },
   "polling": {
@@ -51,14 +58,27 @@
   },
   "lines": [],
   "downlinkCommands": [
-    { "port": 100, "byte": 1, "enabled": true  },
     { "port": 100, "byte": 2, "enabled": true  },
     { "port": 100, "byte": 3, "enabled": true  },
     { "port": 110, "byte": 1, "enabled": true  },
     { "port": 110, "byte": 2, "enabled": true  },
     { "port": 110, "byte": 3, "enabled": true  },
     { "port": 120, "byte": 1, "enabled": true  },
-    { "port": 120, "byte": 2, "enabled": true  },
-    { "port": 120, "byte": 3, "enabled": true  }
+    { "port": 120, "byte": 3, "enabled": true  },
+    { "port": 130, "byte": 1, "enabled": true  },
+    { "port": 130, "byte": 2, "enabled": true  },
+    { "port": 130, "byte": 3, "enabled": true  },
+    { "port": 131, "byte": 1, "enabled": true  },
+    { "port": 131, "byte": 2, "enabled": true  },
+    { "port": 131, "byte": 3, "enabled": true  },
+    { "port": 131, "byte": 4, "enabled": true  },
+    { "port": 132, "byte": 1, "enabled": true  },
+    { "port": 132, "byte": 2, "enabled": true  },
+    { "port": 132, "byte": 3, "enabled": true  },
+    { "port": 132, "byte": 4, "enabled": true  },
+    { "port": 133, "byte": 1, "enabled": true  },
+    { "port": 133, "byte": 2, "enabled": true  },
+    { "port": 133, "byte": 3, "enabled": true  },
+    { "port": 133, "byte": 4, "enabled": true  }
   ]
 }

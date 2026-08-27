@@ -27,12 +27,14 @@ void Counting_Set_Interval_Minutes(int minutes);
 
 void Counting_Process_AOA_Event(cJSON* event);
 void Counting_Load_From_File(void);
-void Counting_Save_To_File(void);
+int Counting_Save_To_File(void);
 void Counting_Delete_By_Scenario(const char* scenario);
 void Counting_Sync_With_AOA_List(cJSON* scenario_array);
 void Counting_Reset_All(void);
 int Counting_Set_Values_From_JSON(cJSON* body);
 int Counting_Count(void);
+int Counting_Has_Scenario(const char* scenario);
+int Counting_References_Ready(void);
 
 void Counting_Add_Counters_JSON(cJSON* counters_array);
 void Counting_Add_Publish_JSON(cJSON* publish, time_t now);

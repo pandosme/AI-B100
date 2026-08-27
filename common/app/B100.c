@@ -23,6 +23,7 @@
 #include <ctype.h>
 #include <curl/curl.h>
 #include <syslog.h>
+#include <pthread.h>
 
 #define LOG(fmt, args...)    { syslog(LOG_INFO, "B100: " fmt, ## args); printf("B100: " fmt, ## args);}
 #define LOG_WARN(fmt, args...)    { syslog(LOG_WARNING, "B100: " fmt, ## args); printf("B100: " fmt, ## args);}
@@ -33,10 +34,14 @@
 static char g_ip[64] = "192.168.1.250";
 static int g_port = 80;
 static int g_timeout = 30;
+static char g_api_user[33] = {0};
+static char g_api_password[65] = {0};
 
 // Status
 static B100_Status g_status = {0};
 static char g_last_error[256] = {0};
+static time_t g_next_upload_timestamp = 0;
+static pthread_mutex_t g_duty_cycle_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Callbacks
 static B100_Downlink_Callback g_downlink_callback = NULL;
@@ -47,7 +52,6 @@ static B100_GPS_Callback g_gps_callback = NULL;
 static B100_GPS g_gps = {0};
 
 // HTTP serialization — the AI-B100 bridge supports only one socket at a time.
-#include <pthread.h>
 static pthread_mutex_t g_http_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Downlink deduplication
@@ -107,6 +111,15 @@ static void B100_Url_Encode_QueryComponent(const char* in, char* out, size_t out
     out[o] = '\0';
 }
 
+static void B100_Apply_Authentication(CURL* curl) {
+    if (!curl || !g_api_user[0] || !g_api_password[0])
+        return;
+
+    curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(curl, CURLOPT_USERNAME, g_api_user);
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, g_api_password);
+}
+
 // Perform HTTP GET request. Accepts 200 and 202 responses.
 // Returns response body (caller must free) or NULL on error.
 // *http_code_out receives the HTTP status code if non-NULL.
@@ -120,7 +133,8 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
     pthread_mutex_lock(&g_http_mutex);
 
     snprintf(url, sizeof(url), "http://%s:%d%s", g_ip, g_port, endpoint);
-    LOG_API("REQUEST GET %s\n", url);
+        LOG_API("REQUEST GET http://%s:%d%.*s\n", g_ip, g_port,
+            (int)strcspn(endpoint, "?"), endpoint);
 
     curl = curl_easy_init();
     if (!curl) {
@@ -142,13 +156,15 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_timeout);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    B100_Apply_Authentication(curl);
 
     res = curl_easy_perform(curl);
 
     if (res != CURLE_OK) {
         snprintf(g_last_error, sizeof(g_last_error), "HTTP GET failed: %s", curl_easy_strerror(res));
         LOG_WARN("%s\n", g_last_error);
-        LOG_API("RESPONSE GET %s curl_error=%s\n", url, curl_easy_strerror(res));
+        LOG_API("RESPONSE GET http://%s:%d%.*s curl_error=%s\n", g_ip, g_port,
+            (int)strcspn(endpoint, "?"), endpoint, curl_easy_strerror(res));
         http_response_free(response);
         curl_easy_cleanup(curl);
         pthread_mutex_unlock(&g_http_mutex);
@@ -159,12 +175,15 @@ static char* http_get_ex(const char* endpoint, long* http_code_out) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     if (http_code_out) *http_code_out = http_code;
 
-        LOG_API("RESPONSE GET %s http=%ld body=%s\n",
-            url, http_code,
-            response->data && response->size > 0 ? response->data : "(empty)");
+        LOG_API("RESPONSE GET http://%s:%d%.*s http=%ld body_bytes=%zu\n", g_ip, g_port,
+            (int)strcspn(endpoint, "?"), endpoint, http_code, response->size);
 
     if (http_code != 200 && http_code != 202) {
-        snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from %s", http_code, endpoint);
+        if (http_code == 401 || http_code == 403)
+            snprintf(g_last_error, sizeof(g_last_error), "Bridge API authentication failed (HTTP %ld)", http_code);
+        else
+            snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from %.*s", http_code,
+                     (int)strcspn(endpoint, "?"), endpoint);
         LOG_WARN("%s\n", g_last_error);
         http_response_free(response);
         curl_easy_cleanup(curl);
@@ -200,7 +219,7 @@ static char* http_post_json(const char* endpoint, const char* json_body, long* h
     pthread_mutex_lock(&g_http_mutex);
 
     snprintf(url, sizeof(url), "http://%s:%d%s", g_ip, g_port, endpoint);
-    LOG_API("REQUEST POST %s body=%s\n", url, json_body ? json_body : "(none)");
+    LOG_API("REQUEST POST %s body_bytes=%zu\n", url, json_body ? strlen(json_body) : 0);
 
     curl = curl_easy_init();
     if (!curl) {
@@ -234,6 +253,7 @@ static char* http_post_json(const char* endpoint, const char* json_body, long* h
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_timeout);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    B100_Apply_Authentication(curl);
 
     res = curl_easy_perform(curl);
     curl_slist_free_all(headers);
@@ -252,16 +272,17 @@ static char* http_post_json(const char* endpoint, const char* json_body, long* h
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     if (http_code_out) *http_code_out = http_code;
 
-    LOG_API("RESPONSE POST %s http=%ld body=%s\n",
-            url, http_code,
-            response->data && response->size > 0 ? response->data : "(empty)");
+    LOG_API("RESPONSE POST %s http=%ld body_bytes=%zu\n", url, http_code, response->size);
 
     if (response->data && response->size > 0) {
         result = strdup(response->data);
     }
 
     if (http_code != 200 && http_code != 202) {
-        snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from POST %s", http_code, endpoint);
+        if (http_code == 401 || http_code == 403)
+            snprintf(g_last_error, sizeof(g_last_error), "Bridge API authentication failed (HTTP %ld)", http_code);
+        else
+            snprintf(g_last_error, sizeof(g_last_error), "HTTP %ld from POST %s", http_code, endpoint);
         LOG_WARN("%s\n", g_last_error);
     }
 
@@ -312,6 +333,21 @@ int B100_Set_Port(int port) {
 int B100_Set_Timeout(int timeout_seconds) {
     if (timeout_seconds <= 0) return 0;
     g_timeout = timeout_seconds;
+    return 1;
+}
+
+int B100_Set_API_Credentials(const char* user, const char* password) {
+    const char* next_user = user ? user : "";
+    const char* next_password = password ? password : "";
+    if ((next_user[0] && !next_password[0]) || (!next_user[0] && next_password[0]))
+        return 0;
+    if (strlen(next_user) > 32 || strlen(next_password) > 64)
+        return 0;
+
+    pthread_mutex_lock(&g_http_mutex);
+    snprintf(g_api_user, sizeof(g_api_user), "%s", next_user);
+    snprintf(g_api_password, sizeof(g_api_password), "%s", next_password);
+    pthread_mutex_unlock(&g_http_mutex);
     return 1;
 }
 
@@ -499,6 +535,18 @@ cJSON* B100_Get_Params(const char* param) {
 
     cJSON* json = cJSON_Parse(response);
     free(response);
+    if (json) {
+        cJSON* data_rate = cJSON_GetObjectItem(json, "data_rate");
+        cJSON* adr_enable = cJSON_GetObjectItem(json, "adr_enable");
+        if (data_rate && cJSON_IsNumber(data_rate)) {
+            g_status.configuredDataRate = data_rate->valueint;
+            g_status.hasConfiguredDataRate = 1;
+        }
+        if (adr_enable && cJSON_IsNumber(adr_enable)) {
+            g_status.configuredAdr = adr_enable->valueint ? 1 : 0;
+            g_status.hasConfiguredAdr = 1;
+        }
+    }
     return json;
 }
 
@@ -513,6 +561,16 @@ int B100_Set_Params(cJSON* params) {
     free(body);
 
     if (http_code == 200) {
+        cJSON* data_rate = cJSON_GetObjectItem(params, "data_rate");
+        cJSON* adr_enable = cJSON_GetObjectItem(params, "adr_enable");
+        if (data_rate && cJSON_IsNumber(data_rate)) {
+            g_status.configuredDataRate = data_rate->valueint;
+            g_status.hasConfiguredDataRate = 1;
+        }
+        if (adr_enable && cJSON_IsNumber(adr_enable)) {
+            g_status.configuredAdr = adr_enable->valueint ? 1 : 0;
+            g_status.hasConfiguredAdr = 1;
+        }
         if (response) {
             cJSON* json = cJSON_Parse(response);
             if (json) {
@@ -765,12 +823,19 @@ int B100_Process_Status_Callback(cJSON* json) {
         strncpy(g_status.statusText, B100_Status_Text(g_status.statusCode),
                 sizeof(g_status.statusText) - 1);
 
-        g_status.joined = (g_status.statusCode == B100_STATUS_JOINED ||
-                          g_status.statusCode == B100_STATUS_OK ||
-                          g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
-                          g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
-                          g_status.statusCode == B100_STATUS_SENT_CONFIRMED ||
-                          g_status.statusCode == B100_STATUS_NOT_CONFIRMED);
+        if (g_status.statusCode == B100_STATUS_JOINED ||
+            g_status.statusCode == B100_STATUS_OK ||
+            g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
+            g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
+            g_status.statusCode == B100_STATUS_SENT_CONFIRMED ||
+            g_status.statusCode == B100_STATUS_NOT_CONFIRMED) {
+            g_status.joined = 1;
+        } else if (g_status.statusCode == B100_STATUS_RESTARTED ||
+                   g_status.statusCode == B100_STATUS_JOIN_FAILED ||
+                   g_status.statusCode == B100_STATUS_LOST_CONNECTION ||
+                   g_status.statusCode == B100_STATUS_NOT_JOINED) {
+            g_status.joined = 0;
+        }
         LOG_TRACE("Status callback: code=%d (%s) joined=%d\n",
                   g_status.statusCode, g_status.statusText, g_status.joined);
     }
@@ -799,23 +864,29 @@ int B100_Process_Status_Callback(cJSON* json) {
         g_status.snr = (float)item->valuedouble;
         g_status.hasSnr = 1;
     }
-    if ((item = cJSON_GetObjectItem(json, "fcntUp"))) {
+    int retain_joined_metrics = g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
+                                g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
+                                g_status.statusCode == B100_STATUS_DUTY_CYCLE;
+    if (!retain_joined_metrics && (item = cJSON_GetObjectItem(json, "fcntUp"))) {
         g_status.fcntUp = (unsigned int)item->valueint;
         g_status.hasFcntUp = 1;
     }
-    if ((item = cJSON_GetObjectItem(json, "data_rate"))) {
+    if (!retain_joined_metrics && (item = cJSON_GetObjectItem(json, "data_rate"))) {
         g_status.dataRate = item->valueint;
         g_status.hasDataRate = 1;
     }
-    if ((item = cJSON_GetObjectItem(json, "maxUp"))) {
+    if (!retain_joined_metrics && (item = cJSON_GetObjectItem(json, "maxUp"))) {
         g_status.maxPayload = item->valueint;
         g_status.hasMaxPayload = 1;
     }
     if ((item = cJSON_GetObjectItem(json, "tUnix")))
         g_status.tUnix = (unsigned long)item->valuedouble;
     if ((item = cJSON_GetObjectItem(json, "next_upload_ms"))) {
+        pthread_mutex_lock(&g_duty_cycle_mutex);
         g_status.nextUploadMs = (unsigned long)item->valuedouble;
         g_status.hasNextUploadMs = 1;
+        g_next_upload_timestamp = time(NULL);
+        pthread_mutex_unlock(&g_duty_cycle_mutex);
     }
 
     g_status.timestamp = time(NULL);
@@ -857,8 +928,11 @@ int B100_Process_Receive_Callback(cJSON* json) {
     if ((item = cJSON_GetObjectItem(json, "tUnix")))
         g_status.tUnix = (unsigned long)item->valuedouble;
     if ((item = cJSON_GetObjectItem(json, "next_upload_ms"))) {
+        pthread_mutex_lock(&g_duty_cycle_mutex);
         g_status.nextUploadMs = (unsigned long)item->valuedouble;
         g_status.hasNextUploadMs = 1;
+        g_next_upload_timestamp = time(NULL);
+        pthread_mutex_unlock(&g_duty_cycle_mutex);
     }
 
     // Linkcheck fields (only present in linkcheck responses)
@@ -954,11 +1028,35 @@ int B100_Restart(void) {
 // Supports ASCII string payload or byte-array payload
 // ==================================================================
 
+static int B100_Check_Uplink_Ready(void) {
+    pthread_mutex_lock(&g_duty_cycle_mutex);
+    if (!g_status.hasNextUploadMs || g_status.nextUploadMs == 0 || g_next_upload_timestamp == 0) {
+        pthread_mutex_unlock(&g_duty_cycle_mutex);
+        return 1;
+    }
+
+    double elapsed_ms = difftime(time(NULL), g_next_upload_timestamp) * 1000.0;
+    if (elapsed_ms < 0)
+        elapsed_ms = 0;
+    if (elapsed_ms >= (double)g_status.nextUploadMs) {
+        pthread_mutex_unlock(&g_duty_cycle_mutex);
+        return 1;
+    }
+
+    unsigned long remaining_ms = g_status.nextUploadMs - (unsigned long)elapsed_ms;
+    snprintf(g_last_error, sizeof(g_last_error),
+             "Bridge duty cycle active; retry in %.1f seconds", remaining_ms / 1000.0);
+    pthread_mutex_unlock(&g_duty_cycle_mutex);
+    return 0;
+}
+
 int B100_Send(const char* payload, int port, int confirmed) {
     if (!payload || port < 1 || port > 223) {
         snprintf(g_last_error, sizeof(g_last_error), "Invalid parameters");
         return 0;
     }
+    if (!B100_Check_Uplink_Ready())
+        return 0;
 
     cJSON* body = cJSON_CreateObject();
     cJSON_AddNumberToObject(body, "port", port);
@@ -998,6 +1096,8 @@ int B100_Send_Bytes(const unsigned char* data, int length, int port, int confirm
         snprintf(g_last_error, sizeof(g_last_error), "Invalid parameters");
         return 0;
     }
+    if (!B100_Check_Uplink_Ready())
+        return 0;
 
     cJSON* body = cJSON_CreateObject();
     cJSON_AddNumberToObject(body, "port", port);
@@ -1080,7 +1180,7 @@ int B100_Configure_Callbacks(const char* callback_ip, int callback_port,
     // Some bridge firmware variants apply HTTP callback settings more reliably
     // via the same LAN form endpoint used in the web UI: /lan.html?...query...
     // If /set fails, retry with a LAN-style update payload.
-    if (!result) {
+    if (!result && g_port == 80) {
         cJSON* current = B100_Get_Params(NULL);
         if (current) {
             int dhcp_enable = 1;

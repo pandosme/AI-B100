@@ -63,6 +63,10 @@ typedef struct {
     int maxPayload;             // Maximum payload size in bytes
     int hasMaxPayload;          // 1 after callback supplied max payload
     int adr;                    // Adaptive Data Rate enabled (1) or not (0)
+    int configuredDataRate;     // Configured uplink data rate (0-5)
+    int hasConfiguredDataRate;  // 1 after /get or /set supplied data rate
+    int configuredAdr;          // Configured Adaptive Data Rate state
+    int hasConfiguredAdr;       // 1 after /get or /set supplied ADR state
     
     // Frame Counters
     unsigned int fcntUp;        // Uplink frame counter
@@ -147,6 +151,7 @@ void B100_Cleanup(void);
 int B100_Set_IP(const char* ip);
 int B100_Set_Port(int port);
 int B100_Set_Timeout(int timeout_seconds);
+int B100_Set_API_Credentials(const char* user, const char* password);
 
 // Connection Management
 int B100_Test_Connection(void);

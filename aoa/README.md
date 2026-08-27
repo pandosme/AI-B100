@@ -1,6 +1,6 @@
 # AI-B100 AOA
 
-An Axis ACAP application that reads Axis Object Analytics (AOA) Counting and Occupancy scenarios on an Axis camera and publishes compact numeric payloads over LoRaWAN through an AI-B100 bridge.
+An Axis ACAP application that reads Axis Object Analytics (AOA) Counting and Occupancy In Area scenarios on an Axis camera and publishes compact Counting, Occupancy, and Presence Alert payloads over LoRaWAN through an AI-B100 bridge.
 
 The camera performs all analytics locally. The ACAP sends only numeric Counting and Occupancy data to the bridge; no images or video leave the camera.
 
@@ -10,11 +10,11 @@ The camera performs all analytics locally. The ACAP sends only numeric Counting 
 
 - Reads AOA `CrosslineCounting` scenarios and publishes the accumulated counts shown by the AOA GUI.
 - Creates, manages, and reads AOA `OccupancyInArea` scenarios.
-- Publishes Counting and Occupancy independently, each with its own interval, enabled scenarios, and enabled object classes.
-- Uses fixed LoRaWAN application ports: Counting on port `1` and Occupancy on port `2`.
-- Generates a combined JavaScript decoder/translator for both Counting and Occupancy payloads.
+- Publishes Counting and Occupancy periodically and Presence Alert whenever a retained threshold state changes.
+- Uses fixed LoRaWAN application ports: Counting on port `1`, Occupancy on port `2`, and Presence Alert on port `3`.
+- Generates a combined JavaScript decoder/translator for all three payloads.
 - Receives AI-B100 status, downlink, GPS, and link-check callbacks.
-- Provides web pages for Publish, Counting, Occupancy, LoRA Bridge, LoRA Downlink, GPS, and About.
+- Provides web pages for Publish, Counting, Occupancy, Presence Alert, LoRA Bridge, LoRA Downlink, GPS, and About.
 - Provides a plain-text Installation Info report for field documentation.
 
 ---
@@ -53,11 +53,13 @@ For shared staging, IP addressing, callback-account setup, LoRaWAN registration,
 
 ## How It Works
 
-Counting and Occupancy are separate publish streams.
+Counting, Occupancy, and Presence Alert are separate publish streams.
 
 Counting reads AOA `CrosslineCounting` scenario totals. The app keeps the scenario selection and class selection in its own settings, then encodes the currently selected accumulated AOA values as compact little-endian `uint16` values on LoRaWAN port `1`.
 
 Occupancy manages AOA `OccupancyInArea` scenarios and reads the selected area values. It encodes one compact block per selected area on LoRaWAN port `2`, using the configured value type: maximum, minimum, or average.
+
+Presence Alert creates and manages independent AOA `occupancyInArea` scenarios with threshold events enabled. Each area configures a minimum number of objects and an AOA trigger delay. The ACAP maps `Device1Scenario<ID>Threshold` events back to the configured scenario ID because threshold events contain only `active`, not scenario name or type. AOA controls the high delay. When AOA goes low, the ACAP retains the internal high state for twice the configured trigger delay; another high event cancels that pending clear. State changes are sent on port `3`.
 
 The AI-B100 bridge handles all LoRaWAN radio work. The ACAP talks to the bridge over HTTP and receives bridge status, downlink, and GPS data by callback on the camera.
 
@@ -69,10 +71,11 @@ The AI-B100 bridge handles all LoRaWAN radio work. The ACAP talks to the bridge 
 2. Open the app UI and go to **LoRA Bridge**.
 3. Set the AI-B100 bridge IP, callback IP, callback port, and callback digest credentials. Save, then request status or join.
 4. Go to **Counting** and select the AOA `CrosslineCounting` scenarios and object classes that should be included in the Counting payload.
-5. Go to **Occupancy** to create or edit AOA `OccupancyInArea` scenarios, choose the value type, and select the areas/classes to include in the Occupancy payload.
-6. Go to **Publish** to enable Counting and/or Occupancy, set each interval, publish manually, and inspect recent uplinks.
-7. Download the JavaScript translator from **Publish** or **About** after changing scenario, area, class, or value-type selections.
-8. Use **LoRA Downlink**, **GPS**, and **About** for received downlinks, GPS callback data, link state, and the Installation Info report.
+5. Go to **Occupancy** to create or edit AOA `OccupancyInArea` scenarios and configure periodic Occupancy values.
+6. Open **Presence Alert** to add or edit areas, drag each area over live video, select object classes, configure the object threshold and trigger delay, and view the retained state.
+7. Go to **Publish** to enable the required streams, set periodic intervals, publish manually, and inspect recent uplinks.
+8. Download the JavaScript translator from **Publish** or **About** after changing scenario, area, class, or value-type selections.
+9. Use **LoRA Downlink**, **GPS**, and **About** for received downlinks, GPS callback data, link state, and the Installation Info report.
 
 ---
 
@@ -80,9 +83,10 @@ The AI-B100 bridge handles all LoRaWAN radio work. The ACAP talks to the bridge 
 
 | Page | Purpose |
 | --- | --- |
-| Publish | Configure Counting and Occupancy publish intervals/ports, publish manually, and view the last 10 LoRaWAN publishes |
+| Publish | Configure Counting, Occupancy, and Presence Alert publishing, publish manually, and view the last 10 LoRaWAN publishes |
 | Counting | View AOA accumulated counts, select classes and scenarios for Counting payloads, and synchronize/reset counter state |
-| Occupancy | Create/edit/delete OccupancyInArea scenarios, select classes and areas for Occupancy payloads, and view current occupancy status |
+| Occupancy | Create/edit/delete OccupancyInArea scenarios and configure Occupancy payloads |
+| Presence Alert | Add/edit/delete areas, configure classes and threshold timing, drag area polygons over live video, and view retained alert state |
 | LoRA Bridge | Configure bridge IP/callbacks, join/restart the bridge, request status, and run link checks |
 | LoRA Downlink | View downlink messages and enable/disable supported downlink commands |
 | GPS | View GPS callback data from the bridge |
@@ -94,11 +98,21 @@ The app is served from the shared package path `/local/aib100/`. The package fri
 
 ## Settings Model
 
-The current settings schema is version 4. Counting and Occupancy publish configuration is separated under `transmission.counting` and `transmission.occupancy`.
+The current settings schema is version 9. Counting, Occupancy, and Presence Alert configuration is separated under `transmission.counting`, `transmission.occupancy`, and `transmission.presence`.
 
 ```json
 {
-       "settingsVersion": 4,
+       "settingsVersion": 9,
+          "b100": {
+                 "ip": "192.168.1.250",
+                 "port": 81,
+                 "apiDigestUser": "lorabridge",
+                 "apiDigestPassword": "lorabridge",
+                 "callbackIP": "192.168.1.200",
+                 "callbackPort": 80,
+                 "callbackDigestUser": "lorabridge",
+                 "callbackDigestPassword": "lorabridge"
+          },
        "transmission": {
               "counting": {
                      "enabled": true,
@@ -128,18 +142,25 @@ The current settings schema is version 4. Counting and Occupancy publish configu
                             "other": true
                      },
                      "scenarios": {}
+              },
+              "presence": {
+                     "enabled": false,
+                     "port": 3,
+                     "scenarios": {
+                                       "Entrance": {}
+                     }
               }
        }
 }
 ```
 
-Counting and Occupancy use fixed protocol ports. The `enabled` field controls whether a stream publishes; the `port` field is kept as read-only protocol metadata. Enabled classes are encoded in the fixed order `human`, `car`, `bike`, `bus`, `truck`, `other`.
+All three streams use fixed protocol ports. The `enabled` field controls whether a stream publishes; the `port` field is read-only protocol metadata. Enabled Occupancy classes are encoded in the fixed order `human`, `car`, `bike`, `bus`, `truck`, `other`.
 
 ---
 
 ## Uplink Payloads
 
-Counting and Occupancy use independent fixed LoRaWAN ports. The generated decoder knows the fixed ports, enabled scenarios, enabled labels, and Occupancy value type.
+Counting, Occupancy, and Presence Alert use independent fixed LoRaWAN ports. The generated decoder knows the fixed ports and selected scenarios.
 
 ### Counting Payload
 
@@ -185,60 +206,170 @@ Example decoded JSON:
 }
 ```
 
+### Presence Alert Payload
+
+Presence Alert state is sent on port `3` when publishing is enabled and a configured area's retained state changes. Each configured scene contributes exactly one byte in settings order. The checked classes define which detected objects can satisfy that scene's threshold; they do not create separate class values in the payload.
+
+```text
+byte 0: area 1 state, `0` clear or `1` alert
+...
+byte N-1: area N state, `0` clear or `1` alert
+```
+
+A value of `1` means the scene detected enough objects matching any of its checked classes. A value of `0` means it did not.
+
+Examples:
+
+```text
+one area alert: [0x01]
+one area clear: [0x00]
+three areas with only area 2 alert: [0x00, 0x01, 0x00]
+```
+
 ---
 
 ## Decoder / Translator
 
-The app generates one JavaScript decoder for both Counting and Occupancy. Download it from the Publish page or from the About page.
+The app generates one JavaScript decoder for Counting, Occupancy, and Presence Alert. Download it from the Publish page or from the About page.
 
 The decoder includes:
 
-- fixed Counting and Occupancy ports
+- fixed Counting, Occupancy, and Presence ports
 - configured scenario names
 - enabled classes per scenario
 - buffer layout comments
 - example decoded JSON output
 - a `decodeByPort(port, bytes)` dispatcher
+- explicit wrappers: `JavaScriptTranslator(port, bytes)`, `Decode(fPort, bytes)`, and `Decoder(bytes, port)`
+
+The decoder accepts only an even-length hexadecimal string such as `"01"` or `"0001"`. The caller must convert base64, binary buffers, or other representations to hex before decoding. With the Node-RED flow setting `msg.topic` to the numeric port and `msg.payload` to the hex string, use `msg.payload = JavaScriptTranslator(msg.topic, msg.payload)`.
 
 Download a fresh decoder after changing scenario selections, labels, areas, or Occupancy value type.
 
 ---
 
-## Downlink Commands
+## OTA Configuration
 
-Commands are short binary payloads sent from the LoRaWAN network server to the bridge. Individual commands can be enabled or disabled in the LoRA Downlink page.
+All OTA requests and responses use the same LoRaWAN port. Ports 1 through 20 remain reserved for use-case data.
 
-### Port 100 - Actions
-
-| Byte | Action |
-| --- | --- |
-| `0x01` | Restart the AI-B100 bridge |
-| `0x02` | Initiate a new LoRaWAN OTAA join |
-| `0x03` | Reset AOA and internal counters |
-
-### Port 110 - Configuration
-
-Two-byte payloads use `[command, value]`.
-
-| Byte 0 | Byte 1 | Action |
+| Port | Group | Supported requests |
 | --- | --- | --- |
-| `0x01` | `5..60` | Set publish interval in minutes |
-| `0x02` | `0..5` | Set fixed data rate, DR0..DR5 |
-| `0x03` | `0` or `1` | Disable or enable ADR |
+| 100 | Actions: Restart Bridge and Reset All Data | SET, CAPS |
+| 110 | AI-B100 Data Rate and ADR configuration | GET, SET, CAPS |
+| 120 | Camera and bridge information | GET, CAPS |
+| 130 | Use-case enable state and publish rate | GET, SET, CAPS |
+| 131 | Existing Counting scene configuration | GET, SET, CAPS, LIST |
+| 132 | Existing Occupancy scene configuration | GET, SET, CAPS, LIST |
+| 133 | Existing Presence Alert configuration | GET, SET, CAPS, LIST |
 
-### Port 120 - Information Requests
+Every frame is `[command, version, transactionId, body..., crc8]`. Version is `0x01`. CRC-8 uses polynomial `0x07` and initial value `0x00` over every preceding byte. Frames are limited to 51 bytes.
 
-| Byte | Action |
+The command byte is transport metadata, not part of the canonical configuration body. It is required because both GET and SET requests arrive as LoRaWAN downlinks: GET asks the application to uplink its current configuration, while SET applies the supplied configuration. For configuration ports, the GET response body is the same body accepted by SET.
+
+The transaction ID associates a GET response, acknowledgement, or error with its request. The generated encoder defaults it to `0`; callers normally do not need to provide it. An integration sending concurrent requests may optionally set `transactionId` from 0 through 255.
+
+| Command | Request | Response |
+| --- | --- | --- |
+| `0x01` | GET | `0x81` GET response |
+| `0x02` | SET or execute | `0x82` SET acknowledgement |
+| `0x03` | Capabilities | `0x83` capabilities response |
+| `0x04` | List scenes | `0x84` list response |
+| | | `0xE0` error response |
+
+Status values are `0x00` OK, `0x01` invalid length, `0x02` invalid value, `0x03` invalid range, `0x04` CRC mismatch, `0x05` unknown command, `0x06` unknown scene, `0x07` scene fingerprint mismatch, `0x08` map fingerprint mismatch, `0x09` more pages pending, `0x0A` apply failed, and `0x0B` unsupported.
+
+### Actions and AI-B100
+
+Port 100 SET bodies contain one action byte: `0x01` restarts the bridge and `0x02` resets Counting, Occupancy, and Presence runtime data. Its acknowledgement body is `[action, status]`.
+
+Port 110 GET responses and SET requests share `[fieldMask, dataRate, adrEnabled]`. Field-mask bit 0 selects Data Rate and bit 1 selects ADR. Data Rate is DR0 through DR5 and ADR is 0 or 1.
+
+Port 110 SET requests are applied by the background worker after the bridge downlink callback has returned. The SET acknowledgement reports the final bridge API result rather than only request validation.
+
+Port 120 GET bodies are `[informationType, page]`, where type 1 is camera information and type 2 is bridge information. Current responses use compact length-prefixed fields and binary numeric values so the complete information normally fits in one 51-byte LoRaWAN frame. The decoder exposes camera information as `model`, `serial`, `firmware`, `uptimeHours`, and `appVersion`. Firmware and application versions are strings because dotted versions are not JSON numbers.
+
+If unusually long device strings cannot fit in the structured frame, the ACAP falls back to legacy `[informationType, page, pageCount, textLength, text...]` responses. Read `pageCount` and request the remaining pages in that case. The decoder continues to merge legacy pages passed as `Decode({port: 120, messages: [...]})`.
+
+Bridge information is decoded as `hardware`, `hardwareVersion`, `firmware`, `powerSource`, `temperatureC`, `restartCounter`, and `devAddr`.
+
+OTA responses are queued after the downlink callback returns and retried while the bridge reports a duty-cycle delay. Accepted responses appear in the Publish log on their OTA request port.
+
+### Transmission Configuration
+
+Port 130 addresses one use case per request. GET takes a one-byte use-case index. Its response body is identical to the corresponding SET body.
+
+| Index | Canonical GET response / SET body |
 | --- | --- |
-| `0x01` | Reply on port 121 with camera information |
-| `0x02` | Reply on port 122 with bridge information |
-| `0x03` | Update local signal quality status from bridge/link data |
+| 1 Counting | `[0x01, enabled, intervalMinutes]` |
+| 2 Occupancy | `[0x02, enabled, intervalMinutes]` |
+| 3 Presence Alert | `[0x03, enabled]` |
 
-The app no longer sends automatic text test payloads on port 7.
+For example, the canonical body `01 01 05` enables Counting with a five-minute interval. `03 00` disables Presence Alert publishing. Intervals are 1 through 60 minutes.
+
+### Scene Configuration
+
+Ports 131 through 133 can update existing scenes but cannot create, delete, or rename them. Scene order is stable ascending AOA scene ID. Names and IDs are embedded in the camera-generated JavaScript files.
+
+LIST requests contain `[page]`. Each response contains `[mapFingerprint:u16, totalScenes, page, pageCount, entriesOnPage, entries...]`; every six-byte entry is `[sceneIndex, sceneId:u16, sceneFingerprint:u16, pointCount]`. The generated decoder returns these as `mapFingerprint`, `totalScenes`, `page`, `pageCount`, and a `scenes` array enriched with scene names from its embedded map.
+
+GET takes `[sceneIndex, page]`. The GET response body is byte-for-byte the same canonical body accepted by SET:
+
+```text
+[configVersion, sceneIndex, sceneId:u16, sceneFingerprint:u16,
+ mapFingerprint:u16, page, pageCount, pointStart, pointsInPage,
+ totalPoints, useCaseFields..., packedPoint:u24, ...]
+```
+
+Scene config version 2 exposes integer coordinates from 0 through 1000 with the origin at the top-left. `(0,0)` maps to AOA `(-1,-1)`, the center is `(500,500)`, and `(1000,1000)` maps to AOA `(1,1)`. Each point is packed little-endian into three bytes as `x | (y << 10)`; the upper four bits are reserved and must be zero. This reduces coordinate data from four to three bytes per point, allowing every supported ten-point scene to fit in one 51-byte frame.
+
+SET continues to accept legacy config version 1 coordinates as two signed Q15 integers for compatibility. GET and the generated encoder use version 2. The generated decoder always returns version 2-style integer coordinates and includes `coordinateSystem: {origin: "topLeft", minimum: 0, maximum: 1000}`. Scene and map CRC16 fingerprints reject messages created from a stale scene map.
+
+- Counting fields: direction, publish-class mask, reserved byte, then line vertices.
+- Occupancy fields: publish-class mask, value type (`0=max`, `1=min`, `2=average`), reserved byte, then area vertices.
+- Presence fields: detection-class mask, threshold object count, trigger delay as `u16`, then area vertices.
+- Class-mask bits 0 through 5 are human, car, bike, bus, truck, and other.
+
+### JavaScript Encoder and Decoder
+
+The LoRA Downlink page provides separate **OTA Encoder** and **OTA Decoder** JavaScript files. Both are generated from the current camera scene map. Download new files after creating, deleting, or renaming a scene. They define global `Encode`, `EncodeHex`, and `Decode` functions for direct pasting into a Node-RED function node or LoRaWAN provider console; no module loader is required.
+
+```javascript
+var encoded = Encode({
+       type: "Publish",
+       config: {
+              service: "counting",
+              active: true,
+              intervall: 5
+       }
+});
+
+// { port: 130, message: "02010001010555" }
+```
+
+`type` selects the OTA port and the supplied fields determine whether the request is GET or SET. For example, Publish with only `service` requests the current setting; adding `active` or `intervall` applies a setting. The generated encoder contains JSON examples for ports 100, 110, 120, 130, 131, 132, and 133.
+
+`Encode()` returns `{port, message}` for a single LoRaWAN message. Scene geometry can require multiple messages; in that case it returns `{port, messages}` and every message must be sent in order. `EncodeHex()` is available when the caller requires exactly one message. `Decode()` accepts the encoder result directly or `(port, hexPayload)`.
+
+The decoder returns named fields for all acknowledgements, errors, and capability responses. These include `statusName`, the action, use case, or scene index associated with a SET acknowledgement, and port-specific capability objects instead of opaque byte arrays.
+
+In a Node-RED function node for a single-message operation:
+
+```javascript
+var encoded = Encode(msg.payload);
+msg.topic = encoded.port;
+msg.payload = encoded.message;
+return msg;
+```
 
 ---
 
 ## Bridge Integration
+
+AI-B100 firmware 2.0.0 and later can separate the web GUI and HTTP API. The recommended setup is GUI port `80` and API port `81`. The ACAP authenticates every API request with HTTP Digest using the configured Bridge API User and Password. Fresh installations default to `lorabridge` / `lorabridge`.
+
+Bridges running firmware earlier than 2.0.0 remain supported on port `80`. Upgrading the ACAP preserves the saved bridge API port, so an existing port-80 installation is not moved automatically. Digest authentication is challenge-based and does not prevent an older unauthenticated endpoint from responding normally. The ACAP never silently falls back from port `81` to port `80`; an authentication or port error must be corrected in LoRA Bridge settings.
+
+Bridge API credentials are separate from callback credentials. Callback credentials are the Axis camera Viewer account the bridge uses when posting to the ACAP. The recommended account is also `lorabridge` / `lorabridge`.
 
 The ACAP configures AI-B100 callback endpoints for status, downlink receive, and GPS updates:
 
@@ -279,8 +410,8 @@ cd aoa
 
 Output:
 
-- `AI-B100_AOA_1_2_0_aarch64.eap`
-- `AI-B100_AOA_1_2_0_armv7hf.eap`
+- `AI-B100_AOA_2_0_0_aarch64.eap`
+- `AI-B100_AOA_2_0_0_armv7hf.eap`
 
 Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
 
@@ -291,14 +422,14 @@ Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 came
 Install the matching `.eap` package from the camera web UI under Apps, or use the helper script from this directory.
 
 ```bash
-./install.sh <camera-host> AI-B100_AOA_1_2_0_aarch64.eap
+./install.sh <camera-host> AI-B100_AOA_2_0_0_aarch64.eap
 ```
 
 The equivalent Axis application upload endpoint call is:
 
 ```bash
 curl --digest -u '<user>:<password>' \
-       -F 'packfil=@AI-B100_AOA_1_2_0_aarch64.eap;type=application/octet-stream' \
+       -F 'packfil=@AI-B100_AOA_2_0_0_aarch64.eap;type=application/octet-stream' \
        'http://<camera-host>/axis-cgi/applications/upload.cgi'
 ```
 
@@ -311,11 +442,12 @@ The AOA and Radar variants both use `appName: "aib100"`. Install the AOA variant
 | Path | Description |
 | --- | --- |
 | [app/main.c](app/main.c) | ACAP backend, settings migration, AOA events, LoRaWAN publishing, HTTP endpoints, decoder generation |
-| [app/B100.c](app/B100.c) | AI-B100 HTTP client and callback parsing |
+| [../common/app/B100.c](../common/app/B100.c) | Shared AI-B100 HTTP client and callback parsing |
 | [app/html/index.html](app/html/index.html) | Publish page |
 | [app/html/aoa.html](app/html/aoa.html) | Counting page |
 | [app/html/occupancy.html](app/html/occupancy.html) | Occupancy page |
-| [app/html/bridge.html](app/html/bridge.html) | LoRA Bridge page |
+| [app/html/presence.html](app/html/presence.html) | Presence page |
+| [../common/app/html/bridge.html](../common/app/html/bridge.html) | Shared LoRA Bridge page |
 | [app/html/downlink.html](app/html/downlink.html) | LoRA Downlink page |
 | [app/html/about.html](app/html/about.html) | About page and Installation Info report |
 | [app/settings/settings.json](app/settings/settings.json) | Default settings |
@@ -323,6 +455,15 @@ The AOA and Radar variants both use `appName: "aib100"`. Install the AOA variant
 ---
 
 # History
+
+## 2.0.0 - Authenticated Bridge API
+
+- Added HTTP Digest authentication for AI-B100 firmware 2.0.0 and later.
+- Changed the fresh-install bridge API default to port 81 while keeping the web GUI on port 80.
+- Preserved saved port-80 settings for bridges running firmware earlier than 2.0.0.
+- Added separate bridge API and camera callback credentials to the LoRA Bridge page.
+- Hardened callback parsing for modern JSON content types and payload formats.
+- Added a link to the bridge event log on GUI port 80.
 
 ## 1.2.0 - Fixed LoRaWAN Port Scheme
 

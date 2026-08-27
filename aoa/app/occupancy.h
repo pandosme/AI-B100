@@ -22,6 +22,7 @@ void Occupancy_Set_Interval_Minutes(int minutes);
 
 void Occupancy_Process_AOA_Event(cJSON* event);
 void Occupancy_Update_ACAP_Status(void);
+void Occupancy_Reset_All(void);
 int Occupancy_Count(void);
 
 void Occupancy_Add_Status_JSON(cJSON* occupancy_array);

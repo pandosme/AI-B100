@@ -1,0 +1,186 @@
+[
+  {
+    "id": "7dd5868359bdf44b",
+    "type": "tab",
+    "label": "ACAP OTA Downlink Test",
+    "disabled": false,
+    "info": "Injects an OTA frame into the ACAP bridge receive callback without using a LoRaWAN console. Set ACAP_BASE_URL in Node-RED or edit the Prepare ACAP callback node. Configure Digest authentication on the HTTP request node."
+  },
+  {
+    "id": "26958bd485808433",
+    "type": "inject",
+    "z": "7dd5868359bdf44b",
+    "name": "LIST Counting scenes",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"port\":131,\"message\":\"0401000033\"}",
+    "payloadType": "json",
+    "x": 160,
+    "y": 100,
+    "wires": [
+      [
+        "412ce26a35f74c4a"
+      ]
+    ]
+  },
+  {
+    "id": "20a3f07d93f81ef0",
+    "type": "http in",
+    "z": "7dd5868359bdf44b",
+    "name": "POST /aoa/ota/downlink",
+    "url": "/aoa/ota/downlink",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 180,
+    "wires": [
+      [
+        "412ce26a35f74c4a"
+      ]
+    ]
+  },
+  {
+    "id": "412ce26a35f74c4a",
+    "type": "function",
+    "z": "7dd5868359bdf44b",
+    "name": "Prepare ACAP callback",
+    "func": "let input = msg.payload;\nif (typeof input === 'string') {\n    try {\n        input = JSON.parse(input);\n    } catch (error) {\n        node.error('Payload must be valid JSON', msg);\n        return null;\n    }\n}\n\nconst port = Number(input && input.port);\nconst message = String(input && (input.message || input.payload) || '')\n    .replace(/\\s+/g, '')\n    .toUpperCase();\n\nif (!Number.isInteger(port) || port < 1 || port > 223) {\n    node.error('port must be an integer from 1 through 223', msg);\n    return null;\n}\nif (!/^[0-9A-F]+$/.test(message) || message.length % 2 !== 0) {\n    node.error('message must be even-length HEX', msg);\n    return null;\n}\nconst bytes = message.match(/../g).map(value => parseInt(value, 16));\nif (bytes.length < 4 || bytes.length > 51) {\n    node.error('OTA message must contain 4 through 51 bytes', msg);\n    return null;\n}\nif (bytes[1] !== 1) {\n    node.error('Unsupported OTA protocol version ' + bytes[1], msg);\n    return null;\n}\nlet crc = 0;\nfor (const value of bytes.slice(0, -1)) {\n    crc ^= value;\n    for (let bit = 0; bit < 8; bit += 1) {\n        crc = crc & 0x80 ? ((crc << 1) ^ 0x07) & 0xFF : (crc << 1) & 0xFF;\n    }\n}\nif (crc !== bytes[bytes.length - 1]) {\n    node.error('OTA CRC mismatch', msg);\n    return null;\n}\n\nconst baseUrl = env.get('ACAP_BASE_URL') || 'http://back.internal';\nmsg._otaRequest = { port, message };\nmsg.method = 'POST';\nmsg.url = baseUrl.replace(/\\/$/, '') + '/local/aib100/b100_receive';\nmsg.headers = { 'content-type': 'application/json' };\nmsg.payload = {\n    port,\n    length: bytes.length,\n    payload: message,\n    payload_type: 'HEX',\n    next_upload_ms: 0\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 430,
+    "y": 140,
+    "wires": [
+      [
+        "082f526ae9388edf"
+      ]
+    ]
+  },
+  {
+    "id": "082f526ae9388edf",
+    "type": "http request",
+    "z": "7dd5868359bdf44b",
+    "name": "POST to ACAP (Digest auth)",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "digest",
+    "senderr": false,
+    "headers": [],
+    "x": 700,
+    "y": 140,
+    "wires": [
+      [
+        "b5ff6f37238b53f3"
+      ]
+    ]
+  },
+  {
+    "id": "b5ff6f37238b53f3",
+    "type": "function",
+    "z": "7dd5868359bdf44b",
+    "name": "Format result",
+    "func": "const accepted = msg.statusCode >= 200 && msg.statusCode < 300;\nmsg.payload = {\n    accepted,\n    statusCode: msg.statusCode,\n    acapResponse: msg.payload,\n    request: msg._otaRequest\n};\ndelete msg.headers;\ndelete msg.responseUrl;\nreturn msg.res ? [msg, msg] : [null, msg];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 940,
+    "y": 140,
+    "wires": [
+      [
+        "26e61e81642afb2c"
+      ],
+      [
+        "a60d2029b8b6c740"
+      ]
+    ]
+  },
+  {
+    "id": "26e61e81642afb2c",
+    "type": "http response",
+    "z": "7dd5868359bdf44b",
+    "name": "Return result",
+    "statusCode": "",
+    "headers": {},
+    "x": 1180,
+    "y": 100,
+    "wires": []
+  },
+  {
+    "id": "a60d2029b8b6c740",
+    "type": "debug",
+    "z": "7dd5868359bdf44b",
+    "name": "ACAP callback result",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1190,
+    "y": 180,
+    "wires": []
+  },
+  {
+    "id": "6e820d15e29a0975",
+    "type": "catch",
+    "z": "7dd5868359bdf44b",
+    "name": "Validation errors",
+    "scope": [
+      "412ce26a35f74c4a"
+    ],
+    "uncaught": false,
+    "x": 430,
+    "y": 240,
+    "wires": [
+      [
+        "23adfd6f12aecc67"
+      ]
+    ]
+  },
+  {
+    "id": "23adfd6f12aecc67",
+    "type": "function",
+    "z": "7dd5868359bdf44b",
+    "name": "Return validation error",
+    "func": "msg.statusCode = 400;\nmsg.payload = { accepted: false, error: msg.error.message };\nreturn msg.res ? [msg, msg] : [null, msg];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 700,
+    "y": 240,
+    "wires": [
+      [
+        "26e61e81642afb2c"
+      ],
+      [
+        "a60d2029b8b6c740"
+      ]
+    ]
+  }
+]
