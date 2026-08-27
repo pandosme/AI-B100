@@ -324,9 +324,11 @@ Scene config version 2 exposes integer coordinates from 0 through 1000 with the 
 
 SET continues to accept legacy config version 1 coordinates as two signed Q15 integers for compatibility. GET and the generated encoder use version 2. The generated decoder always returns version 2-style integer coordinates and includes `coordinateSystem: {origin: "topLeft", minimum: 0, maximum: 1000}`. Scene and map CRC16 fingerprints reject messages created from a stale scene map.
 
+Presence Alert scene bodies include schedule fields in config version 2: `scheduleEnabled`, `startMinutes:u16`, and `endMinutes:u16`. Times are minutes from midnight (`0..1439`) and are exposed in JavaScript as 24-hour `HH:MM` strings. Default values are `18:00` to `06:00` with schedule disabled.
+
 - Counting fields: direction, publish-class mask, reserved byte, then line vertices.
 - Occupancy fields: publish-class mask, value type (`0=max`, `1=min`, `2=average`), reserved byte, then area vertices.
-- Presence fields: detection-class mask, threshold object count, trigger delay as `u16`, then area vertices.
+- Presence fields: detection-class mask, threshold object count, trigger delay as `u16`, schedule enabled flag, schedule start and end minutes as `u16`, then area vertices.
 - Class-mask bits 0 through 5 are human, car, bike, bus, truck, and other.
 
 ### JavaScript Encoder and Decoder

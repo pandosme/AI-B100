@@ -117,7 +117,14 @@ function normalizeAlertSettings(settings) {
 	const presence = presenceConfig(settings);
 	const next = {};
 	presenceAlerts.forEach(function(alert) {
-		next[alert.name] = {};
+		const existing = (presence.scenarios || {})[alert.name] || {};
+		next[alert.name] = {
+			schedule: {
+				enabled: !!(((existing.schedule || {}).enabled) || existing.scheduleEnabled),
+				start: String(((existing.schedule || {}).start) || '18:00'),
+				end: String(((existing.schedule || {}).end) || '06:00')
+			}
+		};
 	});
 	const changed = JSON.stringify(next) !== JSON.stringify(presence.scenarios) || presence.cooldownSeconds !== undefined || presence.schedule !== undefined;
 	presence.scenarios = next;
@@ -229,6 +236,19 @@ function thresholdValues(alert) {
 	};
 }
 
+function isValidHHMM(value) {
+	return /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value || ''));
+}
+
+function alertScheduleConfig(name) {
+	const scenario = ((presenceConfig().scenarios || {})[name]) || {};
+	const schedule = scenario.schedule || {};
+	const start = isValidHHMM(schedule.start) ? schedule.start : '18:00';
+	const end = isValidHHMM(schedule.end) ? schedule.end : '06:00';
+	const enabled = !!(schedule.enabled || scenario.scheduleEnabled);
+	return { enabled, start, end };
+}
+
 function convertToOccupancyAlert(alert, objects, delay) {
 	const limits = thresholdLimits();
 	const current = thresholdValues(alert);
@@ -256,11 +276,13 @@ function renderAlerts() {
 	presenceAlerts.forEach(function(alert) {
 		const limits = thresholdLimits();
 		const threshold = thresholdValues(alert);
+		const schedule = alertScheduleConfig(alert.name);
 		container.append(`<div class="col-12 col-xl-6 mb-3" id="alert-card-${alert.id}"><div class="card h-100 alert-card">
 			<div class="card-header"><div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2"><h5 class="card-title mb-0">${escapeHtml(alert.name)}</h5><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary presence-state" data-name="${escapeAttribute(alert.name)}">Unknown</span><button class="btn btn-sm btn-danger delete-alert" data-id="${alert.id}">Delete</button></div></div><div class="input-group input-group-sm"><span class="input-group-text">Name</span><input class="form-control alert-name" type="text" maxlength="${((aoaCapabilities.scenarios || {}).maxLengthName) || 15}" value="${escapeAttribute(alert.name)}"></div></div>
 			<div class="card-body"><div class="video-container"><div class="video-player" id="video-${alert.id}"></div><canvas class="area-canvas" id="canvas-${alert.id}" width="${VIDEO_WIDTH}" height="${VIDEO_HEIGHT}" data-id="${alert.id}" aria-label="Area of interest editor" title="Drag polygon points to adjust the area"></canvas></div>
 				<div class="mt-3"><label class="form-label d-block">Classes</label><div class="class-options">${classCheckboxes(alert)}</div></div>
 				<div class="row g-2 mt-2"><div class="col-sm-6"><label class="form-label" for="objects-${alert.id}">At least</label><div class="input-group"><input class="form-control threshold-objects" id="objects-${alert.id}" type="number" min="${limits.minObjects}" max="${limits.maxObjects}" value="${threshold.objects}"><span class="input-group-text">objects</span></div></div><div class="col-sm-6"><label class="form-label" for="delay-${alert.id}">Trigger action after</label><div class="input-group"><input class="form-control threshold-delay" id="delay-${alert.id}" type="number" min="${limits.minDelay}" max="${limits.maxDelay}" value="${threshold.delay}"><span class="input-group-text">seconds</span></div></div></div>
+				<div class="row g-2 mt-2"><div class="col-12"><div class="form-check"><input class="form-check-input schedule-enabled" type="checkbox" id="schedule-enabled-${alert.id}" ${schedule.enabled ? 'checked' : ''}><label class="form-check-label" for="schedule-enabled-${alert.id}">Use active time schedule</label></div></div><div class="col-sm-6"><label class="form-label" for="schedule-start-${alert.id}">Start (24h)</label><input class="form-control schedule-start" id="schedule-start-${alert.id}" type="text" inputmode="numeric" maxlength="5" pattern="([01]\\d|2[0-3]):([0-5]\\d)" placeholder="18:00" value="${escapeAttribute(schedule.start)}"></div><div class="col-sm-6"><label class="form-label" for="schedule-end-${alert.id}">End (24h)</label><input class="form-control schedule-end" id="schedule-end-${alert.id}" type="text" inputmode="numeric" maxlength="5" pattern="([01]\\d|2[0-3]):([0-5]\\d)" placeholder="06:00" value="${escapeAttribute(schedule.end)}"></div></div>
 				<div class="small text-muted mt-3 presence-detail" data-name="${escapeAttribute(alert.name)}">State: unknown</div><button class="btn btn-success w-100 mt-3 save-alert" data-id="${alert.id}">Save</button>
 			</div></div></div>`);
 		initVideoPlayer(alert.id);
@@ -353,7 +375,16 @@ function applyAlertControls(alert) {
 	alert.name = name;
 	alert.objectClassifications = classifications;
 	convertToOccupancyAlert(alert, card.find('.threshold-objects').val(), card.find('.threshold-delay').val());
-	return {};
+	const start = card.find('.schedule-start').val().trim();
+	const end = card.find('.schedule-end').val().trim();
+	if (!isValidHHMM(start) || !isValidHHMM(end)) throw new Error('Schedule times must use 24h HH:MM');
+	return {
+		schedule: {
+			enabled: card.find('.schedule-enabled').is(':checked'),
+			start: start,
+			end: end
+		}
+	};
 }
 
 function setFullConfiguration(config, success, failurePrefix) {
@@ -417,7 +448,7 @@ function addPresenceAlert() {
 		config.scenarios = config.scenarios || [];
 		config.scenarios.push({ id: maxId + 1, name: name, type: OCCUPANCY_TYPE, devices: [{ id: ((aoaCapabilities.scenarios || {}).defaultDeviceId) || 1 }], filters: [], metadataOverlay: null, objectClassifications: [{ type: 'human' }], perspectives: [], presets: [], triggers: [{ type: 'includeArea', vertices: defaultAreaVertices() }], eventInterval: { enabled: false }, thresholdConfiguration: { enabled: true, triggerDelay: 5, thresholds: [{ level: 0, type: 'moreThan' }] } });
 		const presence = presenceConfig(settings);
-		presence.scenarios[name] = {};
+		presence.scenarios[name] = { schedule: { enabled: false, start: '18:00', end: '06:00' } };
 		setFullConfiguration(config, function() {
 			saveTransmission(settings).done(function() { showToast('Presence Alert created', 'success'); loadPage(); }).fail(function(xhr) { showToast('AOA alert created, but settings failed: ' + xhr.statusText, 'warning'); });
 		}, 'Failed to create Presence Alert');

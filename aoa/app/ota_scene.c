@@ -19,6 +19,8 @@
 #define OTA_SCENE_PENDING_TIMEOUT 120
 #define OTA_SCENE_CONFIG_VERSION_Q15 1
 #define OTA_SCENE_CONFIG_VERSION_INTEGER 2
+#define PRESENCE_SCHEDULE_DEFAULT_START_MINUTES (18 * 60)
+#define PRESENCE_SCHEDULE_DEFAULT_END_MINUTES (6 * 60)
 
 typedef enum {
 	SCENE_DOMAIN_COUNTING,
@@ -52,12 +54,14 @@ typedef struct {
 	uint8_t page_count;
 	uint8_t total_points;
 	uint16_t received_pages;
-	uint8_t fields[4];
+	uint8_t fields[9];
 	int16_t points[OTA_SCENE_MAX_POINTS][2];
 } PendingSceneUpdate;
 
 static PendingSceneUpdate g_pending[3];
 static pthread_mutex_t g_scene_ota_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static cJSON* Settings_Scene(cJSON* settings, SceneDomain domain, const char* name, int create);
 
 static uint16_t Read_U16(const uint8_t* data) {
 	return (uint16_t)(data[0] | ((uint16_t)data[1] << 8));
@@ -196,7 +200,11 @@ static SceneDomain Port_Domain(int port) {
 }
 
 static int Static_Field_Length(SceneDomain domain) {
-	return domain == SCENE_DOMAIN_PRESENCE ? 4 : 3;
+	return domain == SCENE_DOMAIN_PRESENCE ? 9 : 3;
+}
+
+static int Legacy_Static_Field_Length(SceneDomain domain) {
+	return domain == SCENE_DOMAIN_PRESENCE ? 4 : Static_Field_Length(domain);
 }
 
 static int Coordinate_Bytes(uint8_t config_version) {
@@ -216,6 +224,61 @@ static uint8_t Classes_To_Mask(cJSON* classes) {
 		if (item && cJSON_IsTrue(item)) mask |= (uint8_t)(1u << bit);
 	}
 	return mask;
+}
+
+static int Parse_HHMM(const char* value, uint16_t* minutes_out) {
+	if (!value || !minutes_out) return 0;
+	if (strlen(value) != 5 || value[2] != ':') return 0;
+	if (value[0] < '0' || value[0] > '2' || value[1] < '0' || value[1] > '9' ||
+		value[3] < '0' || value[3] > '5' || value[4] < '0' || value[4] > '9') return 0;
+	int hours = (value[0] - '0') * 10 + (value[1] - '0');
+	int minutes = (value[3] - '0') * 10 + (value[4] - '0');
+	if (hours > 23) return 0;
+	*minutes_out = (uint16_t)(hours * 60 + minutes);
+	return 1;
+}
+
+static void Ensure_Presence_Schedule_Defaults(uint8_t* fields) {
+	if (!fields) return;
+	fields[4] = 0;
+	Write_U16(fields + 5, PRESENCE_SCHEDULE_DEFAULT_START_MINUTES);
+	Write_U16(fields + 7, PRESENCE_SCHEDULE_DEFAULT_END_MINUTES);
+}
+
+static void Set_Object_Bool(cJSON* object, const char* key, int enabled) {
+	if (!object || !key) return;
+	cJSON* item = cJSON_CreateBool(enabled ? 1 : 0);
+	if (!item) return;
+	if (cJSON_GetObjectItem(object, key)) cJSON_ReplaceItemInObject(object, key, item);
+	else cJSON_AddItemToObject(object, key, item);
+}
+
+static void Set_Object_String(cJSON* object, const char* key, const char* value) {
+	if (!object || !key) return;
+	cJSON* item = cJSON_CreateString(value ? value : "");
+	if (!item) return;
+	if (cJSON_GetObjectItem(object, key)) cJSON_ReplaceItemInObject(object, key, item);
+	else cJSON_AddItemToObject(object, key, item);
+}
+
+static void Update_Presence_Schedule_Settings(cJSON* settings, const char* scene_name,
+	const uint8_t* fields) {
+	if (!settings || !scene_name || !fields) return;
+	cJSON* scene = Settings_Scene(settings, SCENE_DOMAIN_PRESENCE, scene_name, 1);
+	if (!scene || !cJSON_IsObject(scene)) return;
+	cJSON* schedule = Ensure_Object_Item(scene, "schedule");
+	if (!schedule || !cJSON_IsObject(schedule)) return;
+	Set_Object_Bool(schedule, "enabled", fields[4] != 0);
+	char start[6] = "18:00";
+	char end[6] = "06:00";
+	uint16_t start_minutes = Read_U16(fields + 5);
+	uint16_t end_minutes = Read_U16(fields + 7);
+	if (start_minutes > 1439) start_minutes = PRESENCE_SCHEDULE_DEFAULT_START_MINUTES;
+	if (end_minutes > 1439) end_minutes = PRESENCE_SCHEDULE_DEFAULT_END_MINUTES;
+	snprintf(start, sizeof(start), "%02u:%02u", start_minutes / 60, start_minutes % 60);
+	snprintf(end, sizeof(end), "%02u:%02u", end_minutes / 60, end_minutes % 60);
+	Set_Object_String(schedule, "start", start);
+	Set_Object_String(schedule, "end", end);
 }
 
 static cJSON* Settings_Scene(cJSON* settings, SceneDomain domain, const char* name, int create) {
@@ -270,7 +333,7 @@ static uint8_t AOA_Class_Mask(cJSON* scene) {
 }
 
 static void Read_Static_Fields(SceneDomain domain, SceneEntry* entry, cJSON* settings, uint8_t* fields) {
-	memset(fields, 0, 4);
+	memset(fields, 0, (size_t)Static_Field_Length(domain));
 	if (domain == SCENE_DOMAIN_COUNTING) {
 		cJSON* trigger = Scene_Trigger(entry->json, domain);
 		cJSON* direction = trigger ? cJSON_GetObjectItem(trigger, "countingDirection") : NULL;
@@ -297,6 +360,19 @@ static void Read_Static_Fields(SceneDomain domain, SceneEntry* entry, cJSON* set
 	cJSON* delay = threshold ? cJSON_GetObjectItem(threshold, "triggerDelay") : NULL;
 	fields[1] = (uint8_t)((level && cJSON_IsNumber(level) ? level->valueint : 0) + 1);
 	Write_U16(fields + 2, (uint16_t)(delay && cJSON_IsNumber(delay) ? delay->valueint : 0));
+	Ensure_Presence_Schedule_Defaults(fields);
+	cJSON* scenario = Settings_Scene(settings, SCENE_DOMAIN_PRESENCE, entry->name, 0);
+	cJSON* schedule = scenario ? cJSON_GetObjectItem(scenario, "schedule") : NULL;
+	if (!schedule || !cJSON_IsObject(schedule)) return;
+	cJSON* enabled = cJSON_GetObjectItem(schedule, "enabled");
+	if (enabled) fields[4] = cJSON_IsTrue(enabled) ? 1 : 0;
+	uint16_t minutes;
+	cJSON* start = cJSON_GetObjectItem(schedule, "start");
+	if (start && cJSON_IsString(start) && Parse_HHMM(start->valuestring, &minutes))
+		Write_U16(fields + 5, minutes);
+	cJSON* end = cJSON_GetObjectItem(schedule, "end");
+	if (end && cJSON_IsString(end) && Parse_HHMM(end->valuestring, &minutes))
+		Write_U16(fields + 7, minutes);
 }
 
 static int16_t Encode_Q15(double value) {
@@ -480,6 +556,14 @@ static OTA_Status Apply_Pending(SceneDomain domain, PendingSceneUpdate* pending,
 			return OTA_STATUS_APPLY_FAILED;
 		}
 	}
+	if (domain == SCENE_DOMAIN_PRESENCE) {
+		candidate_settings = cJSON_Duplicate(settings, 1);
+		if (!candidate_settings) {
+			cJSON_Delete(original_data);
+			return OTA_STATUS_APPLY_FAILED;
+		}
+		Update_Presence_Schedule_Settings(candidate_settings, entry->name, pending->fields);
+	}
 	if (!Replace_Vertices(entry->json, domain, pending)) {
 		cJSON_Delete(original_data);
 		cJSON_Delete(candidate_settings);
@@ -516,7 +600,21 @@ static OTA_Status Apply_Pending(SceneDomain domain, PendingSceneUpdate* pending,
 		return OTA_STATUS_APPLY_FAILED;
 	}
 	if (domain == SCENE_DOMAIN_PRESENCE) {
+		if (!ACAP_FILE_Write("localdata/settings.json", candidate_settings)) {
+			Apply_AOA_Configuration(original_data);
+			cJSON_Delete(original_data);
+			cJSON_Delete(candidate_settings);
+			return OTA_STATUS_APPLY_FAILED;
+		}
+		cJSON* transmission = cJSON_GetObjectItem(candidate_settings, "transmission");
+		if (transmission && cJSON_IsObject(transmission)) {
+			cJSON* duplicate = cJSON_Duplicate(transmission, 1);
+			if (duplicate) cJSON_ReplaceItemInObject(settings, "transmission", duplicate);
+			cJSON* live_transmission = cJSON_GetObjectItem(settings, "transmission");
+			Presence_Load_Config(cJSON_GetObjectItem(live_transmission, "presence"), 3);
+		}
 		cJSON_Delete(original_data);
+		cJSON_Delete(candidate_settings);
 		Presence_Initialize_State();
 		return OTA_STATUS_OK;
 	}
@@ -561,6 +659,29 @@ static OTA_Status Validate_Set_Page(SceneDomain domain, const OTA_Frame* frame,
 	int coordinate_bytes = Coordinate_Bytes(config_version);
 	int points_per_page = Points_Per_Page(domain, config_version);
 	int expected_pages = (body[12] + points_per_page - 1) / points_per_page;
+	if (domain == SCENE_DOMAIN_PRESENCE) {
+		int matched = 0;
+		int lengths[] = {Static_Field_Length(domain), Legacy_Static_Field_Length(domain)};
+		for (size_t candidate_index = 0; candidate_index < sizeof(lengths) / sizeof(lengths[0]); candidate_index++) {
+			int candidate_static_length = lengths[candidate_index];
+			int candidate_points_per_page = (OTA_MAX_BODY_SIZE - 13 - candidate_static_length) /
+				coordinate_bytes;
+			int candidate_pages = (body[12] + candidate_points_per_page - 1) / candidate_points_per_page;
+			int candidate_start = body[8] * candidate_points_per_page;
+			int candidate_count = body[12] - candidate_start;
+			if (candidate_count > candidate_points_per_page) candidate_count = candidate_points_per_page;
+			if (body[9] == candidate_pages && body[8] < body[9] && body[10] == candidate_start &&
+				body[11] == candidate_count && frame->body_length ==
+				(size_t)(13 + candidate_static_length + candidate_count * coordinate_bytes)) {
+				static_length = candidate_static_length;
+				points_per_page = candidate_points_per_page;
+				expected_pages = candidate_pages;
+				matched = 1;
+				break;
+			}
+		}
+		if (!matched) return OTA_STATUS_INVALID_LENGTH;
+	}
 	if (body[9] != expected_pages || body[8] >= body[9]) return OTA_STATUS_INVALID_VALUE;
 	int expected_start = body[8] * points_per_page;
 	int expected_count = body[12] - expected_start;
@@ -576,6 +697,11 @@ static OTA_Status Validate_Set_Page(SceneDomain domain, const OTA_Frame* frame,
 		return OTA_STATUS_INVALID_VALUE;
 	if (domain == SCENE_DOMAIN_PRESENCE && (body[14] > 101 || Read_U16(body + 15) > 7200))
 		return OTA_STATUS_INVALID_RANGE;
+	if (domain == SCENE_DOMAIN_PRESENCE && static_length == Static_Field_Length(domain)) {
+		if (body[17] > 1) return OTA_STATUS_INVALID_VALUE;
+		if (Read_U16(body + 18) > 1439 || Read_U16(body + 20) > 1439)
+			return OTA_STATUS_INVALID_RANGE;
+	}
 
 	PendingSceneUpdate* pending = &g_pending[domain];
 	if (pending->active && time(NULL) - pending->updated_at > OTA_SCENE_PENDING_TIMEOUT)
@@ -590,12 +716,16 @@ static OTA_Status Validate_Set_Page(SceneDomain domain, const OTA_Frame* frame,
 		pending->map_fingerprint = Read_U16(body + 6);
 		pending->page_count = body[9];
 		pending->total_points = body[12];
+		memset(pending->fields, 0, sizeof(pending->fields));
 		memcpy(pending->fields, body + 13, (size_t)static_length);
+		if (domain == SCENE_DOMAIN_PRESENCE && static_length == Legacy_Static_Field_Length(domain))
+			Ensure_Presence_Schedule_Defaults(pending->fields);
 	} else if (pending->transaction_id != frame->transaction_id ||
 		pending->config_version != config_version || pending->scene_index != body[1] ||
 	           pending->scene_id != Read_U16(body + 2) || pending->scene_fingerprint != Read_U16(body + 4) ||
 	           pending->map_fingerprint != Read_U16(body + 6) || pending->page_count != body[9] ||
-	           pending->total_points != body[12] || memcmp(pending->fields, body + 13, (size_t)static_length) != 0) {
+	           pending->total_points != body[12] ||
+		   memcmp(pending->fields, body + 13, (size_t)static_length) != 0) {
 		return OTA_STATUS_INVALID_VALUE;
 	}
 	if (pending->received_pages & (1u << body[8])) return OTA_STATUS_INVALID_VALUE;

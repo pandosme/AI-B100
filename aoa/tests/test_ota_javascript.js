@@ -343,10 +343,27 @@ const presenceScene = encoder.Encode({
 		classes: ['human'],
 		thresholdObjectCount: 1,
 		triggerDelaySeconds: 10,
+		schedule: { enabled: true, start: '18:00', end: '06:00' },
 		points: points.slice(0, 4)
 	}
 });
 assert.strictEqual(presenceScene.port, 133);
+assert.deepStrictEqual(
+	JSON.parse(JSON.stringify(decoder.Decode(presenceScene).config.schedule)),
+	{ enabled: true, start: '18:00', end: '06:00' }
+);
+
+assert.throws(() => encoder.Encode({
+	type: 'PresenceAlert',
+	sceneIndex: 1,
+	config: {
+		classes: ['human'],
+		thresholdObjectCount: 1,
+		triggerDelaySeconds: 10,
+		schedule: { enabled: true, start: '6:00', end: '06:00' },
+		points: points.slice(0, 4)
+	}
+}), /24h HH:MM/);
 
 [
 	{ port: 131, encoded: entry, minimumPoints: 2 },

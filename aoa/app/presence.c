@@ -20,6 +20,9 @@ typedef struct {
 	int known;
 	int aoa_active;
 	int active;
+	int schedule_enabled;
+	int schedule_start_minutes;
+	int schedule_end_minutes;
 	time_t last_update;
 	time_t clear_due;
 } PresenceArea;
@@ -54,6 +57,37 @@ static int Parse_Active(cJSON* item, int* active) {
 		}
 	}
 	return 0;
+}
+
+static int Parse_HHMM(const char* value, int* minutes_out) {
+	if (!value || !minutes_out) return 0;
+	if (strlen(value) != 5 || value[2] != ':') return 0;
+	if (value[0] < '0' || value[0] > '2' || value[1] < '0' || value[1] > '9' ||
+		value[3] < '0' || value[3] > '5' || value[4] < '0' || value[4] > '9') return 0;
+	int hours = (value[0] - '0') * 10 + (value[1] - '0');
+	int minutes = (value[3] - '0') * 10 + (value[4] - '0');
+	if (hours > 23) return 0;
+	*minutes_out = hours * 60 + minutes;
+	return 1;
+}
+
+static void Minutes_To_HHMM(int value, char output[6]) {
+	if (!output) return;
+	if (value < 0) value = 0;
+	if (value > 1439) value = 1439;
+	snprintf(output, 6, "%02d:%02d", value / 60, value % 60);
+}
+
+static int Schedule_Allows(const PresenceArea* area, time_t now) {
+	if (!area || !area->schedule_enabled) return 1;
+	struct tm local_tm;
+	if (!localtime_r(&now, &local_tm)) return 1;
+	int minute_of_day = local_tm.tm_hour * 60 + local_tm.tm_min;
+	int start = area->schedule_start_minutes;
+	int end = area->schedule_end_minutes;
+	if (start == end) return 1;
+	if (start < end) return minute_of_day >= start && minute_of_day < end;
+	return minute_of_day >= start || minute_of_day < end;
 }
 
 static int Is_Occupancy_Type(const char* type) {
@@ -240,10 +274,31 @@ void Presence_Load_Config(cJSON* config, int fixed_port) {
 				area->known = previous[i].known;
 				area->aoa_active = previous[i].aoa_active;
 				area->active = previous[i].active;
+				area->schedule_enabled = previous[i].schedule_enabled;
+				area->schedule_start_minutes = previous[i].schedule_start_minutes;
+				area->schedule_end_minutes = previous[i].schedule_end_minutes;
 				area->last_update = previous[i].last_update;
 				area->clear_due = previous[i].clear_due;
 				break;
 			}
+		}
+		if (area->schedule_start_minutes <= 0 && area->schedule_end_minutes <= 0) {
+			area->schedule_start_minutes = 18 * 60;
+			area->schedule_end_minutes = 6 * 60;
+		}
+		cJSON* schedule = cJSON_GetObjectItem(item, "schedule");
+		cJSON* enabled_item = schedule ? cJSON_GetObjectItem(schedule, "enabled") : NULL;
+		if (enabled_item) area->schedule_enabled = cJSON_IsTrue(enabled_item);
+		int parsed_minutes;
+		cJSON* start_item = schedule ? cJSON_GetObjectItem(schedule, "start") : NULL;
+		if (start_item && cJSON_IsString(start_item) && Parse_HHMM(start_item->valuestring, &parsed_minutes))
+			area->schedule_start_minutes = parsed_minutes;
+		cJSON* end_item = schedule ? cJSON_GetObjectItem(schedule, "end") : NULL;
+		if (end_item && cJSON_IsString(end_item) && Parse_HHMM(end_item->valuestring, &parsed_minutes))
+			area->schedule_end_minutes = parsed_minutes;
+		if (!Schedule_Allows(area, time(NULL))) {
+			area->active = 0;
+			area->clear_due = 0;
 		}
 	}
 	g_pending = pending;
@@ -356,7 +411,7 @@ void Presence_Process_AOA_Event(cJSON* event) {
 		area->last_update = now;
 		if (aoa_active) {
 			area->clear_due = 0;
-			if (!area->active) {
+			if (Schedule_Allows(area, now) && !area->active) {
 				area->active = 1;
 				changed = 1;
 			}
@@ -384,6 +439,24 @@ void Presence_Update(time_t now) {
 	pthread_mutex_lock(&g_mutex);
 	for (int i = 0; i < g_area_count; i++) {
 		PresenceArea* area = &g_areas[i];
+		if (!Schedule_Allows(area, now)) {
+			if (area->active) {
+				area->active = 0;
+				area->clear_due = 0;
+				changed = 1;
+				if (g_enabled) Queue_Publish();
+				LOG("Presence Alert schedule inactive: %s\n", area->scenario);
+			}
+			continue;
+		}
+		if (area->aoa_active && !area->active) {
+			area->active = 1;
+			area->clear_due = 0;
+			changed = 1;
+			if (g_enabled) Queue_Publish();
+			LOG("Presence Alert schedule active: %s\n", area->scenario);
+			continue;
+		}
 		if (area->active && !area->aoa_active && area->clear_due > 0 && now >= area->clear_due) {
 			area->active = 0;
 			area->clear_due = 0;
@@ -475,6 +548,13 @@ void Presence_Update_ACAP_Status(void) {
 		cJSON_AddBoolToObject(item, "known", g_areas[i].known);
 		cJSON_AddBoolToObject(item, "aoaActive", g_areas[i].aoa_active);
 		cJSON_AddBoolToObject(item, "active", g_areas[i].active);
+		cJSON_AddBoolToObject(item, "scheduleEnabled", g_areas[i].schedule_enabled);
+		char start[6] = "18:00";
+		char end[6] = "06:00";
+		Minutes_To_HHMM(g_areas[i].schedule_start_minutes, start);
+		Minutes_To_HHMM(g_areas[i].schedule_end_minutes, end);
+		cJSON_AddStringToObject(item, "scheduleStart", start);
+		cJSON_AddStringToObject(item, "scheduleEnd", end);
 		cJSON_AddNumberToObject(item, "lastUpdate", (double)g_areas[i].last_update);
 		cJSON_AddNumberToObject(item, "clearDue", (double)g_areas[i].clear_due);
 		cJSON_AddItemToArray(areas, item);
@@ -499,6 +579,13 @@ void Presence_Add_Status_JSON(cJSON* presence_array) {
 		cJSON_AddBoolToObject(item, "known", g_areas[i].known);
 		cJSON_AddBoolToObject(item, "aoaActive", g_areas[i].aoa_active);
 		cJSON_AddBoolToObject(item, "active", g_areas[i].active);
+		cJSON_AddBoolToObject(item, "scheduleEnabled", g_areas[i].schedule_enabled);
+		char start[6] = "18:00";
+		char end[6] = "06:00";
+		Minutes_To_HHMM(g_areas[i].schedule_start_minutes, start);
+		Minutes_To_HHMM(g_areas[i].schedule_end_minutes, end);
+		cJSON_AddStringToObject(item, "scheduleStart", start);
+		cJSON_AddStringToObject(item, "scheduleEnd", end);
 		cJSON_AddNumberToObject(item, "lastUpdate", (double)g_areas[i].last_update);
 		cJSON_AddNumberToObject(item, "clearDue", (double)g_areas[i].clear_due);
 		cJSON_AddItemToArray(presence_array, item);
