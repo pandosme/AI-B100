@@ -12,7 +12,7 @@ Current ACAP variants:
 
 | Directory | Friendly name | Source analytics | Active uplinks |
 | --- | --- | --- | --- |
-| `aoa/` | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2 |
+| `aoa/` | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2, Presence on port 3 |
 | `radar/` | AI-B100 Radar | Axis radar scene provider | Occupancy on port 2, Detection Alert on port 3; Counting is reserved on port 1 but hidden |
 
 Both variants intentionally use ACAP `appName` `aib100`. This keeps the camera URL path, settings store, and AI-B100 callback paths stable when switching between AOA and Radar variants. The variants are alternatives: install and run the one that matches the target camera and use case.
@@ -130,9 +130,11 @@ Use the same static addressing at every installation unless the user explicitly 
 
 Important defaults:
 
-- Bridge HTTP port: `80`
+- Bridge GUI port: `80`
+- Bridge API port for AOA 2.0.0 and AI-B100 firmware 2.0.0+: `81`
 - ACAP callback IP: camera/radar address, usually `192.168.1.200`
-- Callback digest user/password example: `aib100` / `aib100`
+- Recommended bridge GUI login: `admin` / `lorabridge`
+- Recommended bridge API and camera callback login: `lorabridge` / `lorabridge`
 - AI-B100 callback paths:
   - `/local/aib100/b100_status`
   - `/local/aib100/b100_receive`
@@ -157,7 +159,7 @@ Key constraints:
 Important firmware observations from live testing:
 
 - `/status` is the primary endpoint for health and downlink detection in polling-style code.
-- Status `7` means joined/idle and is the only reliable source for `fcntUp`, `drUp`, `maxUp`, and `devAddr`.
+- Status `0` (firmware 2.x ready) and status `7` (joined) are reliable joined states for `fcntUp`, data rate, `maxUp`, and `devAddr`.
 - Status `8` means a downlink payload is present. Treat `status == 8 && payload exists` as the downlink condition.
 - Status `9` means an uplink was sent or the bridge is in the brief post-uplink phase.
 - `fcntUp` and `drUp` can be `0` and unreliable in status `8` and `9` responses. Do not overwrite cached good values from those responses.
@@ -211,8 +213,8 @@ Friendly name: **AI-B100 AOA**
 
 Package outputs:
 
-- `AI-B100_AOA_1_2_0_aarch64.eap`
-- `AI-B100_AOA_1_2_0_armv7hf.eap`
+- `AI-B100_AOA_2_0_0_aarch64.eap`
+- `AI-B100_AOA_2_0_0_armv7hf.eap`
 
 ### AOA Use Cases
 
@@ -230,22 +232,36 @@ Occupancy:
 - Encodes one block per selected occupancy area: label count, value type, then selected label values.
 - Value types are maximum, minimum, or average.
 
+Presence Alert:
+
+- Uses independent AOA `motion` scenes containing an `individualTimeInArea` condition; it does not reuse or modify Occupancy settings.
+- Creates, edits, and deletes alerts through the Presence Alert page, combining AOA names, classes, detection times, and draggable include-area polygons with per-alert clear transition times and schedules.
+- Uses the AOA condition `time` as the detection delay before the alert goes high.
+- Holds each active alert through its configured clear transition time and cancels the pending clear when detection returns.
+- Supports an independent Always or local 24-hour activation window per alert, including overnight schedules such as `18:00` to `06:00`.
+- Evaluates all configured alert rules continuously; `transmission.presence.enabled` controls LoRa publishing only.
+- Publishes only effective state transitions on fixed LoRaWAN port `3`; there is no periodic heartbeat.
+- Encodes one byte per configured alert in settings order, where `0` is clear and `1` is alert. There is no count prefix.
+
 ### AOA Settings
 
-Current settings schema is version `4`.
+Current settings schema is version `8`.
 
 - `transmission.counting.enabled`, `.intervalMinutes`, `.port`, `.classes`, `.scenarios`
 - `transmission.occupancy.enabled`, `.intervalMinutes`, `.port`, `.value`, `.classes`, `.scenarios`
-- Counting and Occupancy ports are fixed protocol metadata. Do not bring back user-selectable uplink ports.
+- `transmission.presence.enabled`, `.port`, `.scenarios`; each scenario owns `.cooldownSeconds` and `.schedule`, while detection dwell time is owned by its AOA `individualTimeInArea` condition
+- `b100.port`, `.apiDigestUser`, and `.apiDigestPassword` configure the bridge API. Fresh installs use port `81` and `lorabridge` / `lorabridge`; migrated installations preserve their saved API port.
+- Counting, Occupancy, and Presence Alert ports are fixed protocol metadata. Do not bring back user-selectable uplink ports.
 - Default bridge/callback IPs should follow `192.168.1.250` and `192.168.1.200`.
 
 ### AOA UI Pages
 
 | Page | Purpose |
 | --- | --- |
-| Publish | Enable Counting/Occupancy, set intervals, manual publish, recent uplinks, decoder download |
+| Publish | Enable Counting/Occupancy/Presence Alert, set periodic intervals, manual publish, recent uplinks, decoder download |
 | Counting | Select AOA counting scenarios/classes and synchronize/reset counter state |
-| Occupancy | Create/edit/delete OccupancyInArea scenarios and select areas/classes/value type |
+| Occupancy | Create/edit/delete OccupancyInArea scenarios and configure Occupancy values |
+| Presence Alert | Add/edit/delete alerts, configure classes/detection/clear times, drag include areas over live video, set per-alert schedules, and view live state |
 | LoRA Bridge | Bridge configuration and bridge actions |
 | LoRA Downlink | Downlink log and command enablement |
 | GPS | GPS callback data |
@@ -253,8 +269,8 @@ Current settings schema is version `4`.
 
 ### AOA Important Rules
 
-- Keep Counting on port `1` and Occupancy on port `2`.
-- Keep the generated decoder aligned with selected scenarios, classes, and occupancy value type.
+- Keep Counting on port `1`, Occupancy on port `2`, and Presence Alert on port `3`.
+- Keep the generated decoder aligned with selected scenarios, classes, occupancy value type, and Presence Alert scene order.
 - Do not reintroduce automatic text test payloads on port `7`.
 - Preserve callback-driven bridge status/downlink/GPS behavior.
 
@@ -268,8 +284,8 @@ Friendly name: **AI-B100 Radar**
 
 Package outputs:
 
-- `AI-B100_Radar_1_3_0_aarch64.eap`
-- `AI-B100_Radar_1_3_0_armv7hf.eap`
+- `AI-B100_Radar_2_0_0_aarch64.eap`
+- `AI-B100_Radar_2_0_0_armv7hf.eap`
 
 ### Radar Use Cases
 

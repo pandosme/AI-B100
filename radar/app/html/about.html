@@ -317,7 +317,7 @@ $(document).ready(function() {
 		lines.push('');
 		lines.push('ACAP bridge settings:');
 		addObjectFields(lines, settings.b100, [
-			['Bridge IP', 'ip'], ['Bridge HTTP port', 'port'], ['HTTP timeout seconds', 'timeout'], ['Callback IP', 'callbackIP'], ['Callback port', 'callbackPort'], ['Callback digest user', 'callbackDigestUser']
+			['Bridge IP', 'ip'], ['Bridge API port', 'port'], ['Bridge API digest user', 'apiDigestUser'], ['HTTP timeout seconds', 'timeout'], ['Callback IP', 'callbackIP'], ['Callback port', 'callbackPort'], ['Callback digest user', 'callbackDigestUser']
 		]);
 		lines.push('');
 		lines.push('Bridge parameter endpoint:');
@@ -335,7 +335,7 @@ $(document).ready(function() {
 		addSection(lines, 'Publish Settings');
 		addPublishUseCase(lines, 'Counting', transmission.counting || {}, (counters.publish || {}).counting);
 		addPublishUseCase(lines, 'Occupancy', transmission.occupancy || {}, (counters.publish || {}).occupancy);
-		addPublishUseCase(lines, 'Detection Alert', transmission.alert || {}, (counters.publish || {}).alert);
+		addPublishUseCase(lines, 'Presence Alert', transmission.presence || transmission.alert || {}, (counters.publish || {}).alert);
 
 		addSection(lines, 'Radar Status');
 		addObjectFields(lines, status.radar, [

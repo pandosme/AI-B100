@@ -81,20 +81,22 @@ A common staging setup with a laptop, camera, LoRA Bridge and PoE switch:
 
 It is easier to configure static IP addresses while the camera and LoRA Bridge are connected to a LAN with DHCP. Perform the following pre-staging configuration before connecting everything to the isolated PoE switch.
 
+These deployments normally use a small protected network containing only the PoE switch, camera or radar, bridge, and a commissioning laptop. Using the same credentials at every managed site simplifies maintenance, so this guide recommends the values below. Different credentials are supported; when changing them, keep the camera callback and bridge configuration synchronized and record the site values securely.
+
 ---
 
 ### Step 1: Stage the Camera
 
 1. Connect the camera to your local LAN and use a browser to access it. *Use AXIS IP Utility or similar tools to find its IP address.*
 2. Install the ACAP variant that matches the device and use case:
-   - `aoa/AI-B100_AOA_1_2_0_aarch64.eap` for AOA on ARTPEC-8 and ARTPEC-9 cameras
-   - `aoa/AI-B100_AOA_1_2_0_armv7hf.eap` for AOA on ARTPEC-7 cameras
-   - `radar/AI-B100_Radar_1_3_0_aarch64.eap` for Radar on ARTPEC-8 and ARTPEC-9 cameras
-   - `radar/AI-B100_Radar_1_3_0_armv7hf.eap` for Radar on ARTPEC-7 cameras
+   - `aoa/AI-B100_AOA_2_0_0_aarch64.eap` for AOA on ARTPEC-8 and ARTPEC-9 cameras
+   - `aoa/AI-B100_AOA_2_0_0_armv7hf.eap` for AOA on ARTPEC-7 cameras
+   - `radar/AI-B100_Radar_2_0_0_aarch64.eap` for Radar on ARTPEC-8 and ARTPEC-9 cameras
+   - `radar/AI-B100_Radar_2_0_0_armv7hf.eap` for Radar on ARTPEC-7 cameras
 3. For AOA deployments, start **AXIS Object Analytics**. For Radar deployments, verify that radar analytics are available on the camera.
 4. Go to **System → Accounts → Add Account**. The AI-B100 needs credentials to make HTTP callbacks to the camera.
    - Set username and password with **Viewer** privileges. If this password is compromised, the user can only view video.
-   - Example: user = `aib100`, password = `aib100`
+   - Recommended: user = `lorabridge`, password = `lorabridge`
 
 > **Important:** Document and save this username/password.
 
@@ -117,7 +119,7 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 *See the [AI-B100 User Manual](https://ai-embedded.se/ai-b100/) for detailed information.*
 
 1. Connect the AI-B100 to your local LAN and use a browser to access it. *Use tools to find its IP address.*
-2. Open the AI-B100 web UI at `http://<IP Address>`
+2. Open the AI-B100 web UI at `http://<IP Address>` on port 80. On first boot, set the fixed `admin` account password to `lorabridge`.
 3. Click **LAN Settings**:
    - **Disable DHCP**
    - **IP Number:** 192.168.1.250
@@ -127,15 +129,23 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 
 ![Bridge network](images/bridge-lan.png)
 
-4. Enable HTTP callbacks. Note that the ACAP will update some of these settings; you need to set:
+4. Configure the HTTP API for firmware 2.0.0 and later:
+   - **API User:** `lorabridge`
+   - **API Password:** `lorabridge`
+   - **HTTP API Enabled:** enabled
+   - **API Port:** `81`
+   - Save and reboot after changing the API port.
+5. Enable HTTP callbacks. Note that the ACAP will update some of these settings; you need to set:
    - **Check "HTTP API Enabled"**
    - **Callback IP:** 192.168.1.200 (the camera's IP address)
-   - **Digest User:** `aib100` (the account defined on the camera)
-   - **Digest Password:** `aib100` (the account password defined on the camera)
+   - **Digest User:** `lorabridge` (the viewer account defined on the camera)
+   - **Digest Password:** `lorabridge` (the account password defined on the camera)
 
 ![HTTP API](images/bridge-http.png)
 
-5. Click **Save**.
+6. Click **Save**.
+
+> **Legacy bridge firmware:** AI-B100 firmware earlier than 2.0.0 uses the HTTP API on port 80 without API Digest authentication. Keep the ACAP Bridge API Port at `80` for those units. The ACAP preserves an existing saved port during upgrade and does not silently fall back from port 81.
 
 > You can now connect the AI-B100 LoRA Bridge to the PoE switch as well as your laptop. Configure the laptop to use a free static address on the same subnet, for example **192.168.1.10**. Verify that your laptop can access the camera at `http://192.168.1.200` and the bridge at `http://192.168.1.250`. If you cannot connect, troubleshoot before proceeding.
 
@@ -164,6 +174,9 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 3. Open the user interface for **AI-B100 AOA** or **AI-B100 Radar**.
 4. Go to the **LoRA Bridge** tab:
    - **Bridge IP Address:** 192.168.1.250
+   - **Bridge API Port:** 81
+   - **Bridge API User:** `lorabridge`
+   - **Bridge API Password:** `lorabridge`
    - **Callback IP Address:** 192.168.1.200
    - **HTTP Callback:** Auto-configure
    - **HTTP Callback Port:** 80
@@ -213,12 +226,14 @@ It is easier to configure static IP addresses while the camera and LoRA Bridge a
 {
    "b100": {
       "ip": "192.168.1.250",
-      "port": 80,
+      "port": 81,
       "timeout": 30,
+      "apiDigestUser": "lorabridge",
+      "apiDigestPassword": "lorabridge",
       "callbackIP": "192.168.1.200",
       "callbackPort": 80,
-      "callbackDigestUser": "aib100",
-      "callbackDigestPassword": "aib100"
+      "callbackDigestUser": "lorabridge",
+      "callbackDigestPassword": "lorabridge"
    },
    "lorawan": {
       "port": 1,

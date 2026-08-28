@@ -11,174 +11,210 @@
 	<script src="js/chrome.js"></script>
 	<script src="js/bootstrap.bundle.min.js"></script>
 	<script src="js/media-stream-player.min.js"></script>
-	<script src="js/polygonselect.js"></script>
 	<script src="js/toast.js"></script>
 	<style>
-		#video-view { width: 100%; max-width: 960px; aspect-ratio: 16 / 9; background: #000; position: relative; overflow: hidden; }
+		.counting-layout { display: grid; grid-template-columns: minmax(210px, 280px) minmax(0, 1fr); gap: 1rem; }
+		.scene-list { border: 1px solid #d8dde3; max-height: 34rem; overflow-y: auto; }
+		.scene-item { width: 100%; padding: .75rem; border: 0; border-bottom: 1px solid #e7eaee; background: #fff; text-align: left; }
+		.scene-item:last-child { border-bottom: 0; }
+		.scene-item.active { background: #e8f2fb; box-shadow: inset 3px 0 #1474a8; }
+		.scene-total { font-size: .8rem; color: #5d6770; }
+		#video-view { width: 100%; aspect-ratio: 16 / 9; background: #111; position: relative; overflow: hidden; }
 		#video { position: absolute; inset: 0; width: 100%; height: 100%; }
-		#settings-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 10; pointer-events: auto; }
+		#line-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 10; touch-action: none; }
+		.empty-scenes { padding: 1rem; color: #68737d; }
+		@media (max-width: 767px) { .counting-layout { grid-template-columns: 1fr; } .scene-list { max-height: 14rem; } }
 	</style>
 </head>
 <body>
-	<header class="app-header">
-		<div class="app-name" id="app-name">&nbsp;</div>
-		<nav class="nav-bar" id="nav-bar"></nav>
-	</header>
-
+	<header class="app-header"><div class="app-name" id="app-name">&nbsp;</div><nav class="nav-bar" id="nav-bar"></nav></header>
 	<div class="page-content">
 		<div class="card mb-4">
-			<div class="card-header"><h5 class="card-title mb-0">Counting</h5></div>
+			<div class="card-header d-flex justify-content-between align-items-center">
+				<h5 class="card-title mb-0">Counting</h5>
+				<div><span class="badge text-bg-light me-2">Port 1</span><button id="addScene" class="btn btn-sm btn-outline-primary">Add scene</button></div>
+			</div>
 			<div class="card-body">
-				<div class="row g-3 align-items-end">
-					<div class="col-12 col-md-3">
-						<label class="form-label">LoRaWAN Port</label>
-						<div class="form-control bg-light">1</div>
-					</div>
-					<div class="col-12 col-md-3">
-						<label class="form-label d-block">Detection Label</label>
-						<div class="btn-group" role="group" aria-label="Counting detection label">
-							<input type="radio" class="btn-check" name="countingLabel" id="countingHuman" value="human" autocomplete="off">
-							<label class="btn btn-outline-primary" for="countingHuman">Humans</label>
-							<input type="radio" class="btn-check" name="countingLabel" id="countingVehicle" value="vehicle" autocomplete="off">
-							<label class="btn btn-outline-primary" for="countingVehicle">Vehicles</label>
+				<div class="counting-layout">
+					<div><div id="sceneList" class="scene-list"></div></div>
+					<div id="sceneEditor" hidden>
+						<div class="row g-3 align-items-end mb-3">
+							<div class="col-12 col-lg-5"><label class="form-label" for="sceneName">Name</label><input id="sceneName" class="form-control" maxlength="31"></div>
+							<div class="col-6 col-lg-3"><label class="form-label" for="sceneDirection">Direction</label><select id="sceneDirection" class="form-select"><option value="leftToRight">Left to right</option><option value="rightToLeft">Right to left</option></select></div>
+							<div class="col-6 col-lg-2"><div class="form-check form-switch mb-2"><input id="sceneEnabled" class="form-check-input" type="checkbox"><label class="form-check-label" for="sceneEnabled">Enabled</label></div></div>
+							<div class="col-12 col-lg-2 text-lg-end"><button id="deleteScene" class="btn btn-outline-danger">Delete</button></div>
 						</div>
-					</div>
-					<div class="col-12 col-md-3">
-						<label for="countingInterval" class="form-label">Publish Frequency: <strong id="countingIntervalValue">15</strong> min</label>
-						<input type="range" class="form-range" id="countingInterval" min="1" max="60" value="15">
-					</div>
-				</div>
-				<div class="row g-3 mt-2">
-					<div class="col-12 col-md-3"><div>Entering: <strong id="currentEntering">0</strong></div></div>
-					<div class="col-12 col-md-3"><div>Exiting: <strong id="currentExiting">0</strong></div></div>
-					<div class="col-12">
-						<div class="form-check form-switch">
-							<input class="form-check-input" type="checkbox" id="aoiEnabled">
-							<label class="form-check-label" for="aoiEnabled">Area of Interest</label>
+						<div class="row g-3 mb-3">
+							<div class="col-auto"><div class="form-check"><input id="classHuman" class="form-check-input" type="checkbox"><label class="form-check-label" for="classHuman">Human</label></div></div>
+							<div class="col-auto"><div class="form-check"><input id="classVehicle" class="form-check-input" type="checkbox"><label class="form-check-label" for="classVehicle">Vehicle</label></div></div>
+							<div class="col"><span class="me-3">Human: <strong id="humanTotal">0</strong></span><span>Vehicle: <strong id="vehicleTotal">0</strong></span></div>
 						</div>
+						<div id="video-view"><div id="video"></div><canvas id="line-canvas" width="1000" height="562"></canvas></div>
+						<div class="mt-3"><button id="saveCounting" class="btn btn-primary">Save scenes</button></div>
 					</div>
-				</div>
-				<div class="mt-3">
-					<div id="video-view">
-						<div id="video"></div>
-						<canvas id="settings-canvas" width="1000" height="1000"></canvas>
-					</div>
-				</div>
-				<div class="mt-3">
-					<button id="saveCounting" class="btn btn-primary">Save</button>
 				</div>
 			</div>
 		</div>
 	</div>
-
 <script>
 let currentSettings = {};
-let polygonSelector = null;
+let scenes = [];
+let selectedId = null;
+let totals = {};
+let dragPoint = -1;
+const canvas = document.getElementById('line-canvas');
+const context = canvas.getContext('2d');
 
 $(document).ready(function() {
-	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
-		success: function(app) {
-			document.title = app.manifest.acapPackageConf.setup.friendlyName;
-			$('#app-name').text(app.manifest.acapPackageConf.setup.friendlyName);
-			playVideo(app.device && app.device.aspect ? app.device.aspect : '16:9');
-			loadSettings();
-			updateAreaBalance();
-		},
-		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
-	});
-	$('#countingInterval').on('input', function() { $('#countingIntervalValue').text($(this).val()); });
-	$('#aoiEnabled').on('change', function() { if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked')); });
-	$('#saveCounting').on('click', saveCounting);
-	setInterval(updateAreaBalance, 3000);
+	$.getJSON('app').done(function(app) {
+		document.title = app.manifest.acapPackageConf.setup.friendlyName;
+		$('#app-name').text(document.title);
+		playVideo(app.device && app.device.aspect ? app.device.aspect : '16:9');
+		loadSettings();
+	}).fail(function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); });
+	$('#addScene').on('click', addScene);
+	$('#deleteScene').on('click', deleteScene);
+	$('#saveCounting').on('click', saveScenes);
+	$('#sceneName,#sceneDirection,#sceneEnabled,#classHuman,#classVehicle').on('input change', updateSelectedFromForm);
+	canvas.addEventListener('pointerdown', beginDrag);
+	canvas.addEventListener('pointermove', moveDrag);
+	canvas.addEventListener('pointerup', endDrag);
+	canvas.addEventListener('pointercancel', endDrag);
+	setInterval(loadTotals, 3000);
 	setInterval(pollLoraStatus, 10000);
 	pollLoraStatus();
 });
 
 function playVideo(aspect) {
-	let videoWidth = 1280;
-	let videoHeight = 720;
-	let ratio = '16 / 9';
-	if (aspect === '4:3') { videoWidth = 800; videoHeight = 600; ratio = '4 / 3'; }
-	else if (aspect === '1:1') { videoWidth = 640; videoHeight = 640; ratio = '1 / 1'; }
-	else if (aspect === '16:10') { videoWidth = 800; videoHeight = 500; ratio = '16 / 10'; }
+	let size = '1280x720', ratio = '16 / 9';
+	if (aspect === '4:3') { size = '800x600'; ratio = '4 / 3'; }
+	else if (aspect === '1:1') { size = '640x640'; ratio = '1 / 1'; }
+	else if (aspect === '16:10') { size = '800x500'; ratio = '16 / 10'; }
 	$('#video-view').css('aspect-ratio', ratio);
-	initPolygonSelector();
-	const secureConnection = location.protocol === 'https:' ? ' secure=true' : '';
-	const player = '<media-stream-player hostname="' + window.location.hostname + '"' + secureConnection + ' format="RTP_H264" compression="40" audio="0" resolution="' + videoWidth + 'x' + videoHeight + '" variant="basic" autoplay></media-stream-player>';
-	$('#video').empty().append(player);
+	const secure = location.protocol === 'https:' ? ' secure=true' : '';
+	$('#video').html('<media-stream-player hostname="' + location.hostname + '"' + secure + ' format="RTP_H264" compression="40" audio="0" resolution="' + size + '" variant="basic" autoplay></media-stream-player>');
+	requestAnimationFrame(resizeCanvas);
 }
 
-function initPolygonSelector() {
-	if (polygonSelector) return;
-	polygonSelector = new PolygonSelector('settings-canvas', { minPoints: 3, maxPoints: 8, enabled: $('#aoiEnabled').is(':checked'), onchange: function() {} });
+function resizeCanvas() {
+	const box = canvas.getBoundingClientRect();
+	canvas.width = Math.max(1, Math.round(box.width * devicePixelRatio));
+	canvas.height = Math.max(1, Math.round(box.height * devicePixelRatio));
+	drawLine();
 }
+window.addEventListener('resize', resizeCanvas);
 
 function loadSettings() {
-	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
-		success: function(settings) {
-			currentSettings = settings || {};
-			const counting = ((currentSettings.transmission || {}).counting || {});
-			$('input[name="countingLabel"][value="' + (counting.label === 'vehicle' ? 'vehicle' : 'human') + '"]').prop('checked', true);
-			$('#countingInterval').val(counting.intervalMinutes || 15);
-			$('#countingIntervalValue').text(counting.intervalMinutes || 15);
-			const aoi = counting.aoi || {};
-			$('#aoiEnabled').prop('checked', !!aoi.enabled);
-			setPolygonPoints(aoi.points || [
-				{ x: aoi.x1 ?? 0, y: aoi.y1 ?? 0 },
-				{ x: aoi.x2 ?? 1000, y: aoi.y1 ?? 0 },
-				{ x: aoi.x2 ?? 1000, y: aoi.y2 ?? 1000 },
-				{ x: aoi.x1 ?? 0, y: aoi.y2 ?? 1000 }
-			]);
-		}
+	$.getJSON('settings').done(function(settings) {
+		currentSettings = settings || {};
+		scenes = JSON.parse(JSON.stringify((((currentSettings.transmission || {}).counting || {}).scenes || [])));
+		selectedId = scenes.some(function(scene) { return scene.id === selectedId; }) ? selectedId : (scenes[0] || {}).id;
+		renderScenes(); loadTotals();
 	});
 }
 
-function setPolygonPoints(points) {
-	if (!polygonSelector) initPolygonSelector();
-	if (polygonSelector) { polygonSelector.setEnabled($('#aoiEnabled').is(':checked')); polygonSelector.setPoints(points); }
-}
-
-function readPolygonPoints() {
-	if (!polygonSelector) initPolygonSelector();
-	return polygonSelector ? polygonSelector.getPoints() : [];
-}
-
-function polygonBounds(points) {
-	let x1 = 1000, y1 = 1000, x2 = 0, y2 = 0;
-	points.forEach(function(point) { x1 = Math.min(x1, point.x); y1 = Math.min(y1, point.y); x2 = Math.max(x2, point.x); y2 = Math.max(y2, point.y); });
-	return { x1, y1, x2, y2 };
-}
-
-function saveCounting() {
-	const transmission = currentSettings.transmission || {};
-	const existingCounting = transmission.counting || {};
-	const points = readPolygonPoints();
-	const bounds = polygonBounds(points);
-	transmission.counting = Object.assign({ port: 1, enabled: false }, existingCounting, {
-		label: $('input[name="countingLabel"]:checked').val() || 'human',
-		intervalMinutes: parseInt($('#countingInterval').val(), 10),
-		aoi: { enabled: $('#aoiEnabled').is(':checked'), x1: bounds.x1, x2: bounds.x2, y1: bounds.y1, y2: bounds.y2, points: points }
+function selectedScene() { return scenes.find(function(scene) { return scene.id === selectedId; }); }
+function renderScenes() {
+	const list = $('#sceneList').empty();
+	if (!scenes.length) list.append('<div class="empty-scenes">No counting scenes</div>');
+	scenes.forEach(function(scene) {
+		const count = totals[scene.id] || { human: 0, vehicle: 0 };
+		const button = $('<button type="button" class="scene-item"></button>').toggleClass('active', scene.id === selectedId);
+		button.append($('<div class="fw-semibold"></div>').text(scene.name));
+		button.append($('<div class="scene-total"></div>').text('Human ' + count.human + '  Vehicle ' + count.vehicle));
+		button.on('click', function() { selectedId = scene.id; renderScenes(); });
+		list.append(button);
 	});
-	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
-		success: function() { currentSettings.transmission = transmission; showToast('Counting saved', 'success'); },
-		error: function(xhr, status, error) { showToast('Failed to save Counting: ' + error, 'danger'); }
-	});
+	const scene = selectedScene();
+	$('#sceneEditor').prop('hidden', !scene);
+	if (scene) {
+		$('#sceneName').val(scene.name); $('#sceneDirection').val(scene.direction);
+		$('#sceneEnabled').prop('checked', !!scene.enabled);
+		$('#classHuman').prop('checked', !!scene.classes.human); $('#classVehicle').prop('checked', !!scene.classes.vehicle);
+		const count = totals[scene.id] || { human: 0, vehicle: 0 };
+		$('#humanTotal').text(count.human); $('#vehicleTotal').text(count.vehicle);
+	}
+	drawLine();
 }
 
-function updateAreaBalance() {
-	$.ajax({ type: 'GET', url: 'counters', dataType: 'json', cache: false,
-		success: function(data) {
-			const balance = data.areaBalance || {};
-			$('#currentEntering').text(balance.entering || 0);
-			$('#currentExiting').text(balance.exiting || 0);
-		}
-	});
+function addScene() {
+	if (scenes.length >= 10) return showToast('A maximum of 10 scenes is supported', 'warning');
+	let id = 1; while (scenes.some(function(scene) { return scene.id === id; })) id++;
+	let suffix = scenes.length + 1, name = 'Scene ' + suffix;
+	while (scenes.some(function(scene) { return scene.name.toLowerCase() === name.toLowerCase(); })) name = 'Scene ' + (++suffix);
+	scenes.push({ id: id, name: name, enabled: false, direction: 'leftToRight', classes: { human: true, vehicle: false }, line: [{ x: 500, y: 200 }, { x: 500, y: 800 }] });
+	selectedId = id; renderScenes();
 }
 
+function deleteScene() {
+	const scene = selectedScene(); if (!scene) return;
+	if (!confirm('Delete "' + scene.name + '" and its saved totals?')) return;
+	scenes = scenes.filter(function(item) { return item.id !== scene.id; });
+	selectedId = (scenes[0] || {}).id; renderScenes();
+}
+
+function updateSelectedFromForm() {
+	const scene = selectedScene(); if (!scene) return;
+	scene.name = $('#sceneName').val(); scene.direction = $('#sceneDirection').val();
+	scene.enabled = $('#sceneEnabled').is(':checked');
+	scene.classes = { human: $('#classHuman').is(':checked'), vehicle: $('#classVehicle').is(':checked') };
+	renderScenes();
+}
+
+function validateScenes() {
+	const names = {};
+	for (const scene of scenes) {
+		const name = String(scene.name || '').trim();
+		if (!name || name.length > 31) return 'Every scene needs a name of at most 31 characters';
+		if (names[name.toLowerCase()]) return 'Scene names must be unique'; names[name.toLowerCase()] = true; scene.name = name;
+		if (scene.enabled && !scene.classes.human && !scene.classes.vehicle) return 'Enabled scenes must select Human or Vehicle';
+		if (!scene.line || scene.line.length !== 2 || (scene.line[0].x === scene.line[1].x && scene.line[0].y === scene.line[1].y)) return 'Each scene line needs two distinct points';
+	}
+	return '';
+}
+
+function saveScenes() {
+	updateSelectedFromForm(); const error = validateScenes(); if (error) return showToast(error, 'warning');
+	const transmission = JSON.parse(JSON.stringify(currentSettings.transmission || {}));
+	transmission.counting = Object.assign({ port: 1, enabled: false, intervalMinutes: 15 }, transmission.counting || {}, { scenes: scenes });
+	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission: transmission }), contentType: 'application/json' })
+		.done(function() { showToast('Counting scenes saved', 'success'); loadSettings(); })
+		.fail(function(xhr, status, error) { showToast('Failed to save Counting: ' + error, 'danger'); });
+}
+
+function canvasPoint(event) {
+	const box = canvas.getBoundingClientRect();
+	return { x: Math.round(Math.max(0, Math.min(1000, (event.clientX - box.left) / box.width * 1000))), y: Math.round(Math.max(0, Math.min(1000, (event.clientY - box.top) / box.height * 1000))) };
+}
+function displayPoint(point) { return { x: point.x / 1000 * canvas.width, y: point.y / 1000 * canvas.height }; }
+function beginDrag(event) {
+	const scene = selectedScene(); if (!scene) return;
+	const point = canvasPoint(event);
+	dragPoint = scene.line.map(function(item) { return Math.hypot(item.x - point.x, (item.y - point.y) * canvas.width / canvas.height); }).indexOf(Math.min.apply(null, scene.line.map(function(item) { return Math.hypot(item.x - point.x, (item.y - point.y) * canvas.width / canvas.height); })));
+	canvas.setPointerCapture(event.pointerId); moveDrag(event);
+}
+function moveDrag(event) { const scene = selectedScene(); if (dragPoint < 0 || !scene) return; scene.line[dragPoint] = canvasPoint(event); drawLine(); }
+function endDrag(event) { if (dragPoint >= 0) canvas.releasePointerCapture(event.pointerId); dragPoint = -1; }
+function drawLine() {
+	context.clearRect(0, 0, canvas.width, canvas.height); const scene = selectedScene(); if (!scene) return;
+	const first = displayPoint(scene.line[0]), second = displayPoint(scene.line[1]);
+	context.lineWidth = 4 * devicePixelRatio; context.strokeStyle = '#20d4b2'; context.fillStyle = '#fff';
+	context.beginPath(); context.moveTo(first.x, first.y); context.lineTo(second.x, second.y); context.stroke();
+	[first, second].forEach(function(point) { context.beginPath(); context.arc(point.x, point.y, 9 * devicePixelRatio, 0, Math.PI * 2); context.fill(); context.stroke(); });
+	const middle = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+	let nx = second.y - first.y, ny = -(second.x - first.x); if (scene.direction === 'rightToLeft') { nx = -nx; ny = -ny; }
+	const length = Math.hypot(nx, ny) || 1; nx = nx / length * 45 * devicePixelRatio; ny = ny / length * 45 * devicePixelRatio;
+	const end = { x: middle.x + nx, y: middle.y + ny }; context.beginPath(); context.moveTo(middle.x, middle.y); context.lineTo(end.x, end.y); context.stroke();
+	const angle = Math.atan2(ny, nx); context.beginPath(); context.moveTo(end.x, end.y); context.lineTo(end.x - 13 * devicePixelRatio * Math.cos(angle - .55), end.y - 13 * devicePixelRatio * Math.sin(angle - .55)); context.lineTo(end.x - 13 * devicePixelRatio * Math.cos(angle + .55), end.y - 13 * devicePixelRatio * Math.sin(angle + .55)); context.closePath(); context.fillStyle = '#20d4b2'; context.fill();
+}
+
+function loadTotals() {
+	$.getJSON('counters').done(function(data) {
+		totals = {}; (data.countingScenes || []).forEach(function(scene) { totals[scene.id] = scene; }); renderScenes();
+	});
+}
 function pollLoraStatus() {
-	$.ajax({ type: 'GET', url: 'status', dataType: 'json', cache: false,
-		success: function(d) { const dot = $('#lora-nav-dot'); const lw = d && d.lorawan; dot.removeClass('lora-joined lora-connected lora-disconnected'); if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined'); else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined'); else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected'); }
-	});
+	$.getJSON('status').done(function(data) { const dot = $('#lora-nav-dot'), lw = data && data.lorawan; dot.removeClass('lora-joined lora-connected lora-disconnected'); if (lw && lw.joined) dot.addClass('lora-joined').attr('title', 'LoRaWAN: Joined'); else if (lw && lw.connected) dot.addClass('lora-connected').attr('title', 'LoRaWAN: Connected, not joined'); else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected'); });
 }
 </script>
 </body>

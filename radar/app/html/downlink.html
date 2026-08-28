@@ -32,6 +32,14 @@
 		.sig-warn    { color: #fd7e14; }
 		.sig-bad     { color: #dc3545; }
 		#no-messages { font-size: 0.9rem; }
+		#translatorContent {
+			min-height: 65vh;
+			font-family: "Courier New", monospace;
+			font-size: 0.82rem;
+			white-space: pre;
+		}
+		.ota-help { font-size: 0.86rem; line-height: 1.45; }
+		.ota-help code { font-size: 0.8rem; }
 	</style>
 </head>
 <body>
@@ -76,21 +84,27 @@
 				</div>
 			</div>
 
-			<!-- Downlink Command Table Card -->
+			<!-- OTA service reference -->
 			<div class="col-12 col-lg-4">
 				<div class="card mb-3">
 					<div class="card-header d-flex justify-content-between align-items-center">
-						<h5 class="card-title mb-0">Downlink Commands</h5>
-						<button id="save-commands" class="btn btn-sm btn-primary">Save</button>
+						<h5 class="card-title mb-0">OTA Services and Ports</h5>
+						<div class="d-flex gap-2">
+							<button class="btn btn-sm btn-secondary open-translator" data-endpoint="js/ota_encoder.js" data-title="OTA Encoder">OTA Encoder</button>
+							<button class="btn btn-sm btn-secondary open-translator" data-endpoint="js/ota_decoder.js" data-title="OTA Decoder">OTA Decoder</button>
+						</div>
 					</div>
-					<div class="card-body p-0">
+					<div class="card-body">
+						<p class="ota-help">OTA downlinks can execute actions, read information or capabilities, and update supported service parameters. Download the JavaScript tools for Node-RED or custom integrations.</p>
+						<div class="alert alert-light border py-2 px-3 ota-help">
+							<strong>Framed services:</strong> all OTA ports return queued responses on the request port. Ports 132 and 133 also accept legacy requests for existing integrations.
+						</div>
 						<table class="table table-sm table-hover mb-0" style="font-size:0.82rem;">
 							<thead class="table-light">
 								<tr>
-									<th style="width:36px">On</th>
 									<th style="width:46px">Byte</th>
-									<th>Name</th>
-									<th>Action</th>
+									<th>Command</th>
+									<th>Description</th>
 								</tr>
 							</thead>
 							<tbody id="command-table-body">
@@ -101,41 +115,64 @@
 		</div>
 	</div>
 
+	<div class="modal fade" id="translatorModal" tabindex="-1" aria-labelledby="translatorModalLabel" aria-hidden="true">
+		<div class="modal-dialog modal-xl modal-dialog-scrollable">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="translatorModalLabel">OTA JavaScript</h5>
+					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+				</div>
+				<div class="modal-body">
+					<textarea id="translatorContent" class="form-control" spellcheck="false" readonly></textarea>
+				</div>
+				<div class="modal-footer">
+					<a id="downloadTranslator" class="btn btn-outline-primary" href="#">Download</a>
+					<button type="button" id="copyTranslator" class="btn btn-primary">Copy</button>
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
 <script>
-// Downlink command definitions — enabled states loaded from settings on init
+// OTA command reference grouped by destination service port
 const DEFAULT_COMMANDS = [
-	// Port 100 — Actions
-	{ enabled: true,  port: 100, byte: '0x01', message: 'Restart Bridge',       action: 'Restart the AI-B100 LoRaWAN bridge device' },
-	{ enabled: true,  port: 100, byte: '0x02', message: 'Join Network',          action: 'Initiate a new LoRaWAN OTAA join' },
-	{ enabled: true,  port: 100, byte: '0x03', message: 'Reset Radar State',     action: 'Clear retained radar occupancy objects and publish immediately' },
-	// Port 110 — Configuration (2-byte: byte[0]=command, byte[1]=value)
-	{ enabled: true,  port: 110, byte: '0x01', message: 'Set Interval',          action: 'Set transmission interval; byte 1 = minutes (5-60)' },
-	{ enabled: true,  port: 110, byte: '0x02', message: 'Set Data Rate',         action: 'Set fixed data rate; byte 1 = 0-5 (DR0-DR5)' },
-	{ enabled: true,  port: 110, byte: '0x03', message: 'Set ADR',               action: 'Enable/disable ADR; byte 1 = 1 (on) / 0 (off)' },
-	// Port 120 — Information requests
-	{ enabled: true,  port: 120, byte: '0x01', message: 'Camera Info',   action: 'Reply on port 121: model, serial, firmware, uptime hours, CPU %, ACAP version' },
-	{ enabled: true,  port: 120, byte: '0x02', message: 'Bridge Info',   action: 'Reply on port 122: hardware, firmware, power source, temperature, restart count, DevAddr' },
-	{ enabled: true,  port: 120, byte: '0x03', message: 'Signal Quality',action: 'Update local signal quality status' },
-	// Port 130 — Radar OTA configuration
-	{ enabled: true,  port: 130, byte: '0x01', message: 'Radar OTA Get Config', action: 'Request Radar OTA config response on port 130' },
-	{ enabled: true,  port: 130, byte: '0x02', message: 'Radar OTA Set Config', action: 'Apply Radar OTA config payload and return ACK/NACK on port 130' },
-	{ enabled: true,  port: 130, byte: '0x03', message: 'Radar OTA Get Caps',   action: 'Request Radar OTA capability response on port 130' },
-	// Port 132 — Occupancy OTA configuration
-	{ enabled: true,  port: 132, byte: '0x01', message: 'Occupancy OTA Get Config', action: 'Request Occupancy OTA config response on port 132' },
-	{ enabled: true,  port: 132, byte: '0x02', message: 'Occupancy OTA Set Config', action: 'Apply Occupancy OTA config payload and return ACK/NACK on port 132' },
-	{ enabled: true,  port: 132, byte: '0x03', message: 'Occupancy OTA Get Caps',   action: 'Request Occupancy OTA capability response on port 132' },
-	// Port 133 — Detection Alert OTA configuration
-	{ enabled: true,  port: 133, byte: '0x01', message: 'Alert OTA Get Config', action: 'Request Detection Alert OTA config response on port 133' },
-	{ enabled: true,  port: 133, byte: '0x02', message: 'Alert OTA Set Config', action: 'Apply Detection Alert OTA config payload and return ACK/NACK on port 133' },
-	{ enabled: true,  port: 133, byte: '0x03', message: 'Alert OTA Get Caps',   action: 'Request Detection Alert OTA capability response on port 133' }
+	{ port: 100, byte: '0x02', message: 'Execute', action: 'Run bridge or application actions.' },
+	{ port: 100, byte: '0x03', message: 'Capabilities', action: 'Read supported action codes.' },
+	{ port: 110, byte: '0x01', message: 'Get Configuration', action: 'Read configured LoRa Data Rate and ADR.' },
+	{ port: 110, byte: '0x02', message: 'Set Configuration', action: 'Update configured LoRa Data Rate and ADR.' },
+	{ port: 110, byte: '0x03', message: 'Capabilities', action: 'Read supported LoRa configuration ranges.' },
+	{ port: 111, byte: '0x01', message: 'Get Radar Configuration', action: 'Read camera-wide Radar Detection Sensitivity.' },
+	{ port: 111, byte: '0x02', message: 'Set Radar Configuration', action: 'Set Detection Sensitivity to low, medium, or high.' },
+	{ port: 111, byte: '0x03', message: 'Radar Capabilities', action: 'Read supported Radar-wide configuration fields.' },
+	{ port: 120, byte: '0x01', message: 'Get Information', action: 'Read camera or bridge information.' },
+	{ port: 120, byte: '0x03', message: 'Capabilities', action: 'Read supported information item types.' },
+	{ port: 130, byte: '0x01', message: 'Get Transmission', action: 'Read publish state and interval by service index.' },
+	{ port: 130, byte: '0x02', message: 'Set Transmission', action: 'Update publish state and interval by service index.' },
+	{ port: 130, byte: '0x03', message: 'Capabilities', action: 'Read transmission support for all services.' },
+	{ port: 131, byte: '0x01-0x04', message: 'Counting scenes', action: 'Get, set, list, create, update, or delete named counting lines.' },
+	{ port: 132, byte: '0x01', message: 'Get Occupancy', action: 'Read Radar Occupancy configuration and AOI.' },
+	{ port: 132, byte: '0x02', message: 'Set Occupancy', action: 'Update Radar Occupancy configuration and AOI.' },
+	{ port: 132, byte: '0x03', message: 'Capabilities', action: 'Read Occupancy limits.' },
+	{ port: 133, byte: '0x01', message: 'Get Presence Alert', action: 'Read Presence Alert configuration and AOI.' },
+	{ port: 133, byte: '0x02', message: 'Set Presence Alert', action: 'Update Presence Alert configuration and AOI.' },
+	{ port: 133, byte: '0x03', message: 'Capabilities', action: 'Read Presence Alert limits.' }
 ];
 
 $(document).ready(function() {
 	let lastRenderedFcnt = -1;
 	let clearedAtFcnt = -2;
-	let commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
+	const commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
+	const translatorModal = new bootstrap.Modal(document.getElementById('translatorModal'));
 
-	// Load app info and merge saved enabled states from settings
+	$('.open-translator').on('click', function() {
+		openTranslatorDialog(this, $(this).data('endpoint'), $(this).data('title'), translatorModal);
+	});
+	$('#copyTranslator').on('click', copyTranslatorToClipboard);
+	$('#copyTranslator').prop('disabled', true);
+	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true');
+
+	// Load app info for header/title rendering
 	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
 		success: function(data) {
 			document.title = data.manifest.acapPackageConf.setup.friendlyName;
@@ -143,19 +180,7 @@ $(document).ready(function() {
 		}
 	});
 
-	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
-		success: function(s) {
-			if (s.downlinkCommands && Array.isArray(s.downlinkCommands)) {
-				s.downlinkCommands.forEach(function(saved) {
-					const byteVal = '0x' + ('0' + saved.byte.toString(16).toUpperCase()).slice(-2);
-					const match = commands.find(c => c.port === saved.port && c.byte === byteVal);
-					if (match) match.enabled = saved.enabled;
-				});
-			}
-			renderCommandTable();
-		},
-		error: function() { renderCommandTable(); }
-	});
+	renderCommandTable();
 	const RSSI_LEVELS = [
 		{ min: -70,  label: 'Excellent', cls: 'sig-good' },
 		{ min: -85,  label: 'Good',      cls: 'sig-ok'   },
@@ -199,54 +224,34 @@ $(document).ready(function() {
 
 	const PORT_GROUPS = {
 		100: 'Port 100 - Actions',
-		110: 'Port 110 - Configuration',
-		120: 'Port 120 - Information Requests'
-		,130: 'Port 130 - Radar OTA'
-		,132: 'Port 132 - Occupancy OTA'
-		,133: 'Port 133 - Detection Alert OTA'
+		110: 'Port 110 - LoRa Configuration',
+		111: 'Port 111 - Radar Configuration',
+		120: 'Port 120 - Information',
+		130: 'Port 130 - Service Transmission',
+		131: 'Port 131 - Counting (To Be Defined)',
+		132: 'Port 132 - Occupancy',
+		133: 'Port 133 - Presence Alert'
 	};
 
 	function renderCommandTable() {
 		const tbody = $('#command-table-body');
 		tbody.empty();
 		let lastPort = null;
-		commands.forEach(function(cmd, idx) {
+		commands.forEach(function(cmd) {
 			if (cmd.port !== lastPort) {
 				lastPort = cmd.port;
 				const label = PORT_GROUPS[cmd.port] || ('Port ' + cmd.port);
-				tbody.append(`<tr class="table-secondary"><td colspan="4"><strong>${label}</strong></td></tr>`);
+				tbody.append(`<tr class="table-secondary"><td colspan="3"><strong>${label}</strong></td></tr>`);
 			}
 			tbody.append(`
 				<tr>
-					<td class="text-center">
-						<input type="checkbox" class="form-check-input cmd-enable" data-idx="${idx}" ${cmd.enabled ? 'checked' : ''}>
-					</td>
 					<td><span class="badge bg-secondary">${cmd.byte}</span></td>
 					<td><strong>${cmd.message}</strong></td>
 					<td><small>${cmd.action}</small></td>
 				</tr>
 			`);
 		});
-
-		$('.cmd-enable').on('change', function() {
-			const idx = parseInt($(this).data('idx'));
-			commands[idx].enabled = $(this).is(':checked');
-		});
 	}
-
-	renderCommandTable();
-
-	$('#save-commands').on('click', function() {
-		// Persist to settings (Phase 3 will wire these to actual handlers)
-		$.ajax({
-			type: 'POST',
-			url: 'settings',
-			contentType: 'application/json',
-			data: JSON.stringify({ downlinkCommands: commands }),
-			success: function() { showToast('Command settings saved', 'success'); },
-			error: function() { showToast('Failed to save command settings', 'danger'); }
-		});
-	});
 
 	function pollDownlinks() {
 		$.ajax({
@@ -352,6 +357,53 @@ $(document).ready(function() {
 		}
 	}
 });
+
+async function openTranslatorDialog(source, endpoint, title, modal) {
+	const button = $(source);
+	const originalText = button.text();
+	button.prop('disabled', true).text('Loading...');
+	$('#translatorModalLabel').text(title);
+	$('#translatorContent').val('Loading JavaScript...');
+	$('#copyTranslator').prop('disabled', true);
+	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true').attr('href', '#');
+	try {
+		const response = await fetch(endpoint, { method: 'GET', cache: 'no-store' });
+		if (!response.ok) throw new Error('HTTP ' + response.status);
+		const text = await response.text();
+		if (!text || !text.trim()) throw new Error('Empty response');
+		$('#translatorContent').val(text);
+		$('#copyTranslator').prop('disabled', false);
+		$('#downloadTranslator').removeClass('disabled').removeAttr('aria-disabled').attr('href', endpoint).attr('download', endpoint.split('/').pop());
+		modal.show();
+	} catch (error) {
+		$('#translatorContent').val('');
+		showToast('Failed to load ' + title + ': ' + (error.message || 'request failed'), 'danger');
+	} finally {
+		button.prop('disabled', false).text(originalText);
+	}
+}
+
+function copyTranslatorToClipboard() {
+	const text = $('#translatorContent').val() || '';
+	if (!text) return;
+	if (navigator.clipboard && navigator.clipboard.writeText) {
+		navigator.clipboard.writeText(text).then(function() {
+			showToast('JavaScript copied', 'success');
+		}).catch(function() { fallbackCopyTranslatorText(text); });
+		return;
+	}
+	fallbackCopyTranslatorText(text);
+}
+
+function fallbackCopyTranslatorText(text) {
+	const area = document.getElementById('translatorContent');
+	area.focus();
+	area.select();
+	area.setSelectionRange(0, text.length);
+	let copied = false;
+	try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+	showToast(copied ? 'JavaScript copied' : 'Unable to copy automatically', copied ? 'success' : 'warning');
+}
 </script>
 </body>
 </html>

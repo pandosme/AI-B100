@@ -38,6 +38,13 @@
 			font-size: 0.82rem;
 			white-space: pre;
 		}
+		.ota-help {
+			font-size: 0.86rem;
+			line-height: 1.45;
+		}
+		.ota-help code {
+			font-size: 0.8rem;
+		}
 	</style>
 </head>
 <body>
@@ -86,20 +93,27 @@
 			<div class="col-12 col-lg-4">
 				<div class="card mb-3">
 					<div class="card-header d-flex justify-content-between align-items-center">
-						<h5 class="card-title mb-0">Downlink Commands</h5>
+						<h5 class="card-title mb-0">OTA Services and Ports</h5>
 						<div class="d-flex gap-2">
 							<button class="btn btn-sm btn-secondary open-translator" data-endpoint="ota_encoder" data-title="OTA Encoder">OTA Encoder</button>
 							<button class="btn btn-sm btn-secondary open-translator" data-endpoint="ota_decoder" data-title="OTA Decoder">OTA Decoder</button>
 						</div>
 					</div>
-					<div class="card-body p-0">
+					<div class="card-body">
+						<div class="ota-help mb-3">
+							Use OTA downlinks to read capabilities, fetch current configuration, and update service parameters or scene geometry.
+							Download the JavaScript tools to generate valid frames and decode uplink/downlink payloads in Node-RED or custom tooling.
+						</div>
+						<div class="alert alert-light border mb-3 py-2 px-3 ota-help">
+							<div><strong>Common flow:</strong> <code>Capabilities (0x03)</code> → <code>List (0x04)</code> → <code>Get (0x01)</code> → <code>Set (0x02)</code>.</div>
+							<div>Scene services (ports 131-133) require existing scene identities and page-aware geometry handling.</div>
+						</div>
 						<table class="table table-sm table-hover mb-0" style="font-size:0.82rem;">
 							<thead class="table-light">
 								<tr>
-									<th style="width:36px">On</th>
 									<th style="width:46px">Byte</th>
-									<th>Name</th>
-									<th>Action</th>
+									<th>Command</th>
+									<th>Description</th>
 								</tr>
 							</thead>
 							<tbody id="command-table-body">
@@ -130,36 +144,36 @@
 	</div>
 
 <script>
-// Downlink command definitions — enabled states loaded from settings on init
+// OTA command reference grouped by destination service port
 const DEFAULT_COMMANDS = [
-	{ enabled: true, port: 100, byte: '0x02', message: 'Execute', action: 'Restart Bridge or Reset All Data; response uses port 100' },
-	{ enabled: true, port: 100, byte: '0x03', message: 'Capabilities', action: 'Read supported action codes' },
-	{ enabled: true, port: 110, byte: '0x01', message: 'Get Configuration', action: 'Read Data Rate and ADR; response uses port 110' },
-	{ enabled: true, port: 110, byte: '0x02', message: 'Set Configuration', action: 'Set Data Rate and/or ADR' },
-	{ enabled: true, port: 110, byte: '0x03', message: 'Capabilities', action: 'Read supported Data Rate and ADR ranges' },
-	{ enabled: true, port: 120, byte: '0x01', message: 'Get Information', action: 'Read paged Camera or Bridge information on port 120' },
-	{ enabled: true, port: 120, byte: '0x03', message: 'Capabilities', action: 'Read supported information types' },
-	{ enabled: true, port: 130, byte: '0x01', message: 'Get Configuration', action: 'Read enable state and publish rate by use-case index' },
-	{ enabled: true, port: 130, byte: '0x02', message: 'Set Configuration', action: 'Set enable state and publish rate by use-case index' },
-	{ enabled: true, port: 130, byte: '0x03', message: 'Capabilities', action: 'Read per-use-case publish-rate support' },
-	{ enabled: true, port: 131, byte: '0x01', message: 'Get Counting Scene', action: 'Read one page of an existing Counting scene' },
-	{ enabled: true, port: 131, byte: '0x02', message: 'Set Counting Scene', action: 'Update an existing Counting scene' },
-	{ enabled: true, port: 131, byte: '0x03', message: 'Counting Capabilities', action: 'Read Counting OTA limits' },
-	{ enabled: true, port: 131, byte: '0x04', message: 'List Counting Scenes', action: 'Read stable Counting scene identities' },
-	{ enabled: true, port: 132, byte: '0x01', message: 'Get Occupancy Scene', action: 'Read one page of an existing Occupancy scene' },
-	{ enabled: true, port: 132, byte: '0x02', message: 'Set Occupancy Scene', action: 'Update an existing Occupancy scene' },
-	{ enabled: true, port: 132, byte: '0x03', message: 'Occupancy Capabilities', action: 'Read Occupancy OTA limits' },
-	{ enabled: true, port: 132, byte: '0x04', message: 'List Occupancy Scenes', action: 'Read stable Occupancy scene identities' },
-	{ enabled: true, port: 133, byte: '0x01', message: 'Get Presence Alert', action: 'Read one page of an existing Presence Alert' },
-	{ enabled: true, port: 133, byte: '0x02', message: 'Set Presence Alert', action: 'Update an existing Presence Alert' },
-	{ enabled: true, port: 133, byte: '0x03', message: 'Presence Capabilities', action: 'Read Presence Alert OTA limits' },
-	{ enabled: true, port: 133, byte: '0x04', message: 'List Presence Alerts', action: 'Read stable Presence Alert identities' }
+	{ port: 100, byte: '0x02', message: 'Execute', action: 'Run bridge-level actions such as restart bridge or reset all data. Response is returned on port 100.' },
+	{ port: 100, byte: '0x03', message: 'Capabilities', action: 'Read supported bridge action codes before sending execute commands.' },
+	{ port: 110, byte: '0x01', message: 'Get Configuration', action: 'Read configured Data Rate and ADR values from the bridge service.' },
+	{ port: 110, byte: '0x02', message: 'Set Configuration', action: 'Update configured Data Rate and ADR values used by the bridge.' },
+	{ port: 110, byte: '0x03', message: 'Capabilities', action: 'Read limits and valid ranges for Data Rate and ADR settings.' },
+	{ port: 120, byte: '0x01', message: 'Get Information', action: 'Read paged camera or bridge information values.' },
+	{ port: 120, byte: '0x03', message: 'Capabilities', action: 'Read supported information item types.' },
+	{ port: 130, byte: '0x01', message: 'Get Configuration', action: 'Read per-use-case publish state and transmission interval.' },
+	{ port: 130, byte: '0x02', message: 'Set Configuration', action: 'Update per-use-case publish state and transmission interval.' },
+	{ port: 130, byte: '0x03', message: 'Capabilities', action: 'Read per-use-case interval support and constraints.' },
+	{ port: 131, byte: '0x01', message: 'Get Counting Scene', action: 'Read one page of an existing Counting scene configuration.' },
+	{ port: 131, byte: '0x02', message: 'Set Counting Scene', action: 'Update an existing Counting scene using the current scene fingerprint.' },
+	{ port: 131, byte: '0x03', message: 'Counting Capabilities', action: 'Read Counting OTA limits such as max points and bytes per page.' },
+	{ port: 131, byte: '0x04', message: 'List Counting Scenes', action: 'Read stable scene identities before get/set operations.' },
+	{ port: 132, byte: '0x01', message: 'Get Occupancy Scene', action: 'Read one page of an existing Occupancy scene configuration.' },
+	{ port: 132, byte: '0x02', message: 'Set Occupancy Scene', action: 'Update an existing Occupancy scene using current fingerprints.' },
+	{ port: 132, byte: '0x03', message: 'Occupancy Capabilities', action: 'Read Occupancy OTA limits such as max points and bytes per page.' },
+	{ port: 132, byte: '0x04', message: 'List Occupancy Scenes', action: 'Read stable scene identities before get/set operations.' },
+	{ port: 133, byte: '0x01', message: 'Get Presence Alert', action: 'Read one page of an existing Presence Alert configuration, including schedule fields.' },
+	{ port: 133, byte: '0x02', message: 'Set Presence Alert', action: 'Update an existing Presence Alert configuration and schedule values.' },
+	{ port: 133, byte: '0x03', message: 'Presence Capabilities', action: 'Read Presence Alert OTA limits such as max points and bytes per page.' },
+	{ port: 133, byte: '0x04', message: 'List Presence Alerts', action: 'Read stable alert identities before get/set operations.' }
 ];
 
 $(document).ready(function() {
 	let lastRenderedFcnt = -1;
 	let clearedAtFcnt = -2;
-	let commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
+	const commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
 	const translatorModal = new bootstrap.Modal(document.getElementById('translatorModal'));
 
 	$('.open-translator').on('click', function() {
@@ -169,27 +183,14 @@ $(document).ready(function() {
 	$('#copyTranslator').prop('disabled', true);
 	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true');
 
-	// Load app info and merge saved enabled states from settings
+	// Load app info for header/title rendering
 	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
 		success: function(data) {
 			document.title = data.manifest.acapPackageConf.setup.friendlyName;
 			$('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
 		}
 	});
-
-	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
-		success: function(s) {
-			if (s.downlinkCommands && Array.isArray(s.downlinkCommands)) {
-				s.downlinkCommands.forEach(function(saved) {
-					const byteVal = '0x' + ('0' + saved.byte.toString(16).toUpperCase()).slice(-2);
-					const match = commands.find(c => c.port === saved.port && c.byte === byteVal);
-					if (match) match.enabled = saved.enabled;
-				});
-			}
-			renderCommandTable();
-		},
-		error: function() { renderCommandTable(); }
-	});
+	renderCommandTable();
 	const RSSI_LEVELS = [
 		{ min: -70,  label: 'Excellent', cls: 'sig-good' },
 		{ min: -85,  label: 'Good',      cls: 'sig-ok'   },
@@ -245,31 +246,21 @@ $(document).ready(function() {
 		const tbody = $('#command-table-body');
 		tbody.empty();
 		let lastPort = null;
-		commands.forEach(function(cmd, idx) {
+		commands.forEach(function(cmd) {
 			if (cmd.port !== lastPort) {
 				lastPort = cmd.port;
 				const label = PORT_GROUPS[cmd.port] || ('Port ' + cmd.port);
-				tbody.append(`<tr class="table-secondary"><td colspan="4"><strong>${label}</strong></td></tr>`);
+				tbody.append(`<tr class="table-secondary"><td colspan="3"><strong>${label}</strong></td></tr>`);
 			}
 			tbody.append(`
 				<tr>
-					<td class="text-center">
-						<input type="checkbox" class="form-check-input cmd-enable" data-idx="${idx}" ${cmd.enabled ? 'checked' : ''}>
-					</td>
 					<td><span class="badge bg-secondary">${cmd.byte}</span></td>
 					<td><strong>${cmd.message}</strong></td>
 					<td><small>${cmd.action}</small></td>
 				</tr>
 			`);
 		});
-
-		$('.cmd-enable').on('change', function() {
-			const idx = parseInt($(this).data('idx'));
-			commands[idx].enabled = $(this).is(':checked');
-		});
 	}
-
-	renderCommandTable();
 
 	function pollDownlinks() {
 		$.ajax({

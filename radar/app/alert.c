@@ -13,12 +13,26 @@ static time_t g_last_alert_time = 0;
 static time_t g_last_heartbeat_time = 0;
 static time_t g_last_active_publish_time = 0;
 static int g_inactive_pending = 0;
+static int g_schedule_enabled = 0;
+static int g_schedule_start_minutes = 18 * 60;
+static int g_schedule_end_minutes = 6 * 60;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void Update_Max(RadarCounts current) {
 	if (current.total > g_active_max.total) {
 		g_active_max = current;
 	}
+}
+
+static int Schedule_Allows(time_t now) {
+	if (!g_schedule_enabled) return 1;
+	struct tm local_time;
+	localtime_r(&now, &local_time);
+	int minutes = local_time.tm_hour * 60 + local_time.tm_min;
+	if (g_schedule_start_minutes == g_schedule_end_minutes) return 1;
+	if (g_schedule_start_minutes < g_schedule_end_minutes)
+		return minutes >= g_schedule_start_minutes && minutes < g_schedule_end_minutes;
+	return minutes >= g_schedule_start_minutes || minutes < g_schedule_end_minutes;
 }
 
 void Alert_Reset(void) {
@@ -48,8 +62,38 @@ void Alert_Reset_Timers(void) {
 	pthread_mutex_unlock(&g_mutex);
 }
 
+void Alert_Set_Schedule(int enabled, int start_minutes, int end_minutes) {
+	pthread_mutex_lock(&g_mutex);
+	g_schedule_enabled = enabled ? 1 : 0;
+	g_schedule_start_minutes = start_minutes >= 0 && start_minutes < 1440 ? start_minutes : 18 * 60;
+	g_schedule_end_minutes = end_minutes >= 0 && end_minutes < 1440 ? end_minutes : 6 * 60;
+	if (!Schedule_Allows(time(NULL))) {
+		g_current = RadarCounts_Make(0, 0, 0, 0);
+		g_active_max = RadarCounts_Make(0, 0, 0, 0);
+		g_active = 0;
+		g_pending = 0;
+		g_detecting = 0;
+		g_detect_since = 0;
+		g_clear_since = 0;
+		g_inactive_pending = 1;
+	}
+	pthread_mutex_unlock(&g_mutex);
+}
+
 void Alert_Update_Current(RadarCounts current, time_t now, int transition_seconds) {
 	pthread_mutex_lock(&g_mutex);
+	if (!Schedule_Allows(now)) {
+		g_current = RadarCounts_Make(0, 0, 0, 0);
+		g_active_max = RadarCounts_Make(0, 0, 0, 0);
+		if (g_active || g_detecting) g_inactive_pending = 1;
+		g_active = 0;
+		g_pending = 0;
+		g_detecting = 0;
+		g_detect_since = 0;
+		g_clear_since = 0;
+		pthread_mutex_unlock(&g_mutex);
+		return;
+	}
 	if (transition_seconds < 2) transition_seconds = 2;
 	if (transition_seconds > 20) transition_seconds = 20;
 	g_current = current;

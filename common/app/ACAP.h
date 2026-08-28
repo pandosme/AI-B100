@@ -761,7 +761,7 @@ char* ACAP_VAPIX_Get(const char* request);
 /**
  * @brief Make a POST request to a VAPIX endpoint.
  *
- * @param request The VAPIX CGI path
+ * @param request The VAPIX CGI path, or an absolute local path beginning with '/'
  * @param body The POST body content
  * @return Response body as string on success, NULL on failure
  *

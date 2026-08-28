@@ -2,7 +2,7 @@
 
 This repository contains Axis ACAP applications that connect Axis camera analytics to LoRaWAN through an AI-B100 bridge. The top-level README gives the repository overview. The app-specific README files explain how each ACAP works and how to operate it:
 
-- [aoa/README.md](aoa/README.md) - AI-B100 AOA for Axis Object Analytics Counting and Occupancy
+- [aoa/README.md](aoa/README.md) - AI-B100 AOA for Axis Object Analytics Counting, Occupancy, and Presence
 - [radar/README.md](radar/README.md) - AI-B100 Radar for radar Occupancy and Detection Alert, with Counting reserved for future use
 
 For complete bench staging and field setup, including static IP addressing, camera accounts, bridge callbacks, LoRaWAN registration, and end-to-end verification, follow [DEPLOYMENT.md](DEPLOYMENT.md). The recommended static addresses are camera/radar `192.168.1.200` and AI-B100 bridge `192.168.1.250`.
@@ -38,7 +38,7 @@ Typical deployments use an Axis camera, an AI-B100 or AI-B100-POE bridge, a loca
 
 | Directory | ACAP package | Source analytics | Main LoRaWAN uplinks | Read more |
 | --- | --- | --- | --- | --- |
-| [aoa/](aoa/) | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2 | [aoa/README.md](aoa/README.md) |
+| [aoa/](aoa/) | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2, Presence on port 3 | [aoa/README.md](aoa/README.md) |
 | [radar/](radar/) | AI-B100 Radar | Axis radar scene provider | Counting reserved on port 1, Occupancy on port 2, Detection Alert on port 3 | [radar/README.md](radar/README.md) |
 
 Both variants use ACAP `appName` `aib100`. This keeps the camera URL path, settings store, and AI-B100 callback paths stable when switching between the AOA and Radar variants. It also means the two variants are alternatives: install and run the one that matches the camera and use case.
@@ -108,8 +108,8 @@ Current package outputs:
 
 | App | ARTPEC-8/9 | ARTPEC-7 |
 | --- | --- | --- |
-| AOA | `AI-B100_AOA_1_2_0_aarch64.eap` | `AI-B100_AOA_1_2_0_armv7hf.eap` |
-| Radar | `AI-B100_Radar_1_3_0_aarch64.eap` | `AI-B100_Radar_1_3_0_armv7hf.eap` |
+| AOA | `AI-B100_AOA_2_0_0_aarch64.eap` | `AI-B100_AOA_2_0_0_armv7hf.eap` |
+| Radar | `AI-B100_Radar_2_0_0_aarch64.eap` | `AI-B100_Radar_2_0_0_armv7hf.eap` |
 
 Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
 

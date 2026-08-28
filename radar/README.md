@@ -9,7 +9,7 @@ Only numeric occupancy data is transmitted. No images or video leave the camera.
 ## What It Does
 
 - Subscribes to the Axis radar scene provider and tracks moving radar objects locally on the camera.
-- Exposes Occupancy and Detection Alert as active use cases. Counting is reserved on port `1` but is currently hidden because that use case is not developed.
+- Counts completed Human and Vehicle tracks across up to 10 named directional lines.
 - Publishes each enabled use case on a fixed LoRaWAN port through the AI-B100 bridge.
 - Supports Human or Vehicle label selection and optional area-of-interest filtering for each use case.
 - Receives AI-B100 status, downlink, GPS, and link-check callbacks.
@@ -28,8 +28,11 @@ The recommended field setup is:
 |---------|-------------------|
 | Camera callback address | `192.168.1.200` |
 | AI-B100 bridge address | `192.168.1.250` |
-| Callback digest user | `aib100` |
-| Callback digest password | `aib100` |
+| Bridge API port | `81` |
+| Bridge API digest user | `lorabridge` |
+| Bridge API digest password | `lorabridge` |
+| Callback digest user | `lorabridge` |
+| Callback digest password | `lorabridge` |
 | Callback port | `80` |
 | LoRaWAN uplink ports | Counting `1`, Occupancy `2`, Alert `3` |
 | Publish interval | `15` minutes |
@@ -55,6 +58,7 @@ Open the app from the Axis camera Apps page. The main pages are:
 | Page | Purpose |
 |------|---------|
 | Publish | Enable/disable active use cases, view fixed LoRaWAN ports, see next publish times, publish manually, download decoder, and view the last 20 publishes |
+| Counting | Configure named two-point lines, direction, Human/Vehicle classes, and view cumulative totals on fixed uplink port 1 |
 | Occupancy | Select Human or Vehicle detection, publish frequency, and optional area of interest for fixed uplink port 2 |
 | Detection Alert | Select Human or Vehicle detection, inactive heartbeat publish, active publish, hold time, and optional area of interest for fixed uplink port 3 |
 | Radar | View the live stream and set Radar Detection Sensitivity |
@@ -76,11 +80,11 @@ Open the app from the Axis camera Apps page. The main pages are:
 
 ## Use Cases
 
-Axis radar reports moving tracked objects. The app runs use cases independently. Occupancy and Detection Alert are currently exposed in the UI; Counting is reserved but hidden until that use case is developed.
+Axis radar reports moving tracked objects. The app runs Counting, Occupancy, and Detection Alert independently.
 
 ### Counting
 
-Counting is reserved for fixed uplink port `1`, but the card is hidden in the UI because the use case is not currently developed.
+Counting evaluates only completed tracks (`active:false`) from their birth point to loss point. A scene increments when that finite trajectory properly crosses its ordered two-point line in the configured direction. Each scene independently selects Human, Vehicle, or both. Totals are cumulative, persist across application restarts, and are not cleared by publishing.
 
 ### Occupancy
 
@@ -104,11 +108,11 @@ The Radar page shows the live stream and reads/sets the camera Radar Detection S
 
 ## LoRaWAN Uplink Payload
 
-Each use case has a fixed LoRaWAN port, so compact payloads do not include a mode byte. Counting is reserved on port `1`, Occupancy publishes on port `2`, and Detection Alert publishes on port `3`. Counts are clamped to unsigned 8-bit values, `0-255`. The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in the uplink.
+Each use case has a fixed LoRaWAN port, so compact payloads do not include a mode byte. Counting publishes on port `1`, Occupancy on port `2`, and Detection Alert on port `3`. Occupancy and Alert values are unsigned 8-bit. Counting values are cumulative unsigned 16-bit big-endian values and wrap modulo 65536 on the wire while full totals remain persisted.
 
 | Port | Use case | Payload |
 |------|----------|---------|
-| `1` | Counting | Reserved; hidden in the UI until developed |
+| `1` | Counting | For each enabled scene in settings order: Human then Vehicle when selected, each as big-endian `uint16` |
 | `2` | Occupancy Interval Maximum | 1 byte: `[selected_label_interval_max]` |
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
 | `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
@@ -118,7 +122,7 @@ The decoder is available in two places:
 - [decoder/](decoder/), which holds a generated uplink decoder sample plus the OTA translators for the Radar (`130`), Occupancy (`132`), and Detection Alert (`133`) configuration ports
 - **Publish** or **About** page in the ACAP UI, using **Download JavaScript Translator**
 
-Download a fresh translator after changing enabled use cases, labels, Occupancy type, or area settings.
+Download a fresh translator after changing Counting scene order/classes or another use-case mode.
 
 ## Downlink Commands
 
@@ -150,20 +154,20 @@ Port 110 commands use two bytes: `[command, value]`.
 | `0x02` | 122 | Bridge info: hardware, firmware, power source, temperature, restart count, DevAddr |
 | `0x03` | Local status | Signal quality: data rate, max payload, RSSI, SNR, frame counters up/down |
 
-### Port 130 - Radar OTA Configuration
+### Framed OTA Configuration
 
-Radar OTA uses port 130 for both requests and responses. The first supported field is Radar Detection Sensitivity; the payload includes a 16-bit field mask so future Radar-tab settings can be added without changing the command structure.
+Framed OTA uses protocol version 1, transaction IDs, CRC-8, and same-port responses.
 
-| Command | Direction | Payload |
-|---------|-----------|---------|
-| `0x01` | Downlink | Get current Radar configuration |
-| `0x81` | Uplink | Get configuration response: command byte plus 8-byte config body |
-| `0x02` | Downlink | Set Radar configuration: command byte plus 8-byte config body |
-| `0x82` | Uplink | Set ACK/NACK: `[0x82, version, echoedCommand, status, crc8]` |
-| `0x03` | Downlink | Get Radar OTA capabilities |
-| `0x83` | Uplink | Capabilities response for supported Radar fields |
-
-The 8-byte config body is `[version, fieldMaskHi, fieldMaskLo, detectionSensitivity, reserved, reserved, reserved, crc8]`. Field mask `0x0001` enables `detectionSensitivity`, where `1=low`, `2=medium`, and `3=high`.
+| Port | Purpose |
+|------|---------|
+| `100` | Actions |
+| `110` | LoRa configuration |
+| `111` | Radar detection sensitivity |
+| `120` | Camera and bridge information |
+| `130` | Use-case enable and interval |
+| `131` | Counting scene CAPS/LIST/GET/SET create, update, and delete |
+| `132` | Occupancy configuration |
+| `133` | Detection Alert configuration |
 
 ## HTTP Endpoints
 
@@ -210,12 +214,14 @@ The packaged default settings are:
 {
 	"b100": {
 		"ip": "192.168.1.250",
-		"port": 80,
+		"port": 81,
 		"timeout": 30,
+		"apiDigestUser": "lorabridge",
+		"apiDigestPassword": "lorabridge",
 		"callbackIP": "192.168.1.200",
 		"callbackPort": 80,
-		"callbackDigestUser": "aib100",
-		"callbackDigestPassword": "aib100"
+		"callbackDigestUser": "lorabridge",
+		"callbackDigestPassword": "lorabridge"
 	},
 	"lorawan": {
 		"port": 2,
@@ -228,8 +234,7 @@ The packaged default settings are:
 			"enabled": false,
 			"port": 1,
 			"intervalMinutes": 15,
-			"label": "human",
-			"aoi": { "enabled": false }
+			"scenes": []
 		},
 		"occupancy": {
 			"enabled": true,
@@ -270,8 +275,8 @@ cd radar
 
 Output:
 
-- `AI-B100_Radar_1_3_0_aarch64.eap`
-- `AI-B100_Radar_1_3_0_armv7hf.eap`
+- `AI-B100_Radar_2_0_0_aarch64.eap`
+- `AI-B100_Radar_2_0_0_armv7hf.eap`
 
 Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 cameras.
 
@@ -280,7 +285,7 @@ Use `aarch64` for ARTPEC-8 and ARTPEC-9 cameras. Use `armv7hf` for ARTPEC-7 came
 Upload the correct `.eap` file through the Axis camera Apps page, or use the helper script:
 
 ```bash
-./install.sh <camera-host> AI-B100_Radar_1_3_0_aarch64.eap
+./install.sh <camera-host> AI-B100_Radar_2_0_0_aarch64.eap
 ```
 
 If an older `radaroccupancy` package is still installed, remove it before using this package. Both the Radar and AOA variants now use `appName: "aib100"`; this is intentional so settings and callback paths are reused.

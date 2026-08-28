@@ -12,11 +12,16 @@
 	<script src="js/bootstrap.bundle.min.js"></script>
 	<script src="js/toast.js"></script>
 	<style>
-		.publish-card .port-badge { font-size: 1.4rem; font-weight: 700; color: #1a2a6c; }
 		.publish-log-table code { white-space: normal; word-break: break-all; user-select: text; }
 		.payload-cell { display: flex; align-items: center; gap: 0.5rem; }
 		.payload-cell code { flex: 1; min-width: 0; }
 		.payload-copy { flex: 0 0 auto; }
+		.use-case-title { align-items: center; color: #1a2a6c; display: inline-flex; gap: 0.4rem; text-decoration: none; }
+		.use-case-title:hover, .use-case-title:focus-visible { color: #2d4a9e; text-decoration: underline; }
+		.use-case-title .use-case-arrow { font-size: 1.35rem; line-height: 1; }
+		.page-content .form-group { align-items: stretch; flex-direction: column; }
+		.page-content .form-group label { min-width: 0; margin: 0 0 0.5rem 0; }
+		.page-content .form-control { width: 100%; }
 	</style>
 </head>
 <body>
@@ -27,55 +32,75 @@
 
 	<div class="page-content">
 		<div class="row mb-4">
-			<div class="col-12 col-lg-4 mb-3 d-none">
+			<div class="col-12 col-xl-4 mb-3 d-flex">
 				<div class="card publish-card w-100">
-					<div class="card-header"><h5 class="card-title mb-0">Counting</h5></div>
+						<div class="card-header"><h5 class="card-title mb-0"><a class="use-case-title" href="counting.html">Counting <span class="use-case-arrow" aria-hidden="true">&rsaquo;</span></a></h5></div>
 					<div class="card-body">
+						<div class="form-group mb-3">
+							<label for="countingInterval">Publish Interval: <strong id="countingIntervalValue">15</strong> m</label>
+							<input type="range" class="form-range" id="countingInterval" min="1" max="60" value="15">
+						</div>
 						<div class="form-check form-switch mb-3">
-							<input class="form-check-input publish-toggle" type="checkbox" id="countingEnabled" data-stream="counting">
+							<input class="form-check-input" type="checkbox" role="switch" id="countingEnabled">
 							<label class="form-check-label" for="countingEnabled">Enable Publishing</label>
 						</div>
-						<div class="d-flex justify-content-between mb-2"><span>LoRaWAN Port</span><span class="port-badge">1</span></div>
-						<div class="d-flex justify-content-between mb-2"><span>Label</span><strong id="countingLabel">--</strong></div>
-						<div class="d-flex justify-content-between mb-2"><span>Balance</span><strong id="countingStatus">--</strong></div>
-						<div class="d-flex justify-content-between mb-2"><span>Interval</span><strong id="countingInterval">--</strong></div>
-						<div class="d-flex justify-content-between mb-3"><span>Next Publish</span><strong id="countingNext">--</strong></div>
-						<button class="btn btn-success" id="publishCountingNow" style="display:none;">Publish Now</button>
+						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">1</div></div>
+						<div class="form-group mb-3"><label>Next Publish</label><div id="countingNext" class="text-muted">--</div></div>
+						<div class="mt-3 d-flex flex-wrap gap-2">
+							<button class="btn btn-primary save-publish-settings">Save Settings</button>
+							<button class="btn btn-success" id="publishCountingNow">Publish Now</button>
+						</div>
+							<div class="text-muted mt-2">Cumulative named line totals on fixed uplink port 1.</div>
 					</div>
 				</div>
 			</div>
 
-			<div class="col-12 col-lg-6 mb-3 d-flex">
+			<div class="col-12 col-xl-4 mb-3 d-flex">
 				<div class="card publish-card w-100">
-					<div class="card-header"><h5 class="card-title mb-0">Occupancy</h5></div>
+					<div class="card-header"><h5 class="card-title mb-0"><a class="use-case-title" href="occupancy.html">Occupancy <span class="use-case-arrow" aria-hidden="true">&rsaquo;</span></a></h5></div>
 					<div class="card-body">
+						<div class="form-group mb-3">
+							<label for="occupancyInterval">Publish Interval: <strong id="occupancyIntervalValue">15</strong> m</label>
+							<input type="range" class="form-range" id="occupancyInterval" min="1" max="60" value="15">
+						</div>
 						<div class="form-check form-switch mb-3">
-							<input class="form-check-input publish-toggle" type="checkbox" id="occupancyEnabled" data-stream="occupancy">
+							<input class="form-check-input" type="checkbox" role="switch" id="occupancyEnabled">
 							<label class="form-check-label" for="occupancyEnabled">Enable Publishing</label>
 						</div>
-						<div class="d-flex justify-content-between mb-2"><span>LoRaWAN Port</span><span class="port-badge">2</span></div>
-						<div class="d-flex justify-content-between mb-2"><span>Type</span><strong id="occupancyType">--</strong></div>
-						<div class="d-flex justify-content-between mb-2"><span>Value</span><strong id="occupancyStatus">--</strong></div>
-						<div class="d-flex justify-content-between mb-2"><span>Interval</span><strong id="occupancyInterval">--</strong></div>
-						<div class="d-flex justify-content-between mb-3"><span>Next Publish</span><strong id="occupancyNext">--</strong></div>
-						<button class="btn btn-success" id="publishOccupancyNow" style="display:none;">Publish Now</button>
+						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">2</div></div>
+						<div class="form-group mb-3"><label>Next Publish</label><div id="occupancyNext" class="text-muted">--</div></div>
+						<div class="mt-3 d-flex flex-wrap gap-2">
+							<button class="btn btn-primary save-publish-settings">Save Settings</button>
+							<button class="btn btn-success" id="publishOccupancyNow">Publish Now</button>
+						</div>
+						<div class="text-muted mt-2">Occupancy uses fixed uplink port 2.</div>
 					</div>
 				</div>
 			</div>
 
-			<div class="col-12 col-lg-6 mb-3 d-flex">
+			<div class="col-12 col-xl-4 mb-3 d-flex">
 				<div class="card publish-card w-100">
-					<div class="card-header"><h5 class="card-title mb-0">Detection Alert</h5></div>
+					<div class="card-header"><h5 class="card-title mb-0"><a class="use-case-title" href="alert.html">Presence Alert <span class="use-case-arrow" aria-hidden="true">&rsaquo;</span></a></h5></div>
 					<div class="card-body">
+						<div class="form-group mb-3">
+							<label for="activeIntervalSeconds">Active Publish Interval: <strong id="activeIntervalValue">60</strong> s</label>
+							<input type="range" class="form-range" id="activeIntervalSeconds" min="60" max="300" value="60">
+						</div>
+						<div class="form-group mb-3">
+							<label for="heartbeatMinutes">Inactive Heartbeat Interval: <strong id="heartbeatValue">15</strong> m</label>
+							<input type="range" class="form-range" id="heartbeatMinutes" min="5" max="60" value="15">
+						</div>
 						<div class="form-check form-switch mb-3">
-							<input class="form-check-input publish-toggle" type="checkbox" id="alertEnabled" data-stream="alert">
+							<input class="form-check-input" type="checkbox" role="switch" id="alertEnabled">
 							<label class="form-check-label" for="alertEnabled">Enable Publishing</label>
 						</div>
-						<div class="d-flex justify-content-between mb-2"><span>LoRaWAN Port</span><span class="port-badge">3</span></div>
-						<div class="d-flex justify-content-between mb-2"><span>Label</span><strong id="alertLabel">--</strong></div>
-						<div class="d-flex justify-content-between mb-2"><span>State</span><strong id="alertState">--</strong></div>
-						<div class="d-flex justify-content-between mb-3"><span>Next Publish</span><strong id="alertNext">--</strong></div>
-						<button class="btn btn-success" id="publishAlertNow" style="display:none;">Publish Now</button>
+						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">3</div></div>
+						<div class="form-group mb-3"><label>Next Publish</label><div id="alertNext" class="text-muted">--</div></div>
+						<div class="mt-3 d-flex flex-wrap gap-2">
+							<button class="btn btn-primary save-publish-settings">Save Settings</button>
+							<button class="btn btn-success" id="publishAlertNow">Publish Now</button>
+						</div>
+						<div class="text-muted mt-2">Presence Alert uses fixed uplink port 3.</div>
 					</div>
 				</div>
 			</div>
@@ -103,7 +128,6 @@
 
 <script>
 let currentSettings = {};
-let publishToggleDirty = { counting: false, occupancy: false, alert: false };
 let lastPublishLogKey = '';
 
 $(document).ready(function() {
@@ -121,10 +145,12 @@ $(document).ready(function() {
 	$('#publishCountingNow').on('click', function() { publishNow('counting', this); });
 	$('#publishOccupancyNow').on('click', function() { publishNow('occupancy', this); });
 	$('#publishAlertNow').on('click', function() { publishNow('alert', this); });
+	$('#countingInterval').on('input', function() { $('#countingIntervalValue').text($(this).val()); });
+	$('#occupancyInterval').on('input', function() { $('#occupancyIntervalValue').text($(this).val()); });
+	$('#activeIntervalSeconds').on('input', function() { $('#activeIntervalValue').text($(this).val()); });
+	$('#heartbeatMinutes').on('input', function() { $('#heartbeatValue').text($(this).val()); });
+	$('.save-publish-settings').on('click', savePublishSettings);
 	$('#publishLogBody').on('click', '.payload-copy', function() { copyPayload($(this).data('payload')); });
-	$('.publish-toggle').on('change', function() {
-		updatePublishingEnabled($(this).data('stream'), $(this).is(':checked'), this);
-	});
 	$('#downloadTranslator').on('click', function() { window.location.href = 'translator'; });
 	setInterval(pollLoraStatus, 10000);
 	pollLoraStatus();
@@ -135,33 +161,37 @@ function loadSettings() {
 		success: function(settings) {
 			currentSettings = settings || {};
 			const transmission = currentSettings.transmission || {};
-			publishToggleDirty = { counting: false, occupancy: false, alert: false };
-			$('#countingEnabled').prop('checked', !!(transmission.counting || {}).enabled);
-			$('#occupancyEnabled').prop('checked', !!(transmission.occupancy || {}).enabled);
-			$('#alertEnabled').prop('checked', !!(transmission.alert || {}).enabled);
-			setPublishButtonVisible('counting', !!(transmission.counting || {}).enabled);
-			setPublishButtonVisible('occupancy', !!(transmission.occupancy || {}).enabled);
-			setPublishButtonVisible('alert', !!(transmission.alert || {}).enabled);
+			const counting = transmission.counting || {};
+			const occupancy = transmission.occupancy || {};
+			const presence = transmission.presence || transmission.alert || {};
+			$('#countingEnabled').prop('checked', !!counting.enabled);
+			$('#occupancyEnabled').prop('checked', !!occupancy.enabled);
+			$('#alertEnabled').prop('checked', !!presence.enabled);
+			$('#countingInterval').val(counting.intervalMinutes || 15); $('#countingIntervalValue').text(counting.intervalMinutes || 15);
+			$('#occupancyInterval').val(occupancy.intervalMinutes || 15); $('#occupancyIntervalValue').text(occupancy.intervalMinutes || 15);
+			$('#activeIntervalSeconds').val(Math.max(60, presence.activeIntervalSeconds || 60)); $('#activeIntervalValue').text(Math.max(60, presence.activeIntervalSeconds || 60));
+			$('#heartbeatMinutes').val(presence.heartbeatMinutes || 15); $('#heartbeatValue').text(presence.heartbeatMinutes || 15);
 		}
 	});
 }
 
-function updatePublishingEnabled(stream, enabled, toggle) {
+function savePublishSettings() {
 	const transmission = currentSettings.transmission || {};
-	const defaults = {
-		counting: { port: 1, intervalMinutes: 15, label: 'human' },
-		occupancy: { port: 2, intervalMinutes: 15, type: 'maximum' },
-		alert: { port: 3, heartbeatMinutes: 15, activeIntervalSeconds: 60, transitionSeconds: 2, label: 'human' }
-	};
-	const previousEnabled = !!((transmission[stream] || {}).enabled);
-	transmission[stream] = Object.assign({}, defaults[stream], transmission[stream] || {}, { enabled: enabled });
-	publishToggleDirty[stream] = true;
-	setPublishButtonVisible(stream, enabled);
-	$(toggle).prop('disabled', true);
+	transmission.counting = Object.assign({ port: 1, scenes: [] }, transmission.counting || {}, {
+		enabled: $('#countingEnabled').is(':checked'), intervalMinutes: parseInt($('#countingInterval').val(), 10)
+	});
+	transmission.occupancy = Object.assign({ port: 2, type: 'maximum' }, transmission.occupancy || {}, {
+		enabled: $('#occupancyEnabled').is(':checked'), intervalMinutes: parseInt($('#occupancyInterval').val(), 10)
+	});
+	transmission.presence = Object.assign({ port: 3, transitionSeconds: 2, label: 'human', schedule: { enabled: false, start: '18:00', end: '06:00' } }, transmission.presence || transmission.alert || {}, {
+		enabled: $('#alertEnabled').is(':checked'),
+		activeIntervalSeconds: parseInt($('#activeIntervalSeconds').val(), 10),
+		heartbeatMinutes: parseInt($('#heartbeatMinutes').val(), 10)
+	});
+	delete transmission.alert;
 	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
-		success: function() { currentSettings.transmission = transmission; publishToggleDirty[stream] = false; showToast((enabled ? 'Enabled ' : 'Disabled ') + stream + ' publishing', 'success'); updateTimer(); },
-		error: function(xhr, status, error) { transmission[stream].enabled = previousEnabled; $(toggle).prop('checked', previousEnabled); setPublishButtonVisible(stream, previousEnabled); publishToggleDirty[stream] = false; showToast('Failed to update publishing: ' + error, 'danger'); },
-		complete: function() { $(toggle).prop('disabled', false); }
+		success: function() { currentSettings.transmission = transmission; showToast('Publish settings saved', 'success'); updateTimer(); },
+		error: function(xhr, status, error) { showToast('Failed to save publish settings: ' + error, 'danger'); }
 	});
 }
 
@@ -188,30 +218,7 @@ function updateTimer() {
 }
 
 function updateStreamCard(stream, publish) {
-	if (!publishToggleDirty[stream])
-		$('#' + stream + 'Enabled').prop('checked', !!publish.enabled);
-	const enabled = publishToggleDirty[stream] ? $('#' + stream + 'Enabled').is(':checked') : !!publish.enabled;
-	setPublishButtonVisible(stream, enabled);
 	$('#' + stream + 'Next').text(formatTimer(publish));
-	if (stream === 'counting') {
-		$('#countingLabel').text(publish.label === 'vehicle' ? 'Vehicles' : 'Humans');
-		$('#countingStatus').text(publish.enabled ? ((publish.entering || 0) + ' in / ' + (publish.exiting || 0) + ' out') : 'Disabled');
-		$('#countingInterval').text((publish.intervalMinutes || 15) + ' min');
-	}
-	if (stream === 'occupancy') {
-		$('#occupancyType').text('Interval Maximum');
-		$('#occupancyStatus').text(publish.count || 0);
-		$('#occupancyInterval').text((publish.intervalMinutes || 15) + ' min');
-	}
-	if (stream === 'alert') {
-		$('#alertLabel').text(publish.label === 'vehicle' ? 'Vehicles' : 'Humans');
-		$('#alertState').text(publish.active ? 'Active' : 'Inactive');
-	}
-}
-
-function setPublishButtonVisible(stream, enabled) {
-	const buttonMap = { counting: '#publishCountingNow', occupancy: '#publishOccupancyNow', alert: '#publishAlertNow' };
-	$(buttonMap[stream]).toggle(!!enabled);
 }
 
 function formatTimer(publish) {

@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <math.h>
 
 #include "ACAP.h"
 #include "cJSON.h"
@@ -20,6 +21,8 @@
 #include "alert.h"
 #include "counting.h"
 #include "occupancy.h"
+#include "ota_counting.h"
+#include "ota_protocol.h"
 
 #define APP_PACKAGE	"aib100"
 #define B100_STATUS_CALLBACK_NODE "b100_status"
@@ -38,27 +41,18 @@
 #define LORA_PORT_ALERT 3
 #define LORA_PORT_DOWNLINK_CONTROL 100
 #define LORA_PORT_DOWNLINK_CONFIG 110
+#define LORA_PORT_RADAR_CONFIG 111
 #define LORA_PORT_DOWNLINK_QUERY 120
 #define LORA_PORT_CAMERA_INFO_RESPONSE 121
 #define LORA_PORT_BRIDGE_INFO_RESPONSE 122
-#define LORA_PORT_RADAR_OTA_CONFIG 130
+#define LORA_PORT_USE_CASE_CONFIG 130
+#define LORA_PORT_COUNTING_OTA_CONFIG 131
 #define LORA_PORT_OCCUPANCY_OTA_CONFIG 132
 #define LORA_PORT_ALERT_OTA_CONFIG 133
 
-#define RADAR_OTA_PROTOCOL_VERSION 1
 #define RADAR_OTA_FIELD_DETECTION_SENSITIVITY 0x0001
-#define RADAR_OTA_CMD_GET_CONFIG 0x01
-#define RADAR_OTA_CMD_SET_CONFIG 0x02
-#define RADAR_OTA_CMD_GET_CAPS 0x03
-#define RADAR_OTA_CMD_GET_CONFIG_RESP 0x81
-#define RADAR_OTA_CMD_SET_CONFIG_ACK 0x82
-#define RADAR_OTA_CMD_GET_CAPS_RESP 0x83
-
-#define RADAR_OTA_STATUS_OK 0x00
-#define RADAR_OTA_STATUS_INVALID_LENGTH 0x01
-#define RADAR_OTA_STATUS_INVALID_RANGE 0x02
-#define RADAR_OTA_STATUS_CRC_MISMATCH 0x04
-#define RADAR_OTA_STATUS_INTERNAL_ERROR 0x05
+#define OTA_RESPONSE_QUEUE_MAX 32
+#define OTA_INFORMATION_FORMAT_STRUCTURED 0x81
 
 #define OCCUPANCY_OTA_PROTOCOL_VERSION 1
 #define OCCUPANCY_OTA_MAX_POINTS 10
@@ -105,6 +99,28 @@ static int g_callbacks_configured = 0;
 static cJSON* g_downlink_log = NULL;
 static cJSON* g_publish_log = NULL;
 
+void Settings_Updated_Callback(const char* service, cJSON* data);
+static int Counting_Save_Counters(void);
+
+typedef struct {
+	int port;
+	uint8_t data[OTA_MAX_FRAME_SIZE];
+	size_t length;
+	time_t next_attempt;
+	int restart_bridge_after_send;
+} OTA_Queued_Response;
+
+typedef struct {
+	uint8_t transaction_id;
+	uint8_t field_mask;
+	uint8_t data_rate;
+	uint8_t adr_enabled;
+} OTA_Queued_Bridge_Config;
+
+static GQueue* g_ota_response_queue = NULL;
+static GQueue* g_ota_bridge_config_queue = NULL;
+static pthread_mutex_t g_ota_response_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // Transmission settings
 static int g_counting_publish_enabled = 0;
 static int g_counting_interval_minutes = 15;
@@ -138,8 +154,6 @@ typedef struct {
 	int active;
 	int valid;
 	int inside_area;
-	int counted_inside;
-	int counted_bucket;
 	int occupancy_counted_inside;
 	int occupancy_counted_bucket;
 } RadarObjectState;
@@ -159,18 +173,9 @@ static double g_radar_area_x[RADAR_MAX_POLYGON_POINTS] = {0, 1000, 1000, 0};
 static double g_radar_area_y[RADAR_MAX_POLYGON_POINTS] = {0, 0, 1000, 1000};
 static int g_radar_area_point_count = 4;
 static int g_radar_connected = 0;
+static int g_radar_subscriber_initialized = 0;
 static time_t g_radar_last_frame_time = 0;
 static pthread_mutex_t g_radar_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-static int g_counting_label_bucket = 1;
-static int g_counting_aoi_enabled = 0;
-static int g_counting_aoi_x1 = 0;
-static int g_counting_aoi_x2 = 1000;
-static int g_counting_aoi_y1 = 0;
-static int g_counting_aoi_y2 = 1000;
-static double g_counting_area_x[RADAR_MAX_POLYGON_POINTS] = {0, 1000, 1000, 0};
-static double g_counting_area_y[RADAR_MAX_POLYGON_POINTS] = {0, 0, 1000, 1000};
-static int g_counting_area_point_count = 4;
 
 static int g_occupancy_aoi_enabled = 0;
 static int g_occupancy_aoi_x1 = 0;
@@ -192,11 +197,13 @@ static int g_alert_area_point_count = 4;
 
 // Settings cache
 static char g_b100_ip[64] = "192.168.1.250";
-static int g_b100_port = 80;
-static char g_callback_ip[64] = "192.168.1.2";
+static int g_b100_port = 81;
+static char g_b100_api_user[33] = "lorabridge";
+static char g_b100_api_password[65] = "lorabridge";
+static char g_callback_ip[64] = "192.168.1.200";
 static int g_callback_port = 80;
-static char g_callback_digest_user[32] = "aib100";
-static char g_callback_digest_password[32] = "aib100";
+static char g_callback_digest_user[32] = "lorabridge";
+static char g_callback_digest_password[32] = "lorabridge";
 static int g_health_check_interval = 60;
 
 // App start time for uptime calculation
@@ -260,11 +267,6 @@ Alert_Class_Enabled(int bucket) {
 static int
 Occupancy_Class_Enabled(int bucket) {
 	return bucket == g_occupancy_label_bucket;
-}
-
-static int
-Counting_Class_Enabled(int bucket) {
-	return bucket == g_counting_label_bucket;
 }
 
 static void
@@ -333,61 +335,6 @@ Occupancy_Set_Rectangle_Area_Points(void) {
 	g_occupancy_area_y[2] = g_occupancy_aoi_y2;
 	g_occupancy_area_x[3] = g_occupancy_aoi_x1;
 	g_occupancy_area_y[3] = g_occupancy_aoi_y2;
-}
-
-static void
-Counting_Set_Rectangle_Area_Points(void) {
-	g_counting_area_point_count = 4;
-	g_counting_area_x[0] = g_counting_aoi_x1;
-	g_counting_area_y[0] = g_counting_aoi_y1;
-	g_counting_area_x[1] = g_counting_aoi_x2;
-	g_counting_area_y[1] = g_counting_aoi_y1;
-	g_counting_area_x[2] = g_counting_aoi_x2;
-	g_counting_area_y[2] = g_counting_aoi_y2;
-	g_counting_area_x[3] = g_counting_aoi_x1;
-	g_counting_area_y[3] = g_counting_aoi_y2;
-}
-
-static void
-Counting_Load_Area_Points(cJSON* points) {
-	if (!points || !cJSON_IsArray(points) || cJSON_GetArraySize(points) < 3) {
-		Counting_Set_Rectangle_Area_Points();
-		return;
-	}
-
-	int count = 0;
-	double min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
-	cJSON* point = NULL;
-	cJSON_ArrayForEach(point, points) {
-		if (count >= RADAR_MAX_POLYGON_POINTS)
-			break;
-
-		cJSON* x_json = cJSON_GetObjectItem(point, "x");
-		cJSON* y_json = cJSON_GetObjectItem(point, "y");
-		if (!x_json || !y_json)
-			continue;
-
-		double x = Clamp_Int(x_json->valueint, 0, 1000);
-		double y = Clamp_Int(y_json->valueint, 0, 1000);
-		g_counting_area_x[count] = x;
-		g_counting_area_y[count] = y;
-		if (x < min_x) min_x = x;
-		if (x > max_x) max_x = x;
-		if (y < min_y) min_y = y;
-		if (y > max_y) max_y = y;
-		count++;
-	}
-
-	if (count < 3) {
-		Counting_Set_Rectangle_Area_Points();
-		return;
-	}
-
-	g_counting_area_point_count = count;
-	g_counting_aoi_x1 = (int)min_x;
-	g_counting_aoi_x2 = (int)max_x;
-	g_counting_aoi_y1 = (int)min_y;
-	g_counting_aoi_y2 = (int)max_y;
 }
 
 static void
@@ -507,25 +454,6 @@ Radar_Point_In_Area(double x, double y) {
 }
 
 static int
-Counting_Point_In_Area(double x, double y) {
-	if (!g_counting_aoi_enabled)
-		return 1;
-
-	if (g_counting_area_point_count < 3)
-		return (x >= g_counting_aoi_x1 && x <= g_counting_aoi_x2 && y >= g_counting_aoi_y1 && y <= g_counting_aoi_y2);
-
-	int inside = 0;
-	for (int i = 0, j = g_counting_area_point_count - 1; i < g_counting_area_point_count; j = i++) {
-		double xi = g_counting_area_x[i], yi = g_counting_area_y[i];
-		double xj = g_counting_area_x[j], yj = g_counting_area_y[j];
-		if (((yi > y) != (yj > y)) &&
-		    (x < (xj - xi) * (y - yi) / ((yj - yi) == 0 ? 0.000001 : (yj - yi)) + xi))
-			inside = !inside;
-	}
-	return inside;
-}
-
-static int
 Occupancy_Point_In_Area(double x, double y) {
 	if (!g_occupancy_aoi_enabled)
 		return 1;
@@ -600,6 +528,25 @@ Read_U16_BE(const unsigned char* in) {
 	return ((unsigned int)in[0] << 8) | (unsigned int)in[1];
 }
 
+static int
+Hex_Nibble(char value) {
+	if (value >= '0' && value <= '9') return value - '0';
+	if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+	if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+	return -1;
+}
+
+static int
+Parse_HHMM(const char* value, int fallback) {
+	if (!value || strlen(value) != 5 || value[2] != ':' ||
+		value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9' ||
+		value[3] < '0' || value[3] > '9' || value[4] < '0' || value[4] > '9') return fallback;
+	int hour = (value[0] - '0') * 10 + (value[1] - '0');
+	int minute = (value[3] - '0') * 10 + (value[4] - '0');
+	if (hour > 23 || minute > 59) return fallback;
+	return hour * 60 + minute;
+}
+
 static void Append_Publish_Log(const char* stream, int port, const unsigned char* data, int length);
 static void Append_Publish_Log_Text(const char* stream, int port, const char* payload_text);
 
@@ -659,83 +606,317 @@ Radar_Set_Detection_Sensitivity(const char* value) {
 }
 
 static int
-Send_Radar_OTA_Frame(const char* stream, const unsigned char* data, int length) {
-	if (!B100_Send_Bytes(data, length, LORA_PORT_RADAR_OTA_CONFIG, 0)) {
-		LOG_WARN("Radar OTA: Send failed - %s\n", B100_Get_Last_Error());
+Queue_OTA_Frame_Ex(int port, uint8_t command, uint8_t transaction_id,
+	const uint8_t* body, size_t body_length, int restart_bridge_after_send) {
+	OTA_Queued_Response* queued = calloc(1, sizeof(*queued));
+	if (!queued) return 0;
+	queued->port = port;
+	queued->restart_bridge_after_send = restart_bridge_after_send;
+	OTA_Status status = OTA_Encode_Frame(command, transaction_id, body, body_length,
+		queued->data, sizeof(queued->data), &queued->length);
+	if (status != OTA_STATUS_OK) {
+		free(queued);
 		return 0;
 	}
-	pthread_mutex_lock(&g_publish_mutex);
-	Append_Publish_Log(stream ? stream : "radar-ota", LORA_PORT_RADAR_OTA_CONFIG, data, length);
-	pthread_mutex_unlock(&g_publish_mutex);
+
+	pthread_mutex_lock(&g_ota_response_mutex);
+	if (!g_ota_response_queue) g_ota_response_queue = g_queue_new();
+	if (!g_ota_response_queue || g_queue_get_length(g_ota_response_queue) >= OTA_RESPONSE_QUEUE_MAX) {
+		pthread_mutex_unlock(&g_ota_response_mutex);
+		free(queued);
+		return 0;
+	}
+	g_queue_push_tail(g_ota_response_queue, queued);
+	pthread_mutex_unlock(&g_ota_response_mutex);
 	return 1;
 }
 
 static int
-Send_Radar_OTA_Ack(unsigned char echoed_command, unsigned char status_code) {
-	unsigned char frame[5];
-	frame[0] = RADAR_OTA_CMD_SET_CONFIG_ACK;
-	frame[1] = RADAR_OTA_PROTOCOL_VERSION;
-	frame[2] = echoed_command;
-	frame[3] = status_code;
-	frame[4] = CRC8_Compute(frame, 4);
-	return Send_Radar_OTA_Frame("radar-ota-ack", frame, (int)sizeof(frame));
+Queue_OTA_Frame(int port, uint8_t command, uint8_t transaction_id,
+	const uint8_t* body, size_t body_length) {
+	return Queue_OTA_Frame_Ex(port, command, transaction_id, body, body_length, 0);
 }
 
-static int
-Send_Radar_OTA_Config_Response(void) {
-	unsigned char frame[9] = {0};
-	unsigned char* body = &frame[1];
-	char sensitivity[16] = "medium";
-	int code = 2;
-
-	if (Radar_Get_Detection_Sensitivity(sensitivity, sizeof(sensitivity))) {
-		code = Radar_Detection_Sensitivity_Code(sensitivity);
-		if (code == 0) code = 2;
+static void
+Drain_OTA_Response_Queue(void) {
+	time_t now = time(NULL);
+	pthread_mutex_lock(&g_ota_response_mutex);
+	OTA_Queued_Response* queued = g_ota_response_queue ? g_queue_peek_head(g_ota_response_queue) : NULL;
+	if (!queued || queued->next_attempt > now) {
+		pthread_mutex_unlock(&g_ota_response_mutex);
+		return;
 	}
+	queued = g_queue_pop_head(g_ota_response_queue);
+	pthread_mutex_unlock(&g_ota_response_mutex);
 
-	frame[0] = RADAR_OTA_CMD_GET_CONFIG_RESP;
-	body[0] = RADAR_OTA_PROTOCOL_VERSION;
-	Write_U16_BE(&body[1], RADAR_OTA_FIELD_DETECTION_SENSITIVITY);
-	body[3] = (unsigned char)code;
-	body[7] = CRC8_Compute(body, 7);
-	return Send_Radar_OTA_Frame("radar-ota-config", frame, (int)sizeof(frame));
+	if (B100_Send_Bytes(queued->data, (int)queued->length, queued->port, 0)) {
+		pthread_mutex_lock(&g_publish_mutex);
+		Append_Publish_Log("ota-response", queued->port, queued->data, (int)queued->length);
+		pthread_mutex_unlock(&g_publish_mutex);
+		int restart_bridge = queued->restart_bridge_after_send;
+		free(queued);
+		if (restart_bridge) B100_Restart();
+	} else {
+		queued->next_attempt = now + 5;
+		pthread_mutex_lock(&g_ota_response_mutex);
+		g_queue_push_head(g_ota_response_queue, queued);
+		pthread_mutex_unlock(&g_ota_response_mutex);
+	}
 }
 
 static int
-Send_Radar_OTA_Caps_Response(void) {
-	unsigned char frame[8] = {0};
-	frame[0] = RADAR_OTA_CMD_GET_CAPS_RESP;
-	frame[1] = RADAR_OTA_PROTOCOL_VERSION;
-	Write_U16_BE(&frame[2], RADAR_OTA_FIELD_DETECTION_SENSITIVITY);
-	frame[4] = 1;
-	frame[5] = 3;
-	frame[7] = CRC8_Compute(&frame[1], 6);
-	return Send_Radar_OTA_Frame("radar-ota-caps", frame, (int)sizeof(frame));
+Queue_OTA_Bridge_Config(const OTA_Frame* frame) {
+	OTA_Queued_Bridge_Config* queued = calloc(1, sizeof(*queued));
+	if (!queued) return 0;
+	queued->transaction_id = frame->transaction_id;
+	queued->field_mask = frame->body[0];
+	queued->data_rate = frame->body[1];
+	queued->adr_enabled = frame->body[2];
+
+	pthread_mutex_lock(&g_ota_response_mutex);
+	if (!g_ota_bridge_config_queue) g_ota_bridge_config_queue = g_queue_new();
+	if (!g_ota_bridge_config_queue ||
+		g_queue_get_length(g_ota_bridge_config_queue) >= OTA_RESPONSE_QUEUE_MAX) {
+		pthread_mutex_unlock(&g_ota_response_mutex);
+		free(queued);
+		return 0;
+	}
+	g_queue_push_tail(g_ota_bridge_config_queue, queued);
+	pthread_mutex_unlock(&g_ota_response_mutex);
+	return 1;
 }
 
-static unsigned char
-Apply_Radar_OTA_Set_Config(const unsigned char* payload, int length) {
-	if (!payload || length != 8)
-		return RADAR_OTA_STATUS_INVALID_LENGTH;
-	if (payload[0] != RADAR_OTA_PROTOCOL_VERSION)
-		return RADAR_OTA_STATUS_INVALID_RANGE;
-	if (CRC8_Compute(payload, 7) != payload[7])
-		return RADAR_OTA_STATUS_CRC_MISMATCH;
+static void
+Drain_OTA_Bridge_Config_Queue(void) {
+	pthread_mutex_lock(&g_ota_response_mutex);
+	OTA_Queued_Bridge_Config* queued = g_ota_bridge_config_queue
+		? g_queue_pop_head(g_ota_bridge_config_queue) : NULL;
+	pthread_mutex_unlock(&g_ota_response_mutex);
+	if (!queued) return;
 
-	unsigned int field_mask = Read_U16_BE(&payload[1]);
+	OTA_Status status = OTA_STATUS_OK;
+	cJSON* params = cJSON_CreateObject();
+	if (!params) status = OTA_STATUS_APPLY_FAILED;
+	else {
+		if (queued->field_mask & 0x01)
+			cJSON_AddNumberToObject(params, "data_rate", queued->data_rate);
+		if (queued->field_mask & 0x02)
+			cJSON_AddNumberToObject(params, "adr_enable", queued->adr_enabled);
+		if (!B100_Set_Params(params)) status = OTA_STATUS_APPLY_FAILED;
+		cJSON_Delete(params);
+	}
+	uint8_t ack[] = {(uint8_t)status};
+	Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONFIG, OTA_COMMAND_SET_ACK,
+		queued->transaction_id, ack, sizeof(ack));
+	free(queued);
+}
+
+static void
+Send_OTA_Error(int port, uint8_t transaction_id, uint8_t request_command, OTA_Status status) {
+	uint8_t body[] = {request_command, (uint8_t)status};
+	Queue_OTA_Frame(port, OTA_COMMAND_ERROR, transaction_id, body, sizeof(body));
+}
+
+static OTA_Status
+Build_Radar_Config_Body(uint8_t* body, size_t* body_length) {
+	if (!body || !body_length) return OTA_STATUS_INVALID_VALUE;
+	char sensitivity[16] = "medium";
+	if (!Radar_Get_Detection_Sensitivity(sensitivity, sizeof(sensitivity)))
+		return OTA_STATUS_APPLY_FAILED;
+	int code = Radar_Detection_Sensitivity_Code(sensitivity);
+	if (code == 0) return OTA_STATUS_INVALID_VALUE;
+	body[0] = (uint8_t)(RADAR_OTA_FIELD_DETECTION_SENSITIVITY & 0xFF);
+	body[1] = (uint8_t)((RADAR_OTA_FIELD_DETECTION_SENSITIVITY >> 8) & 0xFF);
+	body[2] = (uint8_t)code;
+	*body_length = 3;
+	return OTA_STATUS_OK;
+}
+
+static OTA_Status
+Apply_Radar_Config_Body(const uint8_t* body, size_t body_length) {
+	if (!body || body_length != 3) return OTA_STATUS_INVALID_LENGTH;
+	unsigned int field_mask = (unsigned int)body[0] | ((unsigned int)body[1] << 8);
+	if (field_mask == 0) return OTA_STATUS_INVALID_VALUE;
 	if ((field_mask & ~RADAR_OTA_FIELD_DETECTION_SENSITIVITY) != 0)
-		return RADAR_OTA_STATUS_INVALID_RANGE;
+		return OTA_STATUS_UNSUPPORTED;
 
 	if (field_mask & RADAR_OTA_FIELD_DETECTION_SENSITIVITY) {
-		int sensitivity_code = payload[3];
-		const char* sensitivity = Radar_Detection_Sensitivity_Name(sensitivity_code);
-		if (!sensitivity[0])
-			return RADAR_OTA_STATUS_INVALID_RANGE;
-		if (!Radar_Set_Detection_Sensitivity(sensitivity))
-			return RADAR_OTA_STATUS_INTERNAL_ERROR;
+		const char* sensitivity = Radar_Detection_Sensitivity_Name(body[2]);
+		if (!sensitivity[0]) return OTA_STATUS_INVALID_RANGE;
+		if (!Radar_Set_Detection_Sensitivity(sensitivity)) return OTA_STATUS_APPLY_FAILED;
 	}
+	return OTA_STATUS_OK;
+}
 
-	return RADAR_OTA_STATUS_OK;
+static void
+Handle_Radar_Config_OTA(const OTA_Frame* frame) {
+	if (!frame) return;
+	if (frame->command == OTA_COMMAND_GET) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_RADAR_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		uint8_t body[3];
+		size_t body_length = 0;
+		OTA_Status status = Build_Radar_Config_Body(body, &body_length);
+		if (status == OTA_STATUS_OK)
+			Queue_OTA_Frame(LORA_PORT_RADAR_CONFIG, OTA_COMMAND_GET_RESPONSE,
+				frame->transaction_id, body, body_length);
+		else Send_OTA_Error(LORA_PORT_RADAR_CONFIG, frame->transaction_id, frame->command, status);
+		return;
+	}
+	if (frame->command == OTA_COMMAND_SET) {
+		OTA_Status status = Apply_Radar_Config_Body(frame->body, frame->body_length);
+		uint8_t body[] = {(uint8_t)status};
+		Queue_OTA_Frame(LORA_PORT_RADAR_CONFIG, OTA_COMMAND_SET_ACK,
+			frame->transaction_id, body, sizeof(body));
+		return;
+	}
+	if (frame->command == OTA_COMMAND_CAPS) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_RADAR_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		uint8_t body[] = {
+			(uint8_t)(RADAR_OTA_FIELD_DETECTION_SENSITIVITY & 0xFF),
+			(uint8_t)((RADAR_OTA_FIELD_DETECTION_SENSITIVITY >> 8) & 0xFF),
+			1, 3
+		};
+		Queue_OTA_Frame(LORA_PORT_RADAR_CONFIG, OTA_COMMAND_CAPS_RESPONSE,
+			frame->transaction_id, body, sizeof(body));
+		return;
+	}
+	Send_OTA_Error(LORA_PORT_RADAR_CONFIG, frame->transaction_id,
+		frame->command, OTA_STATUS_UNKNOWN_COMMAND);
+}
+
+static cJSON*
+Transmission_Use_Case(cJSON* settings_obj, uint8_t index) {
+	cJSON* transmission = settings_obj ? cJSON_GetObjectItem(settings_obj, "transmission") : NULL;
+	if (!transmission || !cJSON_IsObject(transmission)) return NULL;
+	if (index == 1) return cJSON_GetObjectItem(transmission, "counting");
+	if (index == 2) return cJSON_GetObjectItem(transmission, "occupancy");
+	if (index == 3) {
+		cJSON* presence = cJSON_GetObjectItem(transmission, "presence");
+		return presence ? presence : cJSON_GetObjectItem(transmission, "alert");
+	}
+	return NULL;
+}
+
+static void
+Set_JSON_Bool(cJSON* object, const char* key, int enabled) {
+	cJSON* value = cJSON_CreateBool(enabled ? 1 : 0);
+	if (!object || !key || !value) {
+		cJSON_Delete(value);
+		return;
+	}
+	if (cJSON_GetObjectItem(object, key)) cJSON_ReplaceItemInObject(object, key, value);
+	else cJSON_AddItemToObject(object, key, value);
+}
+
+static void
+Set_JSON_Number(cJSON* object, const char* key, int number) {
+	cJSON* value = cJSON_CreateNumber(number);
+	if (!object || !key || !value) {
+		cJSON_Delete(value);
+		return;
+	}
+	if (cJSON_GetObjectItem(object, key)) cJSON_ReplaceItemInObject(object, key, value);
+	else cJSON_AddItemToObject(object, key, value);
+}
+
+static OTA_Status
+Build_Transmission_Config_Body(cJSON* settings_obj, uint8_t index,
+	uint8_t* body, size_t* body_length) {
+	cJSON* use_case = Transmission_Use_Case(settings_obj, index);
+	if (!use_case || !body || !body_length) return OTA_STATUS_INVALID_VALUE;
+	cJSON* enabled = cJSON_GetObjectItem(use_case, "enabled");
+	body[0] = index;
+	body[1] = enabled && cJSON_IsTrue(enabled) ? 1 : 0;
+	if (index == 3) {
+		*body_length = 2;
+		return OTA_STATUS_OK;
+	}
+	cJSON* interval = cJSON_GetObjectItem(use_case, "intervalMinutes");
+	int interval_minutes = interval && cJSON_IsNumber(interval) ? interval->valueint : 15;
+	if (interval_minutes < 1 || interval_minutes > 60) return OTA_STATUS_INVALID_RANGE;
+	body[2] = (uint8_t)interval_minutes;
+	*body_length = 3;
+	return OTA_STATUS_OK;
+}
+
+static OTA_Status
+Apply_Transmission_Config_Body(cJSON* settings_obj, const uint8_t* body,
+	size_t body_length) {
+	if (!settings_obj || !body || body_length < 2) return OTA_STATUS_INVALID_LENGTH;
+	uint8_t index = body[0];
+	if (index < 1 || index > 3) return OTA_STATUS_INVALID_VALUE;
+	size_t expected_length = index == 3 ? 2 : 3;
+	if (body_length != expected_length) return OTA_STATUS_INVALID_LENGTH;
+	if (body[1] > 1) return OTA_STATUS_INVALID_VALUE;
+	if (index != 3 && (body[2] < 1 || body[2] > 60)) return OTA_STATUS_INVALID_RANGE;
+
+	cJSON* use_case = Transmission_Use_Case(settings_obj, index);
+	if (!use_case || !cJSON_IsObject(use_case)) return OTA_STATUS_APPLY_FAILED;
+	cJSON* previous = cJSON_Duplicate(use_case, 1);
+	if (!previous) return OTA_STATUS_APPLY_FAILED;
+	Set_JSON_Bool(use_case, "enabled", body[1]);
+	if (index != 3) Set_JSON_Number(use_case, "intervalMinutes", body[2]);
+	if (!ACAP_FILE_Write("localdata/settings.json", settings_obj)) {
+		cJSON* transmission = cJSON_GetObjectItem(settings_obj, "transmission");
+		const char* key = index == 1 ? "counting" : index == 2 ? "occupancy" :
+			(cJSON_GetObjectItem(transmission, "presence") ? "presence" : "alert");
+		cJSON_ReplaceItemInObject(transmission, key, previous);
+		return OTA_STATUS_APPLY_FAILED;
+	}
+	cJSON_Delete(previous);
+	Settings_Updated_Callback("transmission", cJSON_GetObjectItem(settings_obj, "transmission"));
+	return OTA_STATUS_OK;
+}
+
+static void
+Handle_Transmission_OTA(const OTA_Frame* frame, cJSON* settings_obj) {
+	uint8_t response_body[12];
+	size_t response_length = 0;
+	OTA_Status status;
+
+	if (frame->command == OTA_COMMAND_GET) {
+		if (frame->body_length != 1) {
+			Send_OTA_Error(LORA_PORT_USE_CASE_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		status = Build_Transmission_Config_Body(settings_obj, frame->body[0],
+			response_body, &response_length);
+		if (status == OTA_STATUS_OK)
+			Queue_OTA_Frame(LORA_PORT_USE_CASE_CONFIG, OTA_COMMAND_GET_RESPONSE,
+				frame->transaction_id, response_body, response_length);
+		else Send_OTA_Error(LORA_PORT_USE_CASE_CONFIG, frame->transaction_id, frame->command, status);
+		return;
+	}
+	if (frame->command == OTA_COMMAND_SET) {
+		status = Apply_Transmission_Config_Body(settings_obj, frame->body, frame->body_length);
+		uint8_t index = frame->body_length > 0 ? frame->body[0] : 0;
+		uint8_t ack[] = {index, (uint8_t)status};
+		Queue_OTA_Frame(LORA_PORT_USE_CASE_CONFIG, OTA_COMMAND_SET_ACK,
+			frame->transaction_id, ack, sizeof(ack));
+		return;
+	}
+	if (frame->command == OTA_COMMAND_CAPS) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_USE_CASE_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		uint8_t caps[] = {1, 1, 1, 60, 2, 1, 1, 60, 3, 0, 0, 0};
+		Queue_OTA_Frame(LORA_PORT_USE_CASE_CONFIG, OTA_COMMAND_CAPS_RESPONSE,
+			frame->transaction_id, caps, sizeof(caps));
+		return;
+	}
+	Send_OTA_Error(LORA_PORT_USE_CASE_CONFIG, frame->transaction_id,
+		frame->command, OTA_STATUS_UNKNOWN_COMMAND);
 }
 
 static int
@@ -938,7 +1119,7 @@ Apply_Occupancy_OTA_Set_Config(const unsigned char* payload, int length) {
 	g_occupancy_type = occupancy_type;
 	g_occupancy_aoi_enabled = aoi_enabled;
 
-	if (aoi_enabled && point_count >= 3) {
+	if (point_count >= 3) {
 		int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
 		for (int i = 0; i < point_count; i++) {
 			g_occupancy_area_x[i] = point_x[i];
@@ -965,7 +1146,7 @@ Apply_Occupancy_OTA_Set_Config(const unsigned char* payload, int length) {
 	pthread_mutex_unlock(&g_publish_mutex);
 
 	if (!Update_Occupancy_Settings_JSON(enabled, label_bucket, interval_minutes, occupancy_type,
-		                              aoi_enabled, (aoi_enabled ? point_count : 0), point_x, point_y)) {
+		                              aoi_enabled, point_count, point_x, point_y)) {
 		return OCCUPANCY_OTA_STATUS_INTERNAL_ERROR;
 	}
 
@@ -1074,11 +1255,11 @@ Update_Alert_Settings_JSON(int enabled,
 		cJSON_AddItemToObject(settings_obj, "transmission", transmission);
 	}
 
-	cJSON* alert = cJSON_GetObjectItem(transmission, "alert");
+	cJSON* alert = cJSON_GetObjectItem(transmission, "presence");
 	if (!alert) {
 		alert = cJSON_CreateObject();
 		if (!alert) return 0;
-		cJSON_AddItemToObject(transmission, "alert", alert);
+		cJSON_AddItemToObject(transmission, "presence", alert);
 	}
 
 	cJSON_ReplaceItemInObject(alert, "enabled", cJSON_CreateBool(enabled));
@@ -1177,7 +1358,7 @@ Apply_Alert_OTA_Set_Config(const unsigned char* payload, int length) {
 	g_alert_transition_seconds = transition;
 	g_alert_aoi_enabled = aoi_enabled;
 
-	if (aoi_enabled && point_count >= 3) {
+	if (point_count >= 3) {
 		int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
 		for (int i = 0; i < point_count; i++) {
 			g_alert_area_x[i] = point_x[i];
@@ -1205,11 +1386,269 @@ Apply_Alert_OTA_Set_Config(const unsigned char* payload, int length) {
 	Alert_Reset_Timers();
 
 	if (!Update_Alert_Settings_JSON(enabled, label_bucket, heartbeat, active_interval, transition,
-		                         aoi_enabled, (aoi_enabled ? point_count : 0), point_x, point_y)) {
+		                         aoi_enabled, point_count, point_x, point_y)) {
 		return ALERT_OTA_STATUS_INTERNAL_ERROR;
 	}
 
 	return ALERT_OTA_STATUS_OK;
+}
+
+static void
+Write_U16_LE(unsigned char* output, unsigned int value) {
+	output[0] = (unsigned char)(value & 0xFF);
+	output[1] = (unsigned char)((value >> 8) & 0xFF);
+}
+
+static unsigned int
+Read_U16_LE(const unsigned char* input) {
+	return (unsigned int)input[0] | ((unsigned int)input[1] << 8);
+}
+
+static void
+Write_Packed_Point(unsigned char* output, int x, int y) {
+	unsigned int packed = (unsigned int)Clamp_Int(x, 0, 1000) |
+		((unsigned int)Clamp_Int(y, 0, 1000) << 10);
+	output[0] = (unsigned char)(packed & 0xFF);
+	output[1] = (unsigned char)((packed >> 8) & 0xFF);
+	output[2] = (unsigned char)((packed >> 16) & 0x0F);
+}
+
+static int
+Read_Packed_Point(const unsigned char* input, int* x, int* y) {
+	if (!input || !x || !y || (input[2] & 0xF0) != 0) return 0;
+	unsigned int packed = (unsigned int)input[0] |
+		((unsigned int)input[1] << 8) | ((unsigned int)input[2] << 16);
+	*x = (int)(packed & 0x3FF);
+	*y = (int)((packed >> 10) & 0x3FF);
+	return *x <= 1000 && *y <= 1000;
+}
+
+static OTA_Status
+Build_Occupancy_Framed_Body(uint8_t* body, size_t* body_length) {
+	if (!body || !body_length) return OTA_STATUS_INVALID_VALUE;
+	pthread_mutex_lock(&g_publish_mutex);
+	int point_count = Clamp_Int(g_occupancy_area_point_count, 3, OCCUPANCY_OTA_MAX_POINTS);
+	body[0] = 2;
+	body[1] = (g_occupancy_publish_enabled ? 0x01 : 0) |
+		(g_occupancy_label_bucket == 2 ? 0x02 : 0) |
+		(g_occupancy_aoi_enabled ? 0x04 : 0);
+	body[2] = (uint8_t)Clamp_Int(g_occupancy_interval_minutes, 1, 60);
+	body[3] = (uint8_t)Clamp_Int(g_occupancy_type,
+		OCCUPANCY_TYPE_MAXIMUM, OCCUPANCY_TYPE_MAXIMUM);
+	body[4] = (uint8_t)point_count;
+	for (int index = 0; index < point_count; index++)
+		Write_Packed_Point(body + 5 + index * 3,
+			(int)g_occupancy_area_x[index], (int)g_occupancy_area_y[index]);
+	pthread_mutex_unlock(&g_publish_mutex);
+	*body_length = (size_t)(5 + point_count * 3);
+	return OTA_STATUS_OK;
+}
+
+static OTA_Status
+Apply_Occupancy_Framed_Body(const uint8_t* body, size_t body_length) {
+	if (!body || body_length < 5) return OTA_STATUS_INVALID_LENGTH;
+	if (body[0] != 2) return OTA_STATUS_UNSUPPORTED;
+	if ((body[1] & ~0x07) != 0) return OTA_STATUS_INVALID_VALUE;
+	if (body[2] < 1 || body[2] > 60 || body[3] != OCCUPANCY_TYPE_MAXIMUM)
+		return OTA_STATUS_INVALID_RANGE;
+	int point_count = body[4];
+	int aoi_enabled = (body[1] & 0x04) != 0;
+	if (point_count > OCCUPANCY_OTA_MAX_POINTS ||
+		(point_count > 0 && point_count < 3) || (aoi_enabled && point_count == 0))
+		return OTA_STATUS_INVALID_RANGE;
+	if (body_length != (size_t)(5 + point_count * 3)) return OTA_STATUS_INVALID_LENGTH;
+
+	unsigned char legacy[48] = {0};
+	legacy[0] = OCCUPANCY_OTA_PROTOCOL_VERSION;
+	legacy[1] = body[1];
+	legacy[2] = body[2];
+	legacy[3] = body[4];
+	int point_x[OCCUPANCY_OTA_MAX_POINTS] = {0};
+	int point_y[OCCUPANCY_OTA_MAX_POINTS] = {0};
+	for (int index = 0; index < point_count; index++) {
+		if (!Read_Packed_Point(body + 5 + index * 3, &point_x[index], &point_y[index]))
+			return OTA_STATUS_INVALID_RANGE;
+		Write_U16_BE(legacy + 4 + index * 4, (unsigned int)point_x[index]);
+		Write_U16_BE(legacy + 6 + index * 4, (unsigned int)point_y[index]);
+	}
+	legacy[44] = body[3];
+	legacy[47] = CRC8_Compute(legacy, 47);
+	OTA_Status status = (OTA_Status)Apply_Occupancy_OTA_Set_Config(legacy, sizeof(legacy));
+	if (status != OTA_STATUS_OK) return status;
+	return Update_Occupancy_Settings_JSON(body[1] & 0x01,
+		body[1] & 0x02 ? 2 : 1, body[2], body[3], aoi_enabled,
+		point_count, point_x, point_y) ? OTA_STATUS_OK : OTA_STATUS_APPLY_FAILED;
+}
+
+static int
+Read_Alert_Schedule(int* enabled, int* start_minutes, int* end_minutes) {
+	if (!enabled || !start_minutes || !end_minutes) return 0;
+	*enabled = 0;
+	*start_minutes = 18 * 60;
+	*end_minutes = 6 * 60;
+	cJSON* settings = ACAP_Get_Config("settings");
+	cJSON* transmission = settings ? cJSON_GetObjectItem(settings, "transmission") : NULL;
+	cJSON* presence = transmission ? cJSON_GetObjectItem(transmission, "presence") : NULL;
+	cJSON* schedule = presence ? cJSON_GetObjectItem(presence, "schedule") : NULL;
+	if (!schedule || !cJSON_IsObject(schedule)) return 1;
+	cJSON* schedule_enabled = cJSON_GetObjectItem(schedule, "enabled");
+	cJSON* start = cJSON_GetObjectItem(schedule, "start");
+	cJSON* end = cJSON_GetObjectItem(schedule, "end");
+	*enabled = schedule_enabled && cJSON_IsTrue(schedule_enabled);
+	*start_minutes = Parse_HHMM(start && cJSON_IsString(start) ? start->valuestring : NULL, *start_minutes);
+	*end_minutes = Parse_HHMM(end && cJSON_IsString(end) ? end->valuestring : NULL, *end_minutes);
+	return 1;
+}
+
+static int
+Update_Alert_Schedule_JSON(int enabled, int start_minutes, int end_minutes) {
+	cJSON* settings = ACAP_Get_Config("settings");
+	cJSON* transmission = settings ? cJSON_GetObjectItem(settings, "transmission") : NULL;
+	cJSON* presence = transmission ? cJSON_GetObjectItem(transmission, "presence") : NULL;
+	if (!presence || !cJSON_IsObject(presence)) return 0;
+	cJSON* schedule = cJSON_GetObjectItem(presence, "schedule");
+	if (!schedule || !cJSON_IsObject(schedule)) {
+		schedule = cJSON_CreateObject();
+		if (!schedule) return 0;
+		if (cJSON_GetObjectItem(presence, "schedule"))
+			cJSON_ReplaceItemInObject(presence, "schedule", schedule);
+		else cJSON_AddItemToObject(presence, "schedule", schedule);
+	}
+	char start[6];
+	char end[6];
+	snprintf(start, sizeof(start), "%02d:%02d", start_minutes / 60, start_minutes % 60);
+	snprintf(end, sizeof(end), "%02d:%02d", end_minutes / 60, end_minutes % 60);
+	Set_JSON_Bool(schedule, "enabled", enabled);
+	if (cJSON_GetObjectItem(schedule, "start"))
+		cJSON_ReplaceItemInObject(schedule, "start", cJSON_CreateString(start));
+	else cJSON_AddStringToObject(schedule, "start", start);
+	if (cJSON_GetObjectItem(schedule, "end"))
+		cJSON_ReplaceItemInObject(schedule, "end", cJSON_CreateString(end));
+	else cJSON_AddStringToObject(schedule, "end", end);
+	if (!ACAP_FILE_Write("localdata/settings.json", settings)) return 0;
+	Alert_Set_Schedule(enabled, start_minutes, end_minutes);
+	Alert_Reset_Timers();
+	return 1;
+}
+
+static OTA_Status
+Build_Alert_Framed_Body(uint8_t* body, size_t* body_length) {
+	if (!body || !body_length) return OTA_STATUS_INVALID_VALUE;
+	int schedule_enabled;
+	int schedule_start;
+	int schedule_end;
+	if (!Read_Alert_Schedule(&schedule_enabled, &schedule_start, &schedule_end))
+		return OTA_STATUS_APPLY_FAILED;
+	pthread_mutex_lock(&g_publish_mutex);
+	int point_count = Clamp_Int(g_alert_area_point_count, 3, ALERT_OTA_MAX_POINTS);
+	body[0] = 2;
+	body[1] = (g_alert_publish_enabled ? 0x01 : 0) |
+		(g_alert_label_bucket == 2 ? 0x02 : 0) |
+		(g_alert_aoi_enabled ? 0x04 : 0);
+	body[2] = (uint8_t)Clamp_Int(g_alert_heartbeat_minutes, 5, 60);
+	Write_U16_LE(body + 3, (unsigned int)Clamp_Int(g_alert_active_interval_seconds, 60, 300));
+	body[5] = (uint8_t)Clamp_Int(g_alert_transition_seconds, 2, 20);
+	body[6] = (uint8_t)point_count;
+	body[7] = schedule_enabled ? 1 : 0;
+	Write_U16_LE(body + 8, (unsigned int)schedule_start);
+	Write_U16_LE(body + 10, (unsigned int)schedule_end);
+	for (int index = 0; index < point_count; index++)
+		Write_Packed_Point(body + 12 + index * 3,
+			(int)g_alert_area_x[index], (int)g_alert_area_y[index]);
+	pthread_mutex_unlock(&g_publish_mutex);
+	*body_length = (size_t)(12 + point_count * 3);
+	return OTA_STATUS_OK;
+}
+
+static OTA_Status
+Apply_Alert_Framed_Body(const uint8_t* body, size_t body_length) {
+	if (!body || body_length < 12) return OTA_STATUS_INVALID_LENGTH;
+	if (body[0] != 2) return OTA_STATUS_UNSUPPORTED;
+	if ((body[1] & ~0x07) != 0 || body[7] > 1) return OTA_STATUS_INVALID_VALUE;
+	unsigned int active_interval = Read_U16_LE(body + 3);
+	unsigned int schedule_start = Read_U16_LE(body + 8);
+	unsigned int schedule_end = Read_U16_LE(body + 10);
+	if (body[2] < 5 || body[2] > 60 || active_interval < 60 || active_interval > 300 ||
+		body[5] < 2 || body[5] > 20 || schedule_start > 1439 || schedule_end > 1439)
+		return OTA_STATUS_INVALID_RANGE;
+	int point_count = body[6];
+	int aoi_enabled = (body[1] & 0x04) != 0;
+	if (point_count > ALERT_OTA_MAX_POINTS ||
+		(point_count > 0 && point_count < 3) || (aoi_enabled && point_count == 0))
+		return OTA_STATUS_INVALID_RANGE;
+	if (body_length != (size_t)(12 + point_count * 3)) return OTA_STATUS_INVALID_LENGTH;
+
+	unsigned char legacy[48] = {0};
+	legacy[0] = ALERT_OTA_PROTOCOL_VERSION;
+	legacy[1] = body[1];
+	legacy[2] = body[2];
+	Write_U16_BE(legacy + 3, active_interval);
+	legacy[5] = body[5];
+	legacy[6] = body[6];
+	int point_x[ALERT_OTA_MAX_POINTS] = {0};
+	int point_y[ALERT_OTA_MAX_POINTS] = {0};
+	for (int index = 0; index < point_count; index++) {
+		if (!Read_Packed_Point(body + 12 + index * 3, &point_x[index], &point_y[index]))
+			return OTA_STATUS_INVALID_RANGE;
+		Write_U16_BE(legacy + 7 + index * 4, (unsigned int)point_x[index]);
+		Write_U16_BE(legacy + 9 + index * 4, (unsigned int)point_y[index]);
+	}
+	legacy[47] = CRC8_Compute(legacy, 47);
+	OTA_Status status = (OTA_Status)Apply_Alert_OTA_Set_Config(legacy, sizeof(legacy));
+	if (status != OTA_STATUS_OK) return status;
+	if (!Update_Alert_Settings_JSON(body[1] & 0x01, body[1] & 0x02 ? 2 : 1,
+		body[2], (int)active_interval, body[5], aoi_enabled,
+		point_count, point_x, point_y)) return OTA_STATUS_APPLY_FAILED;
+	return Update_Alert_Schedule_JSON(body[7], (int)schedule_start, (int)schedule_end)
+		? OTA_STATUS_OK : OTA_STATUS_APPLY_FAILED;
+}
+
+static void
+Handle_Radar_Service_OTA(int port, const OTA_Frame* frame) {
+	uint8_t body[OTA_MAX_BODY_SIZE];
+	size_t body_length = 0;
+	OTA_Status status;
+	if (frame->command == OTA_COMMAND_GET) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(port, frame->transaction_id, frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		status = port == LORA_PORT_OCCUPANCY_OTA_CONFIG
+			? Build_Occupancy_Framed_Body(body, &body_length)
+			: Build_Alert_Framed_Body(body, &body_length);
+		if (status == OTA_STATUS_OK)
+			Queue_OTA_Frame(port, OTA_COMMAND_GET_RESPONSE, frame->transaction_id, body, body_length);
+		else Send_OTA_Error(port, frame->transaction_id, frame->command, status);
+		return;
+	}
+	if (frame->command == OTA_COMMAND_SET) {
+		status = port == LORA_PORT_OCCUPANCY_OTA_CONFIG
+			? Apply_Occupancy_Framed_Body(frame->body, frame->body_length)
+			: Apply_Alert_Framed_Body(frame->body, frame->body_length);
+		uint8_t ack[] = {(uint8_t)status};
+		Queue_OTA_Frame(port, OTA_COMMAND_SET_ACK, frame->transaction_id, ack, sizeof(ack));
+		return;
+	}
+	if (frame->command == OTA_COMMAND_CAPS) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(port, frame->transaction_id, frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		if (port == LORA_PORT_OCCUPANCY_OTA_CONFIG) {
+			uint8_t caps[] = {2, OCCUPANCY_OTA_MAX_POINTS, 2, 3,
+				OCCUPANCY_OTA_MAX_POINTS, 1, 60, OCCUPANCY_TYPE_MAXIMUM,
+				OCCUPANCY_TYPE_MAXIMUM};
+			Queue_OTA_Frame(port, OTA_COMMAND_CAPS_RESPONSE,
+				frame->transaction_id, caps, sizeof(caps));
+		} else {
+			uint8_t caps[] = {2, ALERT_OTA_MAX_POINTS, 2, 3, ALERT_OTA_MAX_POINTS,
+				5, 60, 60, 0, 44, 1, 2, 20, 1};
+			Queue_OTA_Frame(port, OTA_COMMAND_CAPS_RESPONSE,
+				frame->transaction_id, caps, sizeof(caps));
+		}
+		return;
+	}
+	Send_OTA_Error(port, frame->transaction_id, frame->command, OTA_STATUS_UNKNOWN_COMMAND);
 }
 
 static void
@@ -1339,10 +1778,8 @@ Radar_Alert_Frame_Counts(time_t now, int* total, int* human, int* vehicle, int* 
 }
 
 static void
-Radar_Reset_Tracked_Counting_Flags(void) {
+Radar_Reset_Tracked_Occupancy_Flags(void) {
 	for (int i = 0; i < g_radar_object_count; i++) {
-		g_radar_objects[i].counted_inside = 0;
-		g_radar_objects[i].counted_bucket = 0;
 		g_radar_objects[i].occupancy_counted_inside = 0;
 		g_radar_objects[i].occupancy_counted_bucket = 0;
 	}
@@ -1351,9 +1788,8 @@ Radar_Reset_Tracked_Counting_Flags(void) {
 static void
 Radar_Reset_Mode_State(void) {
 	Occupancy_Reset();
-	Counting_Reset();
 	Alert_Reset();
-	Radar_Reset_Tracked_Counting_Flags();
+	Radar_Reset_Tracked_Occupancy_Flags();
 }
 
 static void
@@ -1424,13 +1860,6 @@ Radar_Detections_Callback(cJSON* detections) {
 		cJSON* speed_json = radar ? cJSON_GetObjectItem(radar, "speed") : cJSON_GetObjectItem(item, "speed");
 		if (speed_json) object->speed = speed_json->valuedouble;
 
-		int counting_in_area = Counting_Point_In_Area(x, y);
-		int counting_eligible = confidence >= g_radar_min_confidence &&
-		                        Counting_Class_Enabled(bucket) &&
-		                        ((now - object->first_seen) >= g_radar_min_dwell_seconds);
-		Counting_Process_Transition(bucket, counting_in_area, object->counted_inside,
-		                            counting_eligible, &object->counted_inside, &object->counted_bucket);
-
 		int occupancy_in_area = Occupancy_Point_In_Area(x, y);
 		int occupancy_eligible = confidence >= g_radar_min_confidence &&
 		                         Occupancy_Class_Enabled(bucket) &&
@@ -1466,6 +1895,30 @@ Radar_Detections_Callback(cJSON* detections) {
 
 static void
 Radar_Tracker_Callback(cJSON* detection, int timer) {
+	(void)timer;
+	if (detection) {
+		cJSON* active = cJSON_GetObjectItem(detection, "active");
+		cJSON* class_name = cJSON_GetObjectItem(detection, "class");
+		cJSON* confidence = cJSON_GetObjectItem(detection, "confidence");
+		cJSON* age = cJSON_GetObjectItem(detection, "age");
+		cJSON* birth_x = cJSON_GetObjectItem(detection, "bx");
+		cJSON* birth_y = cJSON_GetObjectItem(detection, "by");
+		cJSON* death_x = cJSON_GetObjectItem(detection, "cx");
+		cJSON* death_y = cJSON_GetObjectItem(detection, "cy");
+		int class_bucket = class_name && cJSON_IsString(class_name) &&
+			strcasecmp(class_name->valuestring, "Human") == 0 ? 1 :
+			class_name && cJSON_IsString(class_name) &&
+			strcasecmp(class_name->valuestring, "Vehicle") == 0 ? 2 : 0;
+		if (active && cJSON_IsFalse(active) && class_bucket &&
+			confidence && cJSON_IsNumber(confidence) && age && cJSON_IsNumber(age) &&
+			birth_x && cJSON_IsNumber(birth_x) && birth_y && cJSON_IsNumber(birth_y) &&
+			death_x && cJSON_IsNumber(death_x) && death_y && cJSON_IsNumber(death_y)) {
+			Counting_Process_Completed_Track(0, class_bucket, confidence->valueint,
+				g_radar_min_confidence, age->valuedouble, g_radar_min_dwell_seconds,
+				birth_x->valuedouble, birth_y->valuedouble,
+				death_x->valuedouble, death_y->valuedouble);
+		}
+	}
 	if (detection)
 		cJSON_Delete(detection);
 }
@@ -1478,7 +1931,6 @@ Radar_Status_JSON(void) {
 	RadarCounts current_counts = Occupancy_Current_Counts();
 	RadarCounts peak_counts = Occupancy_Peak_Counts();
 	RadarCounts alert_counts = Alert_Current_Counts();
-	RadarAreaBalance area_balance_counts = Counting_Area_Balance();
 	RadarAreaBalance occupancy_area_balance_counts = Occupancy_Area_Balance();
 
 	cJSON* root = cJSON_CreateObject();
@@ -1545,11 +1997,38 @@ Radar_Status_JSON(void) {
 	cJSON_AddNumberToObject(counts_json, "vehicle", current_counts.vehicle);
 	cJSON_AddNumberToObject(counts_json, "unknown", current_counts.unknown);
 	cJSON_AddItemToObject(root, "occupancy", counts_json);
-	cJSON* area_balance = cJSON_CreateObject();
-	cJSON_AddNumberToObject(area_balance, "entering", area_balance_counts.entering);
-	cJSON_AddNumberToObject(area_balance, "exiting", area_balance_counts.exiting);
-	cJSON_AddStringToObject(area_balance, "label", g_counting_label_bucket == 2 ? "vehicle" : "human");
-	cJSON_AddItemToObject(root, "areaBalance", area_balance);
+	cJSON* counting_scenes = cJSON_CreateArray();
+	CountingSceneSnapshot counting_snapshot[COUNTING_MAX_SCENES];
+	size_t counting_scene_count = Counting_Get_Scenes(counting_snapshot, COUNTING_MAX_SCENES);
+	for (size_t index = 0; index < counting_scene_count; index++) {
+		cJSON* scene = cJSON_CreateObject();
+		cJSON_AddNumberToObject(scene, "id", counting_snapshot[index].config.id);
+		cJSON_AddStringToObject(scene, "name", counting_snapshot[index].config.name);
+		cJSON_AddBoolToObject(scene, "enabled", counting_snapshot[index].config.enabled);
+		cJSON_AddStringToObject(scene, "direction",
+			counting_snapshot[index].config.direction == COUNTING_DIRECTION_LEFT_TO_RIGHT
+				? "leftToRight" : "rightToLeft");
+		cJSON* classes = cJSON_CreateObject();
+		cJSON_AddBoolToObject(classes, "human",
+			(counting_snapshot[index].config.class_mask & COUNTING_CLASS_HUMAN) != 0);
+		cJSON_AddBoolToObject(classes, "vehicle",
+			(counting_snapshot[index].config.class_mask & COUNTING_CLASS_VEHICLE) != 0);
+		cJSON_AddItemToObject(scene, "classes", classes);
+		cJSON* line = cJSON_CreateArray();
+		cJSON* first = cJSON_CreateObject();
+		cJSON_AddNumberToObject(first, "x", counting_snapshot[index].config.x1);
+		cJSON_AddNumberToObject(first, "y", counting_snapshot[index].config.y1);
+		cJSON_AddItemToArray(line, first);
+		cJSON* second = cJSON_CreateObject();
+		cJSON_AddNumberToObject(second, "x", counting_snapshot[index].config.x2);
+		cJSON_AddNumberToObject(second, "y", counting_snapshot[index].config.y2);
+		cJSON_AddItemToArray(line, second);
+		cJSON_AddItemToObject(scene, "line", line);
+		cJSON_AddNumberToObject(scene, "human", (double)counting_snapshot[index].human);
+		cJSON_AddNumberToObject(scene, "vehicle", (double)counting_snapshot[index].vehicle);
+		cJSON_AddItemToArray(counting_scenes, scene);
+	}
+	cJSON_AddItemToObject(root, "countingScenes", counting_scenes);
 	cJSON* occupancy_area_balance = cJSON_CreateObject();
 	cJSON_AddNumberToObject(occupancy_area_balance, "entering", occupancy_area_balance_counts.entering);
 	cJSON_AddNumberToObject(occupancy_area_balance, "exiting", occupancy_area_balance_counts.exiting);
@@ -1595,10 +2074,8 @@ Radar_Status_JSON(void) {
 	cJSON* counting = cJSON_CreateObject();
 	cJSON_AddBoolToObject(counting, "enabled", g_counting_publish_enabled);
 	cJSON_AddNumberToObject(counting, "port", LORA_PORT_COUNTING);
-	cJSON_AddStringToObject(counting, "mode", "areaBalance");
-	cJSON_AddStringToObject(counting, "label", g_counting_label_bucket == 2 ? "vehicle" : "human");
-	cJSON_AddNumberToObject(counting, "entering", area_balance_counts.entering);
-	cJSON_AddNumberToObject(counting, "exiting", area_balance_counts.exiting);
+	cJSON_AddStringToObject(counting, "mode", "namedLines");
+	cJSON_AddNumberToObject(counting, "sceneCount", (double)counting_scene_count);
 	cJSON_AddNumberToObject(counting, "intervalMinutes", g_counting_interval_minutes);
 	cJSON_AddNumberToObject(counting, "nextPublishTime", (double)g_counting_next_publish_time);
 	cJSON_AddNumberToObject(counting, "secondsUntilPublish", g_counting_next_publish_time > now ? (int)(g_counting_next_publish_time - now) : 0);
@@ -1648,6 +2125,203 @@ Radar_Reset_State(void) {
 	pthread_mutex_unlock(&g_radar_mutex);
 }
 
+static void
+Radar_Reset_All_State(void) {
+	Radar_Reset_State();
+	Counting_Reset_All();
+	if (!Counting_Save_Counters())
+		LOG_WARN("Failed to persist reset Counting counters\n");
+}
+
+static int
+Load_Counting_Scenes(cJSON* counting) {
+	cJSON* scenes_json = counting ? cJSON_GetObjectItem(counting, "scenes") : NULL;
+	if (!scenes_json || !cJSON_IsArray(scenes_json) ||
+		cJSON_GetArraySize(scenes_json) > COUNTING_MAX_SCENES) return 0;
+
+	CountingSceneConfig scenes[COUNTING_MAX_SCENES] = {0};
+	size_t scene_count = 0;
+	cJSON* scene_json = NULL;
+	cJSON_ArrayForEach(scene_json, scenes_json) {
+		cJSON* id = cJSON_GetObjectItem(scene_json, "id");
+		cJSON* name = cJSON_GetObjectItem(scene_json, "name");
+		cJSON* enabled = cJSON_GetObjectItem(scene_json, "enabled");
+		cJSON* direction = cJSON_GetObjectItem(scene_json, "direction");
+		cJSON* classes = cJSON_GetObjectItem(scene_json, "classes");
+		cJSON* line = cJSON_GetObjectItem(scene_json, "line");
+		if (!id || !cJSON_IsNumber(id) || id->valueint <= 0 || id->valueint > UINT16_MAX ||
+			!name || !cJSON_IsString(name) || !enabled || !cJSON_IsBool(enabled) ||
+			!direction || !cJSON_IsString(direction) || !classes || !cJSON_IsObject(classes) ||
+			!line || !cJSON_IsArray(line) || cJSON_GetArraySize(line) != 2) return 0;
+
+		CountingSceneConfig* scene = &scenes[scene_count++];
+		scene->id = (uint16_t)id->valueint;
+		if (snprintf(scene->name, sizeof(scene->name), "%s", name->valuestring) >=
+			(int)sizeof(scene->name)) return 0;
+		scene->enabled = cJSON_IsTrue(enabled);
+		if (strcmp(direction->valuestring, "leftToRight") == 0)
+			scene->direction = COUNTING_DIRECTION_LEFT_TO_RIGHT;
+		else if (strcmp(direction->valuestring, "rightToLeft") == 0)
+			scene->direction = COUNTING_DIRECTION_RIGHT_TO_LEFT;
+		else return 0;
+		cJSON* human = cJSON_GetObjectItem(classes, "human");
+		cJSON* vehicle = cJSON_GetObjectItem(classes, "vehicle");
+		if (human && cJSON_IsTrue(human)) scene->class_mask |= COUNTING_CLASS_HUMAN;
+		if (vehicle && cJSON_IsTrue(vehicle)) scene->class_mask |= COUNTING_CLASS_VEHICLE;
+
+		cJSON* first = cJSON_GetArrayItem(line, 0);
+		cJSON* second = cJSON_GetArrayItem(line, 1);
+		cJSON* x1 = first ? cJSON_GetObjectItem(first, "x") : NULL;
+		cJSON* y1 = first ? cJSON_GetObjectItem(first, "y") : NULL;
+		cJSON* x2 = second ? cJSON_GetObjectItem(second, "x") : NULL;
+		cJSON* y2 = second ? cJSON_GetObjectItem(second, "y") : NULL;
+		if (!x1 || !cJSON_IsNumber(x1) || !y1 || !cJSON_IsNumber(y1) ||
+			!x2 || !cJSON_IsNumber(x2) || !y2 || !cJSON_IsNumber(y2)) return 0;
+		scene->x1 = x1->valueint;
+		scene->y1 = y1->valueint;
+		scene->x2 = x2->valueint;
+		scene->y2 = y2->valueint;
+	}
+	return Counting_Configure(scenes, scene_count);
+}
+
+static int
+Counting_Save_Counters(void) {
+	CountingSceneSnapshot scenes[COUNTING_MAX_SCENES];
+	size_t scene_count = Counting_Get_Scenes(scenes, COUNTING_MAX_SCENES);
+	cJSON* root = cJSON_CreateObject();
+	cJSON* saved_scenes = cJSON_CreateArray();
+	if (!root || !saved_scenes) {
+		cJSON_Delete(root);
+		cJSON_Delete(saved_scenes);
+		return 0;
+	}
+	cJSON_AddNumberToObject(root, "version", 1);
+	cJSON_AddItemToObject(root, "scenes", saved_scenes);
+	for (size_t index = 0; index < scene_count; index++) {
+		cJSON* item = cJSON_CreateObject();
+		if (!item) continue;
+		cJSON_AddNumberToObject(item, "id", scenes[index].config.id);
+		cJSON_AddStringToObject(item, "name", scenes[index].config.name);
+		cJSON_AddNumberToObject(item, "human", (double)scenes[index].human);
+		cJSON_AddNumberToObject(item, "vehicle", (double)scenes[index].vehicle);
+		cJSON_AddItemToArray(saved_scenes, item);
+	}
+	char* json = cJSON_Print(root);
+	cJSON_Delete(root);
+	if (!json) return 0;
+	char temporary_path[ACAP_MAX_PATH_LENGTH];
+	char final_path[ACAP_MAX_PATH_LENGTH];
+	if (snprintf(temporary_path, sizeof(temporary_path), "%slocaldata/counters.json.tmp",
+		ACAP_FILE_AppPath()) >= (int)sizeof(temporary_path) ||
+		snprintf(final_path, sizeof(final_path), "%slocaldata/counters.json",
+		ACAP_FILE_AppPath()) >= (int)sizeof(final_path)) {
+		free(json);
+		return 0;
+	}
+
+	FILE* file = fopen(temporary_path, "w");
+	if (!file) {
+		free(json);
+		return 0;
+	}
+	int saved = fputs(json, file) >= 0 && fflush(file) == 0 && fsync(fileno(file)) == 0;
+	free(json);
+	if (fclose(file) != 0) saved = 0;
+	if (saved && rename(temporary_path, final_path) == 0) return 1;
+	remove(temporary_path);
+	return 0;
+}
+
+static void
+Counting_Load_Counters(void) {
+	cJSON* root = ACAP_FILE_Read("localdata/counters.json");
+	if (!root) return;
+	cJSON* saved_scenes = cJSON_IsArray(root) ? root : cJSON_GetObjectItem(root, "scenes");
+	if (saved_scenes && cJSON_IsArray(saved_scenes)) {
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, saved_scenes) {
+			cJSON* id = cJSON_GetObjectItem(item, "id");
+			cJSON* human = cJSON_GetObjectItem(item, "human");
+			cJSON* vehicle = cJSON_GetObjectItem(item, "vehicle");
+			if (!id || !cJSON_IsNumber(id) || id->valueint <= 0 || id->valueint > UINT16_MAX ||
+				!human || !cJSON_IsNumber(human) || human->valuedouble < 0 ||
+				!vehicle || !cJSON_IsNumber(vehicle) || vehicle->valuedouble < 0) continue;
+			Counting_Set_Totals((uint16_t)id->valueint,
+				(uint64_t)human->valuedouble, (uint64_t)vehicle->valuedouble);
+		}
+	}
+	cJSON_Delete(root);
+}
+
+static void
+Migrate_Settings(cJSON* settings_obj) {
+	if (!settings_obj || !cJSON_IsObject(settings_obj)) return;
+	int changed = 0;
+	cJSON* transmission = cJSON_GetObjectItem(settings_obj, "transmission");
+	if (transmission && cJSON_IsObject(transmission)) {
+		cJSON* counting = cJSON_GetObjectItem(transmission, "counting");
+		if (counting && cJSON_IsObject(counting)) {
+			cJSON* scenes = cJSON_GetObjectItem(counting, "scenes");
+			if (!scenes || !cJSON_IsArray(scenes)) {
+				if (scenes) cJSON_DeleteItemFromObject(counting, "scenes");
+				cJSON_AddItemToObject(counting, "scenes", cJSON_CreateArray());
+				changed = 1;
+			}
+			if (cJSON_GetObjectItem(counting, "label")) {
+				cJSON_DeleteItemFromObject(counting, "label");
+				changed = 1;
+			}
+			if (cJSON_GetObjectItem(counting, "aoi")) {
+				cJSON_DeleteItemFromObject(counting, "aoi");
+				changed = 1;
+			}
+		}
+		cJSON* presence = cJSON_GetObjectItem(transmission, "presence");
+		cJSON* legacy_alert = cJSON_GetObjectItem(transmission, "alert");
+		if (!presence && legacy_alert) {
+			presence = cJSON_DetachItemFromObject(transmission, "alert");
+			cJSON_AddItemToObject(transmission, "presence", presence);
+			changed = 1;
+		} else if (presence && legacy_alert) {
+			cJSON_DeleteItemFromObject(transmission, "alert");
+			changed = 1;
+		}
+		if (presence && cJSON_IsObject(presence)) {
+			cJSON* schedule = cJSON_GetObjectItem(presence, "schedule");
+			if (!schedule || !cJSON_IsObject(schedule)) {
+				if (schedule) cJSON_DeleteItemFromObject(presence, "schedule");
+				schedule = cJSON_CreateObject();
+				cJSON_AddItemToObject(presence, "schedule", schedule);
+				changed = 1;
+			}
+			if (!cJSON_GetObjectItem(schedule, "enabled")) {
+				cJSON_AddBoolToObject(schedule, "enabled", 0);
+				changed = 1;
+			}
+			if (!cJSON_GetObjectItem(schedule, "start")) {
+				cJSON_AddStringToObject(schedule, "start", "18:00");
+				changed = 1;
+			}
+			if (!cJSON_GetObjectItem(schedule, "end")) {
+				cJSON_AddStringToObject(schedule, "end", "06:00");
+				changed = 1;
+			}
+		}
+	}
+	if (cJSON_GetObjectItem(settings_obj, "downlinkCommands")) {
+		cJSON_DeleteItemFromObject(settings_obj, "downlinkCommands");
+		changed = 1;
+	}
+	cJSON* version = cJSON_GetObjectItem(settings_obj, "settingsVersion");
+	if (!version || !cJSON_IsNumber(version) || version->valueint != 2) {
+		Set_JSON_Number(settings_obj, "settingsVersion", 2);
+		changed = 1;
+	}
+	if (changed && !ACAP_FILE_Write("localdata/settings.json", settings_obj))
+		LOG_WARN("Failed to persist migrated Radar settings\n");
+}
+
 // ==================================================================
 // Settings Callback
 // ==================================================================
@@ -1665,36 +2339,24 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 	int old_alert_heartbeat_minutes = g_alert_heartbeat_minutes;
 	int old_alert_active_interval_seconds = g_alert_active_interval_seconds;
 	int reset_alert_timers = 0;
+	int alert_schedule_enabled = 0;
+	int alert_schedule_start = 18 * 60;
+	int alert_schedule_end = 6 * 60;
 
 	cJSON* legacy_enabled = cJSON_GetObjectItem(transmission, "enabled");
 	cJSON* legacy_interval = cJSON_GetObjectItem(transmission, "intervalMinutes");
 
 	cJSON* counting = cJSON_GetObjectItem(transmission, "counting");
 	if (counting) {
-		cJSON* enabled = cJSON_GetObjectItem(counting, "enabled");
-		if (enabled) g_counting_publish_enabled = cJSON_IsTrue(enabled);
-		cJSON* interval = cJSON_GetObjectItem(counting, "intervalMinutes");
-		if (interval) g_counting_interval_minutes = Clamp_Int(interval->valueint, 1, 60);
-		cJSON* label = cJSON_GetObjectItem(counting, "label");
-		if (label && label->valuestring) g_counting_label_bucket = Radar_Class_From_String(label->valuestring);
-		cJSON* aoi = cJSON_GetObjectItem(counting, "aoi");
-		if (aoi) {
-			cJSON* enabled_aoi = cJSON_GetObjectItem(aoi, "enabled");
-			if (enabled_aoi) g_counting_aoi_enabled = cJSON_IsTrue(enabled_aoi);
-			cJSON* x1 = cJSON_GetObjectItem(aoi, "x1");
-			cJSON* x2 = cJSON_GetObjectItem(aoi, "x2");
-			cJSON* y1 = cJSON_GetObjectItem(aoi, "y1");
-			cJSON* y2 = cJSON_GetObjectItem(aoi, "y2");
-			if (x1) g_counting_aoi_x1 = Clamp_Int(x1->valueint, 0, 1000);
-			if (x2) g_counting_aoi_x2 = Clamp_Int(x2->valueint, 0, 1000);
-			if (y1) g_counting_aoi_y1 = Clamp_Int(y1->valueint, 0, 1000);
-			if (y2) g_counting_aoi_y2 = Clamp_Int(y2->valueint, 0, 1000);
-			if (g_counting_aoi_x2 < g_counting_aoi_x1) g_counting_aoi_x2 = g_counting_aoi_x1;
-			if (g_counting_aoi_y2 < g_counting_aoi_y1) g_counting_aoi_y2 = g_counting_aoi_y1;
-			cJSON* points = cJSON_GetObjectItem(aoi, "points");
-			Counting_Load_Area_Points(points);
+		if (Load_Counting_Scenes(counting)) {
+			cJSON* enabled = cJSON_GetObjectItem(counting, "enabled");
+			if (enabled) g_counting_publish_enabled = cJSON_IsTrue(enabled);
+			cJSON* interval = cJSON_GetObjectItem(counting, "intervalMinutes");
+			if (interval) g_counting_interval_minutes = Clamp_Int(interval->valueint, 1, 60);
+			if (g_radar_subscriber_initialized && !Counting_Save_Counters())
+				LOG_WARN("Failed to persist reconciled Counting counters\n");
 		} else {
-			Counting_Set_Rectangle_Area_Points();
+			LOG_WARN("Ignoring invalid Counting scene configuration\n");
 		}
 	}
 
@@ -1732,7 +2394,8 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 		if (legacy_interval) g_occupancy_interval_minutes = Clamp_Int(legacy_interval->valueint, 1, 60);
 	}
 
-	cJSON* alert = cJSON_GetObjectItem(transmission, "alert");
+	cJSON* alert = cJSON_GetObjectItem(transmission, "presence");
+	if (!alert) alert = cJSON_GetObjectItem(transmission, "alert");
 	if (alert) {
 		cJSON* enabled = cJSON_GetObjectItem(alert, "enabled");
 		if (enabled) g_alert_publish_enabled = cJSON_IsTrue(enabled);
@@ -1742,6 +2405,15 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 		if (active) g_alert_active_interval_seconds = Clamp_Int(active->valueint, 60, 300);
 		cJSON* transition = cJSON_GetObjectItem(alert, "transitionSeconds");
 		if (transition) g_alert_transition_seconds = Clamp_Int(transition->valueint, 2, 20);
+		cJSON* schedule = cJSON_GetObjectItem(alert, "schedule");
+		if (schedule && cJSON_IsObject(schedule)) {
+			cJSON* schedule_enabled = cJSON_GetObjectItem(schedule, "enabled");
+			cJSON* schedule_start = cJSON_GetObjectItem(schedule, "start");
+			cJSON* schedule_end = cJSON_GetObjectItem(schedule, "end");
+			alert_schedule_enabled = schedule_enabled && cJSON_IsTrue(schedule_enabled);
+			alert_schedule_start = Parse_HHMM(schedule_start && cJSON_IsString(schedule_start) ? schedule_start->valuestring : NULL, 18 * 60);
+			alert_schedule_end = Parse_HHMM(schedule_end && cJSON_IsString(schedule_end) ? schedule_end->valuestring : NULL, 6 * 60);
+		}
 		cJSON* label = cJSON_GetObjectItem(alert, "label");
 		if (label && label->valuestring) g_alert_label_bucket = Radar_Class_From_String(label->valuestring);
 		cJSON* aoi = cJSON_GetObjectItem(alert, "aoi");
@@ -1792,14 +2464,14 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 		}
 	}
 	pthread_mutex_unlock(&g_publish_mutex);
+	Alert_Set_Schedule(alert_schedule_enabled, alert_schedule_start, alert_schedule_end);
 	if (reset_alert_timers)
 		Alert_Reset_Timers();
 }
 
 void
 Settings_Updated_Callback( const char* service, cJSON* data) {
-	char* _dbg = cJSON_PrintUnformatted(data);
-	if (_dbg) { LOG_TRACE("Settings_Updated_Callback [%s]: %s\n", service, _dbg); free(_dbg); }
+	LOG_TRACE("Settings_Updated_Callback [%s]\n", service);
 
 	// The ACAP framework calls this with the individual group name as service
 	// (e.g. "b100", "lorawan", "transmission", "polling") and data is the
@@ -1820,6 +2492,18 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 		if (timeout) {
 			B100_Set_Timeout(timeout->valueint);
 		}
+		cJSON* apiuser = cJSON_GetObjectItem(data, "apiDigestUser");
+		if (apiuser && apiuser->valuestring) {
+			strncpy(g_b100_api_user, apiuser->valuestring, sizeof(g_b100_api_user) - 1);
+			g_b100_api_user[sizeof(g_b100_api_user) - 1] = '\0';
+		}
+		cJSON* apipass = cJSON_GetObjectItem(data, "apiDigestPassword");
+		if (apipass && apipass->valuestring) {
+			strncpy(g_b100_api_password, apipass->valuestring, sizeof(g_b100_api_password) - 1);
+			g_b100_api_password[sizeof(g_b100_api_password) - 1] = '\0';
+		}
+		if (!B100_Set_API_Credentials(g_b100_api_user, g_b100_api_password))
+			LOG_WARN("Bridge API credentials must both be set or both be empty\n");
 		cJSON* cbip = cJSON_GetObjectItem(data, "callbackIP");
 		if (cbip && cbip->valuestring) {
 			strncpy(g_callback_ip, cbip->valuestring, sizeof(g_callback_ip) - 1);
@@ -1878,7 +2562,8 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 		}
 		Radar_Reset_Mode_State();
 		pthread_mutex_unlock(&g_radar_mutex);
-		Radar_Apply_Config_To_Subscriber();
+		if (g_radar_subscriber_initialized)
+			Radar_Apply_Config_To_Subscriber();
 	}
 
 	if (strcmp(service, "polling") == 0) {
@@ -1896,6 +2581,257 @@ Settings_Updated_Callback( const char* service, cJSON* data) {
 
 // Forward declaration — defined further down in this file
 static int Publish_Radar_To_LoRa(void);
+
+static void
+Handle_Action_OTA(const OTA_Frame* frame) {
+	if (frame->command == OTA_COMMAND_CAPS) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_DOWNLINK_CONTROL, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		uint8_t caps[] = {0x01, 0x02};
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONTROL, OTA_COMMAND_CAPS_RESPONSE,
+			frame->transaction_id, caps, sizeof(caps));
+		return;
+	}
+	if (frame->command != OTA_COMMAND_SET) {
+		Send_OTA_Error(LORA_PORT_DOWNLINK_CONTROL, frame->transaction_id,
+			frame->command, OTA_STATUS_UNKNOWN_COMMAND);
+		return;
+	}
+	if (frame->body_length != 1) {
+		Send_OTA_Error(LORA_PORT_DOWNLINK_CONTROL, frame->transaction_id,
+			frame->command, OTA_STATUS_INVALID_LENGTH);
+		return;
+	}
+
+	uint8_t action = frame->body[0];
+	if (action == 0x01) {
+		uint8_t ack[] = {action, OTA_STATUS_OK};
+		Queue_OTA_Frame_Ex(LORA_PORT_DOWNLINK_CONTROL, OTA_COMMAND_SET_ACK,
+			frame->transaction_id, ack, sizeof(ack), 1);
+		return;
+	}
+	if (action == 0x02) {
+		Radar_Reset_All_State();
+		uint8_t ack[] = {action, OTA_STATUS_OK};
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONTROL, OTA_COMMAND_SET_ACK,
+			frame->transaction_id, ack, sizeof(ack));
+		return;
+	}
+	uint8_t ack[] = {action, OTA_STATUS_INVALID_VALUE};
+	Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONTROL, OTA_COMMAND_SET_ACK,
+		frame->transaction_id, ack, sizeof(ack));
+}
+
+static void
+Handle_Bridge_Config_OTA(const OTA_Frame* frame) {
+	if (frame->command == OTA_COMMAND_GET) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_DOWNLINK_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		B100_Status* bridge = B100_Get_Status();
+		if (!bridge->hasConfiguredDataRate || !bridge->hasConfiguredAdr) {
+			Send_OTA_Error(LORA_PORT_DOWNLINK_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_APPLY_FAILED);
+			return;
+		}
+		uint8_t body[] = {0x03, (uint8_t)bridge->configuredDataRate,
+			bridge->configuredAdr ? 1 : 0};
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONFIG, OTA_COMMAND_GET_RESPONSE,
+			frame->transaction_id, body, sizeof(body));
+		return;
+	}
+	if (frame->command == OTA_COMMAND_SET) {
+		OTA_Status status = OTA_STATUS_OK;
+		if (frame->body_length != 3) status = OTA_STATUS_INVALID_LENGTH;
+		else if (frame->body[0] == 0 || (frame->body[0] & ~0x03) != 0 || frame->body[2] > 1)
+			status = OTA_STATUS_INVALID_VALUE;
+		else if ((frame->body[0] & 0x01) && frame->body[1] > 5)
+			status = OTA_STATUS_INVALID_RANGE;
+		else if (Queue_OTA_Bridge_Config(frame)) return;
+		else status = OTA_STATUS_APPLY_FAILED;
+		uint8_t ack[] = {(uint8_t)status};
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONFIG, OTA_COMMAND_SET_ACK,
+			frame->transaction_id, ack, sizeof(ack));
+		return;
+	}
+	if (frame->command == OTA_COMMAND_CAPS) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_DOWNLINK_CONFIG, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		uint8_t caps[] = {0, 5, 1};
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_CONFIG, OTA_COMMAND_CAPS_RESPONSE,
+			frame->transaction_id, caps, sizeof(caps));
+		return;
+	}
+	Send_OTA_Error(LORA_PORT_DOWNLINK_CONFIG, frame->transaction_id,
+		frame->command, OTA_STATUS_UNKNOWN_COMMAND);
+}
+
+static void
+Build_Camera_Info(char* output, size_t output_size) {
+	const char* model = ACAP_DEVICE_Prop("model");
+	const char* serial = ACAP_DEVICE_Prop("serial");
+	const char* firmware = ACAP_DEVICE_Prop("firmware");
+	const char* app_version = "?";
+	cJSON* manifest = ACAP_Get_Config("manifest");
+	cJSON* package = manifest ? cJSON_GetObjectItem(manifest, "acapPackageConf") : NULL;
+	cJSON* setup = package ? cJSON_GetObjectItem(package, "setup") : NULL;
+	cJSON* version = setup ? cJSON_GetObjectItem(setup, "version") : NULL;
+	if (version && cJSON_IsString(version)) app_version = version->valuestring;
+	snprintf(output, output_size, "%s,%s,%s,%dh,%s",
+		model ? model : "?", serial ? serial : "?", firmware ? firmware : "?",
+		(int)(ACAP_DEVICE_Uptime() / 3600.0), app_version);
+}
+
+static void
+Build_Bridge_Info(char* output, size_t output_size) {
+	B100_Status* bridge = B100_Get_Status();
+	snprintf(output, output_size, "%s/%s,%s,%s,%.0fC,R%u,%s",
+		bridge->hardware[0] ? bridge->hardware : "?",
+		bridge->hardwareVersion[0] ? bridge->hardwareVersion : "?",
+		bridge->firmwareVersion[0] ? bridge->firmwareVersion : "?",
+		bridge->powerSource[0] ? bridge->powerSource : "?", bridge->tempC,
+		bridge->restartCounter, bridge->devAddrStr[0] ? bridge->devAddrStr : "0");
+}
+
+static int
+Append_Information_String(uint8_t* body, size_t* body_length,
+	size_t capacity, size_t length_offset, const char* value) {
+	const char* text = value && value[0] ? value : "?";
+	size_t length = strlen(text);
+	if (length > UINT8_MAX || *body_length + length > capacity) return 0;
+	body[length_offset] = (uint8_t)length;
+	memcpy(body + *body_length, text, length);
+	*body_length += length;
+	return 1;
+}
+
+static size_t
+Build_Structured_Camera_Info(uint8_t* body, size_t capacity) {
+	if (!body || capacity < 10) return 0;
+	const char* app_version = "?";
+	cJSON* manifest = ACAP_Get_Config("manifest");
+	cJSON* package = manifest ? cJSON_GetObjectItem(manifest, "acapPackageConf") : NULL;
+	cJSON* setup = package ? cJSON_GetObjectItem(package, "setup") : NULL;
+	cJSON* version = setup ? cJSON_GetObjectItem(setup, "version") : NULL;
+	if (version && cJSON_IsString(version)) app_version = version->valuestring;
+
+	uint32_t uptime_hours = (uint32_t)(ACAP_DEVICE_Uptime() / 3600.0);
+	body[0] = 0x01;
+	body[1] = OTA_INFORMATION_FORMAT_STRUCTURED;
+	body[2] = body[3] = body[4] = body[5] = 0;
+	body[6] = (uint8_t)(uptime_hours & 0xFF);
+	body[7] = (uint8_t)((uptime_hours >> 8) & 0xFF);
+	body[8] = (uint8_t)((uptime_hours >> 16) & 0xFF);
+	body[9] = (uint8_t)((uptime_hours >> 24) & 0xFF);
+	size_t body_length = 10;
+	if (!Append_Information_String(body, &body_length, capacity, 2, ACAP_DEVICE_Prop("model")) ||
+		!Append_Information_String(body, &body_length, capacity, 3, ACAP_DEVICE_Prop("serial")) ||
+		!Append_Information_String(body, &body_length, capacity, 4, ACAP_DEVICE_Prop("firmware")) ||
+		!Append_Information_String(body, &body_length, capacity, 5, app_version)) return 0;
+	return body_length;
+}
+
+static size_t
+Build_Structured_Bridge_Info(uint8_t* body, size_t capacity) {
+	if (!body || capacity < 11) return 0;
+	B100_Status* bridge = B100_Get_Status();
+	int temperature_tenths = (int)lround(bridge->tempC * 10.0);
+	body[0] = 0x02;
+	body[1] = OTA_INFORMATION_FORMAT_STRUCTURED;
+	body[2] = body[3] = body[4] = body[5] = body[6] = 0;
+	body[7] = (uint8_t)(temperature_tenths & 0xFF);
+	body[8] = (uint8_t)((temperature_tenths >> 8) & 0xFF);
+	body[9] = (uint8_t)(bridge->restartCounter & 0xFF);
+	body[10] = (uint8_t)((bridge->restartCounter >> 8) & 0xFF);
+	size_t body_length = 11;
+	if (!Append_Information_String(body, &body_length, capacity, 2, bridge->hardware) ||
+		!Append_Information_String(body, &body_length, capacity, 3, bridge->hardwareVersion) ||
+		!Append_Information_String(body, &body_length, capacity, 4, bridge->firmwareVersion) ||
+		!Append_Information_String(body, &body_length, capacity, 5, bridge->powerSource) ||
+		!Append_Information_String(body, &body_length, capacity, 6, bridge->devAddrStr)) return 0;
+	return body_length;
+}
+
+static void
+Handle_Information_OTA(const OTA_Frame* frame) {
+	if (frame->command == OTA_COMMAND_CAPS) {
+		if (frame->body_length != 0) {
+			Send_OTA_Error(LORA_PORT_DOWNLINK_QUERY, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_LENGTH);
+			return;
+		}
+		uint8_t caps[] = {0x01, 0x02, 43};
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_QUERY, OTA_COMMAND_CAPS_RESPONSE,
+			frame->transaction_id, caps, sizeof(caps));
+		return;
+	}
+	if (frame->command != OTA_COMMAND_GET) {
+		Send_OTA_Error(LORA_PORT_DOWNLINK_QUERY, frame->transaction_id,
+			frame->command, OTA_STATUS_UNKNOWN_COMMAND);
+		return;
+	}
+	if (frame->body_length < 1 || frame->body_length > 2) {
+		Send_OTA_Error(LORA_PORT_DOWNLINK_QUERY, frame->transaction_id,
+			frame->command, OTA_STATUS_INVALID_LENGTH);
+		return;
+	}
+
+	uint8_t info_type = frame->body[0];
+	uint8_t page_index = frame->body_length == 2 ? frame->body[1] : 0;
+	uint8_t structured_body[OTA_MAX_BODY_SIZE];
+	size_t structured_length = info_type == 0x01
+		? Build_Structured_Camera_Info(structured_body, sizeof(structured_body))
+		: info_type == 0x02
+			? Build_Structured_Bridge_Info(structured_body, sizeof(structured_body))
+			: 0;
+	if (structured_length > 0) {
+		if (page_index != 0) {
+			Send_OTA_Error(LORA_PORT_DOWNLINK_QUERY, frame->transaction_id,
+				frame->command, OTA_STATUS_INVALID_RANGE);
+			return;
+		}
+		Queue_OTA_Frame(LORA_PORT_DOWNLINK_QUERY, OTA_COMMAND_GET_RESPONSE,
+			frame->transaction_id, structured_body, structured_length);
+		return;
+	}
+
+	char info[256] = {0};
+	if (info_type == 0x01) Build_Camera_Info(info, sizeof(info));
+	else if (info_type == 0x02) Build_Bridge_Info(info, sizeof(info));
+	else {
+		Send_OTA_Error(LORA_PORT_DOWNLINK_QUERY, frame->transaction_id,
+			frame->command, OTA_STATUS_INVALID_VALUE);
+		return;
+	}
+
+	const size_t max_chunk_length = 43;
+	size_t info_length = strlen(info);
+	size_t page_count = info_length == 0 ? 1 : (info_length + max_chunk_length - 1) / max_chunk_length;
+	if (page_index >= page_count) {
+		Send_OTA_Error(LORA_PORT_DOWNLINK_QUERY, frame->transaction_id,
+			frame->command, OTA_STATUS_INVALID_RANGE);
+		return;
+	}
+	size_t offset = page_index * max_chunk_length;
+	size_t chunk_length = info_length - offset;
+	if (chunk_length > max_chunk_length) chunk_length = max_chunk_length;
+	uint8_t body[OTA_MAX_BODY_SIZE];
+	body[0] = info_type;
+	body[1] = page_index;
+	body[2] = (uint8_t)page_count;
+	body[3] = (uint8_t)chunk_length;
+	memcpy(body + 4, info + offset, chunk_length);
+	Queue_OTA_Frame(LORA_PORT_DOWNLINK_QUERY, OTA_COMMAND_GET_RESPONSE,
+		frame->transaction_id, body, chunk_length + 4);
+}
 
 void
 B100_Downlink_Handler(B100_Downlink* downlink) {
@@ -1946,10 +2882,19 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 
 	if (strcmp(downlink->payload_type, "HEX") == 0) {
 		const char* hex = downlink->payload;
-		int hex_len = (int)strlen(hex);
-		for (int i = 0; i + 1 < hex_len && byte_count < (int)sizeof(bytes); i += 2) {
-			char pair[3] = { hex[i], hex[i+1], '\0' };
-			bytes[byte_count++] = (unsigned char)strtol(pair, NULL, 16);
+		size_t hex_length = strlen(hex);
+		if ((hex_length % 2) != 0 || hex_length / 2 > sizeof(bytes)) {
+			LOG_WARN("Downlink: Invalid HEX payload length %zu\n", hex_length);
+			return;
+		}
+		for (size_t index = 0; index < hex_length; index += 2) {
+			int high = Hex_Nibble(hex[index]);
+			int low = Hex_Nibble(hex[index + 1]);
+			if (high < 0 || low < 0) {
+				LOG_WARN("Downlink: Invalid HEX payload\n");
+				return;
+			}
+			bytes[byte_count++] = (unsigned char)((high << 4) | low);
 		}
 	} else {
 		byte_count = (int)strlen(downlink->payload);
@@ -1963,32 +2908,36 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 	int port       = downlink->port;
 	int first_byte = (int)bytes[0];
 
-	// -----------------------------------------------------------
-	// Check whether this command is enabled in settings
-	// -----------------------------------------------------------
-	int command_enabled = 1; // default: enabled if not listed
 	cJSON* settings_obj = ACAP_Get_Config("settings");
-	if (settings_obj) {
-		cJSON* cmd_list = cJSON_GetObjectItem(settings_obj, "downlinkCommands");
-		if (cmd_list && cJSON_IsArray(cmd_list)) {
-			cJSON* cmd;
-			int lookup_byte = first_byte;
-			cJSON_ArrayForEach(cmd, cmd_list) {
-				cJSON* p = cJSON_GetObjectItem(cmd, "port");
-				cJSON* b = cJSON_GetObjectItem(cmd, "byte");
-				if (p && b && p->valueint == port && b->valueint == lookup_byte) {
-					cJSON* e = cJSON_GetObjectItem(cmd, "enabled");
-					command_enabled = (!e || cJSON_IsTrue(e)) ? 1 : 0;
-					break;
-				}
-			}
+	if (port == LORA_PORT_DOWNLINK_CONTROL || port == LORA_PORT_DOWNLINK_CONFIG ||
+		port == LORA_PORT_RADAR_CONFIG || port == LORA_PORT_DOWNLINK_QUERY ||
+		port == LORA_PORT_USE_CASE_CONFIG || port == LORA_PORT_COUNTING_OTA_CONFIG ||
+		port == LORA_PORT_OCCUPANCY_OTA_CONFIG ||
+		port == LORA_PORT_ALERT_OTA_CONFIG) {
+		OTA_Frame frame;
+		OTA_Status status = OTA_Decode_Frame(bytes, (size_t)byte_count, &frame);
+		if (status == OTA_STATUS_OK) {
+			if (port == LORA_PORT_DOWNLINK_CONTROL) Handle_Action_OTA(&frame);
+			else if (port == LORA_PORT_DOWNLINK_CONFIG) Handle_Bridge_Config_OTA(&frame);
+			else if (port == LORA_PORT_RADAR_CONFIG) Handle_Radar_Config_OTA(&frame);
+			else if (port == LORA_PORT_DOWNLINK_QUERY) Handle_Information_OTA(&frame);
+			else if (port == LORA_PORT_USE_CASE_CONFIG) Handle_Transmission_OTA(&frame, settings_obj);
+			else if (port == LORA_PORT_COUNTING_OTA_CONFIG)
+				OTA_Counting_Handle(&frame, settings_obj, Queue_OTA_Frame,
+					ACAP_FILE_Write, Settings_Updated_Callback);
+			else Handle_Radar_Service_OTA(port, &frame);
+		} else {
+			if ((port == LORA_PORT_OCCUPANCY_OTA_CONFIG || port == LORA_PORT_ALERT_OTA_CONFIG) &&
+				byte_count > 0 && (first_byte == 0x01 || first_byte == 0x02 || first_byte == 0x03))
+				goto legacy_service_ota;
+			uint8_t transaction_id = byte_count > 2 ? bytes[2] : 0;
+			uint8_t request_command = byte_count > 0 ? bytes[0] : 0;
+			Send_OTA_Error(port, transaction_id, request_command, status);
 		}
-	}
-
-	if (!command_enabled) {
-		LOG("Downlink command port=%d byte=0x%02X disabled in settings — ignored\n", port, first_byte);
 		return;
 	}
+
+legacy_service_ota:
 
 	// -----------------------------------------------------------
 	// Dispatch
@@ -2151,31 +3100,36 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 				break;
 		}
 
-	} else if (port == LORA_PORT_RADAR_OTA_CONFIG) {
-		// Port 130: Radar OTA config, GET/SET over same Radar dedicated port
-		switch (first_byte) {
-			case RADAR_OTA_CMD_GET_CONFIG:
-				LOG("Downlink: Radar OTA get config\n");
-				if (!Send_Radar_OTA_Config_Response())
-					LOG_WARN("Radar OTA: Failed to send config response\n");
-				break;
-			case RADAR_OTA_CMD_GET_CAPS:
-				LOG("Downlink: Radar OTA get capabilities\n");
-				if (!Send_Radar_OTA_Caps_Response())
-					LOG_WARN("Radar OTA: Failed to send capabilities response\n");
-				break;
-			case RADAR_OTA_CMD_SET_CONFIG: {
-				LOG("Downlink: Radar OTA set config\n");
-				unsigned char status = Apply_Radar_OTA_Set_Config(bytes + 1, byte_count - 1);
-				if (!Send_Radar_OTA_Ack(RADAR_OTA_CMD_SET_CONFIG, status))
-					LOG_WARN("Radar OTA: Failed to send set-config ack\n");
-				break;
-			}
-			default:
-				LOG_WARN("Downlink: Unknown Radar OTA command 0x%02X\n", first_byte);
-				if (!Send_Radar_OTA_Ack((unsigned char)first_byte, RADAR_OTA_STATUS_INVALID_RANGE))
-					LOG_WARN("Radar OTA: Failed to send unknown-command ack\n");
-				break;
+	} else if (port == LORA_PORT_RADAR_CONFIG) {
+		OTA_Frame frame;
+		OTA_Status status = OTA_Decode_Frame(bytes, (size_t)byte_count, &frame);
+		if (status == OTA_STATUS_OK) Handle_Radar_Config_OTA(&frame);
+		else {
+			uint8_t transaction_id = byte_count > 2 ? bytes[2] : 0;
+			uint8_t request_command = byte_count > 0 ? bytes[0] : 0;
+			Send_OTA_Error(LORA_PORT_RADAR_CONFIG, transaction_id, request_command, status);
+		}
+
+	} else if (port == LORA_PORT_USE_CASE_CONFIG) {
+		OTA_Frame frame;
+		OTA_Status status = OTA_Decode_Frame(bytes, (size_t)byte_count, &frame);
+		if (status == OTA_STATUS_OK) Handle_Transmission_OTA(&frame, settings_obj);
+		else {
+			uint8_t transaction_id = byte_count > 2 ? bytes[2] : 0;
+			uint8_t request_command = byte_count > 0 ? bytes[0] : 0;
+			Send_OTA_Error(LORA_PORT_USE_CASE_CONFIG, transaction_id, request_command, status);
+		}
+
+	} else if (port == LORA_PORT_COUNTING_OTA_CONFIG) {
+		OTA_Frame frame;
+		OTA_Status status = OTA_Decode_Frame(bytes, (size_t)byte_count, &frame);
+		if (status == OTA_STATUS_OK)
+			Send_OTA_Error(LORA_PORT_COUNTING_OTA_CONFIG, frame.transaction_id,
+				frame.command, OTA_STATUS_UNSUPPORTED);
+		else {
+			uint8_t transaction_id = byte_count > 2 ? bytes[2] : 0;
+			uint8_t request_command = byte_count > 0 ? bytes[0] : 0;
+			Send_OTA_Error(LORA_PORT_COUNTING_OTA_CONFIG, transaction_id, request_command, status);
 		}
 
 	} else if (port == LORA_PORT_OCCUPANCY_OTA_CONFIG) {
@@ -2625,12 +3579,6 @@ Clamp_Payload_Count(int value) {
 }
 
 static void
-Build_Area_Balance_Payload(unsigned char* buffer, RadarAreaBalance balance) {
-	buffer[0] = Clamp_Payload_Count(balance.entering);
-	buffer[1] = Clamp_Payload_Count(balance.exiting);
-}
-
-static void
 Build_Selected_Count_Payload(unsigned char* buffer, RadarCounts counts, int label_bucket) {
 	buffer[0] = Clamp_Payload_Count(label_bucket == 2 ? counts.vehicle : counts.human);
 }
@@ -2668,18 +3616,22 @@ Publish_Counting_To_LoRa(void) {
 	if (!enabled)
 		return 0;
 
-	RadarAreaBalance balance = Counting_Area_Balance();
-	unsigned char buffer[2];
-	Build_Area_Balance_Payload(buffer, balance);
-	if (!Send_LoRa_Payload("area-balance", LORA_PORT_COUNTING, buffer, (int)sizeof(buffer)))
+	unsigned char buffer[COUNTING_MAX_SCENES * 4];
+	size_t payload_length = Counting_Build_Cumulative_Payload(buffer, sizeof(buffer));
+	if (payload_length == 0 || payload_length > sizeof(buffer)) {
+		LOG_WARN("Counting publish skipped: no enabled scenes with selected classes\n");
+		return 0;
+	}
+	if (!Send_LoRa_Payload("counting", LORA_PORT_COUNTING, buffer, (int)payload_length))
 		return 0;
 	pthread_mutex_lock(&g_publish_mutex);
 	time_t now = time(NULL);
 	g_counting_last_publish_time = now;
 	g_counting_next_publish_time = now + (g_counting_interval_minutes * 60);
-	Append_Publish_Log("area-balance", LORA_PORT_COUNTING, buffer, (int)sizeof(buffer));
+	Append_Publish_Log("counting", LORA_PORT_COUNTING, buffer, (int)payload_length);
 	pthread_mutex_unlock(&g_publish_mutex);
-	Counting_Mark_Published(balance);
+	if (!Counting_Save_Counters())
+		LOG_WARN("Counting publish accepted but cumulative counters could not be saved\n");
 	return 1;
 }
 
@@ -2752,6 +3704,8 @@ Publish_Thread(void* arg) {
 	
 	while (running) {
 		time_t now = time(NULL);
+		Drain_OTA_Bridge_Config_Queue();
+		Drain_OTA_Response_Queue();
 		pthread_mutex_lock(&g_publish_mutex);
 		int counting_enabled = g_counting_publish_enabled;
 		time_t counting_next = g_counting_next_publish_time;
@@ -3104,6 +4058,30 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 	const char* dev_model  = ACAP_DEVICE_Prop("model")  ? ACAP_DEVICE_Prop("model")  : "unknown";
 	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
 	const char* dev_date   = ACAP_DEVICE_Date();
+	CountingSceneSnapshot scenes[COUNTING_MAX_SCENES];
+	size_t scene_count = Counting_Get_Scenes(scenes, COUNTING_MAX_SCENES);
+	cJSON* fields = cJSON_CreateArray();
+	for (size_t index = 0; index < scene_count; index++) {
+		if (!scenes[index].config.enabled) continue;
+		if (scenes[index].config.class_mask & COUNTING_CLASS_HUMAN) {
+			cJSON* field = cJSON_CreateObject();
+			cJSON_AddStringToObject(field, "scene", scenes[index].config.name);
+			cJSON_AddStringToObject(field, "className", "human");
+			cJSON_AddItemToArray(fields, field);
+		}
+		if (scenes[index].config.class_mask & COUNTING_CLASS_VEHICLE) {
+			cJSON* field = cJSON_CreateObject();
+			cJSON_AddStringToObject(field, "scene", scenes[index].config.name);
+			cJSON_AddStringToObject(field, "className", "vehicle");
+			cJSON_AddItemToArray(fields, field);
+		}
+	}
+	char* counting_fields = cJSON_PrintUnformatted(fields);
+	cJSON_Delete(fields);
+	if (!counting_fields) {
+		ACAP_HTTP_Respond_Error(response, 500, "Could not generate Counting fields");
+		return;
+	}
 	char js[20000];
 	snprintf(js, sizeof(js),
 		"/**\n"
@@ -3115,22 +4093,14 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		" * - Port 2, Occupancy, 1 byte: maximum selected-label objects during the interval.\n"
 		" * - Port 3, Detection Alert, 1 byte: maximum selected-label objects while alert is active.\n"
 		" *   Value 0 on port 3 means inactive or heartbeat.\n"
-		" * - Port 1, Counting, 2 bytes: entering and exiting selected-label counts.\n"
-		" *\n"
-		" * Information request downlinks and responses\n"
-		" * - Port 120, Information Request, 1 byte:\n"
-		" *   byte[0] = 0x01 request Camera Info, response on port 121\n"
-		" *   byte[0] = 0x02 request Bridge Info, response on port 122\n"
-		" *   byte[0] = 0x03 request Signal Quality, local status update only\n"
-		" * - Port 121, Camera Info response, ASCII CSV:\n"
-		" *   model, serial, firmwareVersion, uptimeHours with h suffix, cpuPercent with percent suffix, appVersion\n"
-		" * - Port 122, Bridge Info response, ASCII CSV:\n"
-		" *   hardware/hardwareVersion, firmwareVersion, powerSource, temperatureC with C suffix, restartCounter with R prefix, devAddr\n"
+		" * - Port 1, Counting: cumulative uint16 big-endian values in configured scene order, Human then Vehicle.\n"
 		" *\n"
 		" * The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in uplinks.\n"
+		" * Framed OTA configuration messages are decoded by the dedicated OTA Decoder.\n"
 		" *\n"
 		" */\n\n"
 		"function Byte(value) { return value & 0xff; }\n"
+		"var CountingFields = %s;\n"
 		"function HexToBytes(hex) {\n"
 		"  var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n"
 		"  if (!clean.length) throw new Error('Missing hex payload');\n"
@@ -3150,8 +4120,6 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"function RequireLength(bytes, length, name) {\n"
 		"  if (bytes.length !== length) throw new Error(name + ' payload must be ' + length + ' byte' + (length === 1 ? '' : 's'));\n"
 		"}\n"
-		"function Text(bytes) { return bytes.map(function(value) { return String.fromCharCode(Byte(value)); }).join(''); }\n"
-		"function NumberFromText(value) { var parsed = Number(String(value || '').replace(/[^0-9.-]/g, '')); return Number.isFinite(parsed) ? parsed : null; }\n\n"
 		"function Decode(buffer, port) {\n"
 		"  var bytes = Bytes(buffer);\n"
 		"  var fPort = Number(port);\n\n"
@@ -3165,24 +4133,13 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"    return { port: fPort, useCase: 'detectionAlert', active: maximumObjects > 0, maximumObjects: maximumObjects };\n"
 		"  }\n\n"
 		"  if (fPort === 1) {\n"
-		"    RequireLength(bytes, 2, 'Counting');\n"
-		"    return { port: fPort, useCase: 'counting', enteringObjects: Byte(bytes[0]), exitingObjects: Byte(bytes[1]) };\n"
-		"  }\n\n"
-		"  if (fPort === 120) {\n"
-		"    RequireLength(bytes, 1, 'Information Request');\n"
-		"    var requests = { 1: 'cameraInfo', 2: 'bridgeInfo', 3: 'signalQuality' };\n"
-		"    return { port: fPort, request: requests[Byte(bytes[0])] || 'unknown', requestCode: Byte(bytes[0]) };\n"
-		"  }\n\n"
-		"  if (fPort === 121) {\n"
-		"    var cameraText = Text(bytes);\n"
-		"    var camera = cameraText.split(',');\n"
-		"    return { port: fPort, response: 'cameraInfo', raw: cameraText, model: camera[0] || '', serial: camera[1] || '', firmwareVersion: camera[2] || '', uptimeHours: NumberFromText(camera[3]), cpuPercent: NumberFromText(camera[4]), appVersion: camera[5] || '' };\n"
-		"  }\n\n"
-		"  if (fPort === 122) {\n"
-		"    var bridgeText = Text(bytes);\n"
-		"    var bridge = bridgeText.split(',');\n"
-		"    var hardware = String(bridge[0] || '').split('/');\n"
-		"    return { port: fPort, response: 'bridgeInfo', raw: bridgeText, hardware: hardware[0] || '', hardwareVersion: hardware[1] || '', firmwareVersion: bridge[1] || '', powerSource: bridge[2] || '', temperatureC: NumberFromText(bridge[3]), restartCounter: NumberFromText(bridge[4]), devAddr: bridge[5] || '' };\n"
+		"    RequireLength(bytes, CountingFields.length * 2, 'Counting');\n"
+		"    var result = { port: fPort, useCase: 'counting', scenes: {} };\n"
+		"    CountingFields.forEach(function(field, index) {\n"
+		"      if (!result.scenes[field.scene]) result.scenes[field.scene] = {};\n"
+		"      result.scenes[field.scene][field.className] = (Byte(bytes[index * 2]) << 8) | Byte(bytes[index * 2 + 1]);\n"
+		"    });\n"
+		"    return result;\n"
 		"  }\n\n"
 		"  throw new Error('Unsupported Radar LoRaWAN port: ' + fPort);\n"
 		"}\n\n"
@@ -3196,15 +4153,16 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"\nfunction decodeDownlink(input) {\n"
 		"  return decodeUplink(input);\n"
 		"}\n",
-		dev_model, dev_serial, dev_date
+		dev_model, dev_serial, dev_date, counting_fields
 	);
+	free(counting_fields);
 
 	char filename[128];
 	snprintf(filename, sizeof(filename), "Decoder-AI-B100-Radar-%s-%s.js",
 	         dev_serial, dev_date);
 
 	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", strlen(js));
-	ACAP_HTTP_Respond_String(response, "%s", js);
+	ACAP_HTTP_Respond_Data(response, strlen(js), js);
 }
 
 void
@@ -3887,20 +4845,10 @@ int main(void) {
     // Initialize ACAP
     ACAP_Init(APP_PACKAGE, Settings_Updated_Callback);
     
-	LOG("Initializing radar scene subscriber...\n");
-	int radar_status = RadarDetection_Init(Radar_Detections_Callback, Radar_Tracker_Callback);
-	if (radar_status > 0) {
-		g_radar_connected = 1;
-		ACAP_STATUS_SetString("radar", "status", "Subscribed");
-	} else {
-		g_radar_connected = 0;
-		ACAP_STATUS_SetString("radar", "status", "Radar subscriber failed");
-		LOG_WARN("Radar subscriber initialization failed: %d\n", radar_status);
-	}
-    
     // Load settings
     cJSON* settings = ACAP_Get_Config("settings");
     if (settings) {
+		Migrate_Settings(settings);
         cJSON* b100 = cJSON_GetObjectItem(settings, "b100");
         if (b100) {
             cJSON* ip = cJSON_GetObjectItem(b100, "ip");
@@ -3923,6 +4871,16 @@ int main(void) {
 			if (cbpass && cbpass->valuestring) {
 				strncpy(g_callback_digest_password, cbpass->valuestring, sizeof(g_callback_digest_password) - 1);
 				g_callback_digest_password[sizeof(g_callback_digest_password) - 1] = '\0';
+			}
+			cJSON* apiuser = cJSON_GetObjectItem(b100, "apiDigestUser");
+			if (apiuser && apiuser->valuestring) {
+				strncpy(g_b100_api_user, apiuser->valuestring, sizeof(g_b100_api_user) - 1);
+				g_b100_api_user[sizeof(g_b100_api_user) - 1] = '\0';
+			}
+			cJSON* apipass = cJSON_GetObjectItem(b100, "apiDigestPassword");
+			if (apipass && apipass->valuestring) {
+				strncpy(g_b100_api_password, apipass->valuestring, sizeof(g_b100_api_password) - 1);
+				g_b100_api_password[sizeof(g_b100_api_password) - 1] = '\0';
 			}
             cJSON* port = cJSON_GetObjectItem(b100, "port");
             if (port) {
@@ -3977,13 +4935,28 @@ int main(void) {
 				cJSON* points = cJSON_GetObjectItem(aoi, "points");
 				Radar_Load_Area_Points(points);
 			}
-			Radar_Apply_Config_To_Subscriber();
 		}
     }
+
+	Counting_Load_Counters();
+	LOG("Initializing radar scene subscriber...\n");
+	int radar_status = RadarDetection_Init(Radar_Detections_Callback, Radar_Tracker_Callback);
+	if (radar_status > 0) {
+		g_radar_subscriber_initialized = 1;
+		g_radar_connected = 1;
+		Radar_Apply_Config_To_Subscriber();
+		ACAP_STATUS_SetString("radar", "status", "Subscribed");
+	} else {
+		g_radar_connected = 0;
+		ACAP_STATUS_SetString("radar", "status", "Radar subscriber failed");
+		LOG_WARN("Radar subscriber initialization failed: %d\n", radar_status);
+	}
     
     // Initialize B100 client
     LOG("Initializing B100 client: %s:%d\n", g_b100_ip, g_b100_port);
     B100_Init(g_b100_ip, g_b100_port, 30);
+	if (!B100_Set_API_Credentials(g_b100_api_user, g_b100_api_password))
+		LOG_WARN("Bridge API credentials must both be set or both be empty\n");
     B100_Set_Downlink_Callback(B100_Downlink_Handler);
     B100_Set_Status_Callback(B100_Status_Handler);
     B100_Set_GPS_Callback(B100_GPS_Handler);
@@ -4060,8 +5033,18 @@ int main(void) {
 	
 	pthread_join(health_thread, NULL);
 	pthread_join(publish_thread, NULL);
+	if (!Counting_Save_Counters())
+		LOG_WARN("Failed to save cumulative Counting counters during shutdown\n");
 	
 	RadarDetection_Cleanup();
+	if (g_ota_response_queue) {
+		g_queue_free_full(g_ota_response_queue, free);
+		g_ota_response_queue = NULL;
+	}
+	if (g_ota_bridge_config_queue) {
+		g_queue_free_full(g_ota_bridge_config_queue, free);
+		g_ota_bridge_config_queue = NULL;
+	}
 
 	B100_Cleanup();
     ACAP_Cleanup();

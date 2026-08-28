@@ -27,12 +27,8 @@
 
 	<div class="page-content">
 		<div class="card mb-4">
-			<div class="card-header d-flex justify-content-between align-items-center">
+			<div class="card-header">
 				<h5 class="card-title mb-0">Occupancy</h5>
-				<div class="d-flex gap-2">
-					<button id="open-occupancy-dialog" class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#occupancyTranslatorModal">Open Encoder/Decoder</button>
-					<button id="download-occupancy-ota-translator" class="btn btn-sm btn-outline-primary">Download OTA Configuration translator</button>
-				</div>
 			</div>
 			<div class="card-body">
 				<div class="row g-3 align-items-end">
@@ -51,10 +47,6 @@
 							<input type="radio" class="btn-check" name="occupancyLabel" id="occupancyVehicle" value="vehicle" autocomplete="off">
 							<label class="btn btn-outline-primary" for="occupancyVehicle">Vehicles</label>
 						</div>
-					</div>
-					<div class="col-12 col-md-3">
-						<label for="occupancyInterval" class="form-label">Publish Frequency: <strong id="occupancyIntervalValue">15</strong> min</label>
-						<input type="range" class="form-range" id="occupancyInterval" min="1" max="60" value="15">
 					</div>
 				</div>
 				<div class="row g-3 mt-2">
@@ -81,53 +73,6 @@
 		</div>
 	</div>
 
-	<div class="modal fade" id="occupancyTranslatorModal" tabindex="-1" aria-labelledby="occupancyTranslatorModalLabel" aria-hidden="true">
-		<div class="modal-dialog modal-lg modal-dialog-scrollable">
-			<div class="modal-content">
-				<div class="modal-header">
-					<h5 class="modal-title" id="occupancyTranslatorModalLabel">Occupancy OTA Encoder/Decoder</h5>
-					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-				</div>
-				<div class="modal-body">
-					<p class="text-muted mb-3">Installer/Integrator tool to build and parse Occupancy OTA frames on port <strong>132</strong>.</p>
-					<div class="row g-3">
-						<div class="col-12">
-							<label for="occupancy-json-input" class="form-label">JSON Input (for Set Config)</label>
-							<textarea id="occupancy-json-input" class="form-control" rows="8"></textarea>
-							<div class="d-flex gap-2 flex-wrap mt-2">
-								<button id="occupancy-json-from-form" class="btn btn-outline-secondary btn-sm">Load JSON From Form</button>
-								<button id="occupancy-build-set" class="btn btn-primary btn-sm">Build Set Config (0x02)</button>
-								<button id="occupancy-build-get" class="btn btn-outline-primary btn-sm">Build Get Config (0x01)</button>
-								<button id="occupancy-build-caps" class="btn btn-outline-primary btn-sm">Build Get Caps (0x03)</button>
-							</div>
-						</div>
-						<div class="col-12">
-							<label for="occupancy-hex-output" class="form-label">Generated HEX</label>
-							<input id="occupancy-hex-output" class="form-control" type="text" readonly>
-							<div class="form-text">Transmit on port <strong>132</strong>.</div>
-						</div>
-						<div class="col-12">
-							<label for="occupancy-hex-input" class="form-label">Decode HEX</label>
-							<input id="occupancy-hex-input" class="form-control" type="text" placeholder="e.g. 81010504... or 82010200xx">
-						</div>
-						<div class="col-12">
-							<div class="d-flex gap-2 flex-wrap">
-								<button id="occupancy-decode" class="btn btn-success btn-sm">Decode</button>
-							</div>
-						</div>
-						<div class="col-12">
-							<label for="occupancy-json-output" class="form-label">Decoded JSON</label>
-							<textarea id="occupancy-json-output" class="form-control" rows="8" readonly></textarea>
-						</div>
-					</div>
-				</div>
-				<div class="modal-footer">
-					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-				</div>
-			</div>
-		</div>
-	</div>
-
 <script>
 let currentSettings = {};
 let polygonSelector = null;
@@ -142,19 +87,12 @@ $(document).ready(function() {
 		},
 		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
 	});
-	$('#occupancyInterval').on('input', function() { $('#occupancyIntervalValue').text($(this).val()); });
 	$('#occupancyType').on('change', updateModeControls);
 	$('#aoiEnabled').on('change', function() {
 		if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked'));
 		updateModeControls();
 	});
 	$('#saveOccupancy').on('click', saveOccupancy);
-	$('#download-occupancy-ota-translator').on('click', downloadOccupancyOtaTranslator);
-	$('#open-occupancy-dialog').on('click', function() {
-		loadOccupancyTranslatorJsonFromForm(false);
-		$('#occupancy-hex-input').val('');
-		$('#occupancy-json-output').val('');
-	});
 	$('#occupancy-json-from-form').on('click', loadOccupancyTranslatorJsonFromForm);
 	$('#occupancy-build-set').on('click', buildOccupancySetFromJson);
 	$('#occupancy-build-get').on('click', function() { setOccupancyHexOutput(occupancyOtaBytesToHex([0x01])); });
@@ -191,8 +129,6 @@ function loadSettings() {
 			const occupancy = ((currentSettings.transmission || {}).occupancy || {});
 			$('#occupancyType').val(normalizeOccupancyType(occupancy.type));
 			$('input[name="occupancyLabel"][value="' + (occupancy.label === 'vehicle' ? 'vehicle' : 'human') + '"]').prop('checked', true);
-			$('#occupancyInterval').val(occupancy.intervalMinutes || 15);
-			$('#occupancyIntervalValue').text(occupancy.intervalMinutes || 15);
 			const aoi = occupancy.aoi || {};
 			$('#aoiEnabled').prop('checked', !!aoi.enabled);
 			setPolygonPoints(aoi.points || [
@@ -262,7 +198,6 @@ function saveOccupancy() {
 	transmission.occupancy = Object.assign({ port: 2, enabled: false }, existingOccupancy, {
 		type: type,
 		label: $('input[name="occupancyLabel"]:checked').val() || 'human',
-		intervalMinutes: parseInt($('#occupancyInterval').val(), 10),
 		aoi: { enabled: aoiEnabled, x1: bounds.x1, x2: bounds.x2, y1: bounds.y1, y2: bounds.y2, points: points }
 	});
 	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
@@ -273,7 +208,7 @@ function saveOccupancy() {
 
 function readOccupancyTranslatorConfig() {
 	const points = (readPolygonPoints() || []).slice(0, 10);
-	const intervalMinutes = parseInt($('#occupancyInterval').val(), 10) || 15;
+	const intervalMinutes = Number((((currentSettings.transmission || {}).occupancy || {}).intervalMinutes) || 15);
 	return {
 		enabled: true,
 		protocolVersion: 1,

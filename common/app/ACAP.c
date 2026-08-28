@@ -220,7 +220,7 @@ ACAP_ENDPOINT_settings(const ACAP_HTTP_Response response, const ACAP_HTTP_Reques
             return;
         }
 
-        LOG_TRACE("%s: %s\n", __func__, body);
+        LOG_TRACE("%s: applying settings update\n", __func__);
 
         cJSON* settings = cJSON_GetObjectItem(app, "settings");
         cJSON* param = params->child;
@@ -2150,13 +2150,14 @@ char* ACAP_VAPIX_Post(const char* endpoint, const char* request) {
     LOG_TRACE("%s: %s %s\n", __func__, endpoint, request);
 
     char* response = NULL;
-    size_t url_size = strlen("http://127.0.0.12/axis-cgi/") + strlen(endpoint) + 1;
+    const char* path_prefix = endpoint[0] == '/' ? "" : "/axis-cgi/";
+    size_t url_size = strlen("http://127.0.0.12") + strlen(path_prefix) + strlen(endpoint) + 1;
     char* url = malloc(url_size);
     if (!url) {
         LOG_WARN("%s: Memory allocation failed", __func__);
         return NULL;
     }
-    snprintf(url, url_size, "http://127.0.0.12/axis-cgi/%s", endpoint);
+    snprintf(url, url_size, "http://127.0.0.12%s%s", path_prefix, endpoint);
 
     pthread_mutex_lock(&vapix_mutex);
     curl_easy_setopt(VAPIX_CURL, CURLOPT_URL, url);

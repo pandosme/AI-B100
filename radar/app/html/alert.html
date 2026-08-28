@@ -28,12 +28,8 @@
 
 	<div class="page-content">
 		<div class="card mb-4">
-			<div class="card-header d-flex justify-content-between align-items-center">
-				<h5 class="card-title mb-0">Detection Alert</h5>
-				<div class="d-flex gap-2">
-					<button id="open-ota-dialog" class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#otaTranslatorModal">Open Encoder/Decoder</button>
-					<button id="download-ota-translator" class="btn btn-sm btn-outline-primary">Download OTA Configuration translator</button>
-				</div>
+			<div class="card-header">
+				<h5 class="card-title mb-0">Presence Alert</h5>
 			</div>
 			<div class="card-body">
 				<div class="row g-3 align-items-end">
@@ -47,14 +43,6 @@
 						</div>
 					</div>
 					<div class="col-12 col-md-3">
-						<label for="activeIntervalSeconds" class="form-label">Active publish: <strong id="activeValue">60</strong> s</label>
-						<input type="range" class="form-range" id="activeIntervalSeconds" min="60" max="300" value="60">
-					</div>
-					<div class="col-12 col-md-3">
-						<label for="heartbeatMinutes" class="form-label">Inactive heartbeat publish: <strong id="heartbeatValue">15</strong> min</label>
-						<input type="range" class="form-range" id="heartbeatMinutes" min="5" max="60" value="15">
-					</div>
-					<div class="col-12 col-md-3">
 						<label for="transitionSeconds" class="form-label">Hold time: <strong id="transitionValue">2</strong> s</label>
 						<input type="range" class="form-range" id="transitionSeconds" min="2" max="20" value="2">
 					</div>
@@ -63,6 +51,20 @@
 							<input class="form-check-input" type="checkbox" id="aoiEnabled">
 							<label class="form-check-label" for="aoiEnabled">Area of Interest</label>
 						</div>
+					</div>
+					<div class="col-12 col-md-3">
+						<div class="form-check form-switch">
+							<input class="form-check-input" type="checkbox" id="scheduleEnabled">
+							<label class="form-check-label" for="scheduleEnabled">Active-time schedule</label>
+						</div>
+					</div>
+					<div class="col-6 col-md-2">
+						<label for="scheduleStart" class="form-label">Start (24h)</label>
+						<input id="scheduleStart" class="form-control" type="text" inputmode="numeric" maxlength="5" pattern="(?:[01][0-9]|2[0-3]):[0-5][0-9]" value="18:00">
+					</div>
+					<div class="col-6 col-md-2">
+						<label for="scheduleEnd" class="form-label">End (24h)</label>
+						<input id="scheduleEnd" class="form-control" type="text" inputmode="numeric" maxlength="5" pattern="(?:[01][0-9]|2[0-3]):[0-5][0-9]" value="06:00">
 					</div>
 				</div>
 				<div class="mt-3">
@@ -79,47 +81,6 @@
 
 	</div>
 
-	<div class="modal fade" id="otaTranslatorModal" tabindex="-1" aria-labelledby="otaTranslatorModalLabel" aria-hidden="true">
-		<div class="modal-dialog modal-xl modal-dialog-scrollable">
-			<div class="modal-content">
-				<div class="modal-header">
-					<h5 class="modal-title" id="otaTranslatorModalLabel">Detection Alert OTA Encoder/Decoder</h5>
-					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-				</div>
-				<div class="modal-body">
-					<p class="text-muted mb-3">Installer/Integrator tool to build and parse Detection Alert OTA frames on port <strong>133</strong>.</p>
-					<div class="row g-3">
-						<div class="col-12 col-lg-6">
-							<label for="ota-json-input" class="form-label">JSON Input (for Set Config)</label>
-							<textarea id="ota-json-input" class="form-control ota-code" rows="14"></textarea>
-							<div class="mt-2 d-flex gap-2 flex-wrap">
-								<button id="ota-json-from-form" class="btn btn-outline-secondary btn-sm">Load JSON From Form</button>
-								<button id="ota-build-set" class="btn btn-primary btn-sm">Build Set Config (0x02)</button>
-								<button id="ota-build-get" class="btn btn-outline-primary btn-sm">Build Get Config (0x01)</button>
-								<button id="ota-build-caps" class="btn btn-outline-primary btn-sm">Build Get Caps (0x03)</button>
-							</div>
-						</div>
-						<div class="col-12 col-lg-6">
-							<label for="ota-hex-output" class="form-label">Generated Hex Payload</label>
-							<input id="ota-hex-output" class="form-control ota-code" type="text" readonly>
-							<div class="form-text">Transmit on port <strong>133</strong>.</div>
-							<label for="ota-hex-input" class="form-label mt-3">Decode Hex Payload</label>
-							<input id="ota-hex-input" class="form-control ota-code" type="text" placeholder="e.g. 810105000F003C0201F4...">
-							<div class="mt-2 d-flex gap-2 flex-wrap">
-								<button id="ota-decode" class="btn btn-success btn-sm">Decode</button>
-							</div>
-							<label for="ota-json-output" class="form-label mt-3">Decoded JSON</label>
-							<textarea id="ota-json-output" class="form-control ota-code" rows="10" readonly></textarea>
-						</div>
-					</div>
-				</div>
-				<div class="modal-footer">
-					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-				</div>
-			</div>
-		</div>
-	</div>
-
 <script>
 let currentSettings = {};
 let polygonSelector = null;
@@ -134,19 +95,10 @@ $(document).ready(function() {
 		},
 		error: function(response) { showToast('Failed to load application: ' + response.statusText, 'danger'); }
 	});
-	$('#heartbeatMinutes').on('input', function() { $('#heartbeatValue').text($(this).val()); });
-	$('#activeIntervalSeconds').on('input', function() { $('#activeValue').text($(this).val()); });
 	$('#transitionSeconds').on('input', function() { $('#transitionValue').text($(this).val()); });
 	$('#aoiEnabled').on('change', function() { if (polygonSelector) polygonSelector.setEnabled($(this).is(':checked')); });
+	$('#scheduleEnabled').on('change', updateScheduleControls);
 	$('#saveAlert').on('click', saveAlert);
-	$('#download-ota-translator').on('click', function() {
-		window.location.href = 'alert_ota_translator';
-	});
-	$('#open-ota-dialog').on('click', function() {
-		loadOtaJsonFromForm(false);
-		$('#ota-hex-input').val('');
-		$('#ota-json-output').val('');
-	});
 	$('#ota-json-from-form').on('click', loadOtaJsonFromForm);
 	$('#ota-build-set').on('click', buildOtaSetFromJson);
 	$('#ota-build-get').on('click', function() { setOtaHexOutput(alertOtaBytesToHex([0x01])); });
@@ -177,12 +129,15 @@ function loadSettings() {
 	$.ajax({ type: 'GET', url: 'settings', dataType: 'json', cache: false,
 		success: function(settings) {
 			currentSettings = settings || {};
-			const alert = ((currentSettings.transmission || {}).alert || {});
+			const transmission = currentSettings.transmission || {};
+			const alert = transmission.presence || transmission.alert || {};
 			$('input[name="alertLabel"][value="' + (alert.label === 'vehicle' ? 'vehicle' : 'human') + '"]').prop('checked', true);
-			$('#heartbeatMinutes').val(alert.heartbeatMinutes || 15); $('#heartbeatValue').text(alert.heartbeatMinutes || 15);
-			const activeInterval = Math.max(60, alert.activeIntervalSeconds || 60);
-			$('#activeIntervalSeconds').val(activeInterval); $('#activeValue').text(activeInterval);
 			$('#transitionSeconds').val(alert.transitionSeconds || 2); $('#transitionValue').text(alert.transitionSeconds || 2);
+			const schedule = alert.schedule || {};
+			$('#scheduleEnabled').prop('checked', !!schedule.enabled);
+			$('#scheduleStart').val(isValidHHMM(schedule.start) ? schedule.start : '18:00');
+			$('#scheduleEnd').val(isValidHHMM(schedule.end) ? schedule.end : '06:00');
+			updateScheduleControls();
 			const aoi = alert.aoi || {};
 			$('#aoiEnabled').prop('checked', !!aoi.enabled);
 			setPolygonPoints(aoi.points || [
@@ -194,6 +149,13 @@ function loadSettings() {
 			loadOtaJsonFromForm(false);
 		}
 	});
+}
+function isValidHHMM(value) {
+	return /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(String(value || ''));
+}
+function updateScheduleControls() {
+	const enabled = $('#scheduleEnabled').is(':checked');
+	$('#scheduleStart, #scheduleEnd').prop('disabled', !enabled);
 }
 function setPolygonPoints(points) {
 	if (!polygonSelector) initPolygonSelector();
@@ -210,31 +172,38 @@ function polygonBounds(points) {
 }
 function saveAlert() {
 	const transmission = currentSettings.transmission || {};
-	const existingAlert = transmission.alert || {};
+	const existingAlert = transmission.presence || transmission.alert || {};
+	const scheduleStart = $('#scheduleStart').val();
+	const scheduleEnd = $('#scheduleEnd').val();
+	if (!isValidHHMM(scheduleStart) || !isValidHHMM(scheduleEnd)) {
+		showToast('Schedule times must use 24-hour HH:MM format', 'warning');
+		return;
+	}
 	const points = readPolygonPoints();
 	const bounds = polygonBounds(points);
-	transmission.alert = Object.assign({ port: 3, enabled: false }, existingAlert, {
+	transmission.presence = Object.assign({ port: 3, enabled: false }, existingAlert, {
 		label: $('input[name="alertLabel"]:checked').val() || 'human',
-		heartbeatMinutes: parseInt($('#heartbeatMinutes').val(), 10),
-		activeIntervalSeconds: parseInt($('#activeIntervalSeconds').val(), 10),
 		transitionSeconds: parseInt($('#transitionSeconds').val(), 10),
+		schedule: { enabled: $('#scheduleEnabled').is(':checked'), start: scheduleStart, end: scheduleEnd },
 		aoi: { enabled: $('#aoiEnabled').is(':checked'), x1: bounds.x1, x2: bounds.x2, y1: bounds.y1, y2: bounds.y2, points: points }
 	});
+	delete transmission.alert;
 	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
-		success: function() { currentSettings.transmission = transmission; showToast('Detection Alert saved', 'success'); },
-		error: function(xhr, status, error) { showToast('Failed to save Detection Alert: ' + error, 'danger'); }
+		success: function() { currentSettings.transmission = transmission; showToast('Presence Alert saved', 'success'); },
+		error: function(xhr, status, error) { showToast('Failed to save Presence Alert: ' + error, 'danger'); }
 	});
 }
 
 function readAlertFormConfig() {
 	let points = readPolygonPoints() || [];
 	points = points.slice(0, 10);
+	const presence = ((currentSettings.transmission || {}).presence || {});
 	return {
 		protocolVersion: 1,
-		enabled: !!((currentSettings.transmission || {}).alert || {}).enabled,
+		enabled: !!presence.enabled,
 		label: $('input[name="alertLabel"]:checked').val() || 'human',
-		heartbeatMinutes: parseInt($('#heartbeatMinutes').val(), 10),
-		activeIntervalSeconds: parseInt($('#activeIntervalSeconds').val(), 10),
+		heartbeatMinutes: Number(presence.heartbeatMinutes || 15),
+		activeIntervalSeconds: Math.max(60, Number(presence.activeIntervalSeconds || 60)),
 		transitionSeconds: parseInt($('#transitionSeconds').val(), 10),
 		aoi: {
 			enabled: $('#aoiEnabled').is(':checked'),

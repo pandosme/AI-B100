@@ -7,6 +7,7 @@
 
 void Alert_Reset(void);
 void Alert_Reset_Timers(void);
+void Alert_Set_Schedule(int enabled, int start_minutes, int end_minutes);
 void Alert_Update_Current(RadarCounts current, time_t now, int transition_seconds);
 RadarCounts Alert_Current_Counts(void);
 RadarCounts Alert_Publish_Counts(int heartbeat);

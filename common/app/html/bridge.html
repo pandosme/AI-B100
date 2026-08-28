@@ -95,6 +95,24 @@
 </div>
 </div>
 <div class="form-group row align-items-center mb-2">
+<label for="b100-port" class="col-6 col-form-label">Bridge API Port</label>
+<div class="col-6">
+<input type="number" class="form-control" id="b100-port" name="b100.port" min="1" max="65535">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="api-user" class="col-6 col-form-label">Bridge API User</label>
+<div class="col-6">
+<input type="text" class="form-control" id="api-user" name="b100.apiDigestUser" autocomplete="username">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
+<label for="api-password" class="col-6 col-form-label">Bridge API Password</label>
+<div class="col-6">
+<input type="password" class="form-control" id="api-password" name="b100.apiDigestPassword" autocomplete="current-password">
+</div>
+</div>
+<div class="form-group row align-items-center mb-2">
 <label for="callback-ip" class="col-6 col-form-label">HTTP Callback Address</label>
 <div class="col-6">
 <input type="text" class="form-control" id="callback-ip" name="b100.callbackIP" placeholder="auto-detect">
@@ -127,6 +145,7 @@
 </div>
 <div class="card-footer">
 <button id="save-settings" class="btn btn-primary btn-sm">Save Settings</button>
+<button id="open-event-log" class="btn btn-outline-secondary btn-sm">Bridge Event Log</button>
 </div>
 </div>
 
@@ -508,6 +527,9 @@ else dot.addClass('lora-disconnected').attr('title', 'LoRaWAN: Disconnected');
 function loadSettings(settings) {
 window.currentSettings = settings || {};
 $('#b100-ip').val(settings.b100?.ip || '');
+$('#b100-port').val(settings.b100?.port || 80);
+$('#api-user').val(settings.b100?.apiDigestUser || '');
+$('#api-password').val(settings.b100?.apiDigestPassword || '');
 $('#callback-ip').val(settings.b100?.callbackIP || '');
 $('#callback-port').val(settings.b100?.callbackPort || 80);
 $('#callback-user').val(settings.b100?.callbackDigestUser || 'aib100');
@@ -525,6 +547,9 @@ contentType: 'application/json',
 data: JSON.stringify({
 b100: Object.assign({}, currentB100, {
 ip: $('#b100-ip').val(),
+port: parseInt($('#b100-port').val()) || 80,
+apiDigestUser: $('#api-user').val(),
+apiDigestPassword: $('#api-password').val(),
 callbackIP: $('#callback-ip').val(),
 callbackPort: parseInt($('#callback-port').val()) || 80,
 callbackDigestUser: $('#callback-user').val(),
@@ -538,6 +563,15 @@ configureCallbacksNow();
 },
 error: function(xhr, status, error) { showToast("Failed to save settings: " + error, 'danger'); }
 });
+});
+
+$('#open-event-log').on('click', function() {
+const bridgeIP = $('#b100-ip').val();
+if (!bridgeIP) {
+showToast('Set the bridge IP address first', 'warning');
+return;
+}
+window.open('http://' + bridgeIP + '/eventlog.html', '_blank', 'noopener');
 });
 
 function configureCallbacksNow(showNotifications) {
