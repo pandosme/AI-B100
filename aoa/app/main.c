@@ -2244,10 +2244,10 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		" * Quick use:\n"
 		" *   1) Set payloadPort to the LoRaWAN fPort (1, 2, or 3).\n"
 		" *   2) Set payloadInput to an even-length hexadecimal string, for example '0001'.\n"
-		" *   3) Call decodeByPort(payloadPort, payloadInput).\n"
+		" *   3) Call Decode(payloadPort, payloadInput).\n"
 		" *\n"
 		" * Node-RED after converting the LoRaWAN data to a hex string:\n"
-		" *   msg.payload = JavaScriptTranslator(msg.topic, msg.payload);\n"
+		" *   msg.payload = Decode(msg.topic, msg.payload);\n"
 		" *   return msg;\n"
 		" *\n"
 		" * Counting, Occupancy, and Presence Alert ports are fixed protocol ports. Download a new decoder after changing labels, scenes, or value types.\n"
@@ -2404,10 +2404,18 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 			"  return result;\n"
 			"}\n\n");
 
-	g_string_append(js_builder, "function decodeByPort(port, hexPayload) {\n");
-	g_string_append(js_builder, "  port = Number(port);\n");
-	g_string_append(js_builder, "  var bytes = hexToBytes(hexPayload);\n");
+	g_string_append(js_builder,
+		"function decodeArguments(first, second) {\n"
+		"  if (typeof first === 'string') return { hex: first, port: second };\n"
+		"  if (typeof second === 'string') return { hex: second, port: first };\n"
+		"  return null;\n"
+		"}\n\n");
+	g_string_append(js_builder, "function Decode(port, hexPayload) {\n");
+	g_string_append(js_builder, "  var args = decodeArguments(port, hexPayload);\n");
+	g_string_append(js_builder, "  if (!args) return { error: 'Payload must be an even-length hexadecimal string' };\n");
+	g_string_append(js_builder, "  var bytes = hexToBytes(args.hex);\n");
 	g_string_append(js_builder, "  if (!bytes) return { error: 'Payload must be an even-length hexadecimal string' };\n");
+	g_string_append(js_builder, "  port = Number(args.port);\n");
 	g_string_append(js_builder, "  if (port === countingPort) return decodeCounting(bytes);\n");
 	g_string_append(js_builder, "  if (port === occupancyPort) return decodeOccupancy(bytes);\n");
 	g_string_append(js_builder, "  if (port === presencePort) return decodePresence(bytes);\n");
@@ -2416,19 +2424,10 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"}\n");
 	g_string_append(js_builder,
 		"\n"
-		"function JavaScriptTranslator(port, hexPayload) {\n"
-		"  return decodeByPort(port, hexPayload);\n"
-		"}\n\n"
-		"function Decode(fPort, payload) {\n"
-		"  return decodeByPort(fPort, payload);\n"
-		"}\n\n"
-		"function Decoder(hexPayload, port) {\n"
-		"  return decodeByPort(port, hexPayload);\n"
-		"}\n\n"
-		"// Fill these before calling decodeByPort(...)\n"
+		"// Fill these before calling Decode(...)\n"
 		"var port = null; //Number\n"
 		"var message = null; //Hex-encoded string\n"
-		"var decodedMessage = decodeByPort(port, message);\n");
+		"var decodedMessage = Decode(port, message);\n");
 	free(js_counter_defs);
 	free(js_occupancy_defs);
 	free(js_presence_defs);

@@ -34,7 +34,7 @@ The recommended field setup is:
 | Callback digest user | `lorabridge` |
 | Callback digest password | `lorabridge` |
 | Callback port | `80` |
-| LoRaWAN uplink ports | Counting `1`, Occupancy `2`, Alert `3` |
+| LoRaWAN uplink ports | Counting `1`, Occupancy `2`, Alert `3`, Speed `4` |
 | Publish interval | `15` minutes |
 
 The ACAP uses the camera address as the HTTP callback target for the bridge. The camera itself must still be configured with the static or fallback IP address described in [../DEPLOYMENT.md](../DEPLOYMENT.md).
@@ -61,6 +61,7 @@ Open the app from the Axis camera Apps page. The main pages are:
 | Counting | Configure named two-point lines, direction, Human/Vehicle classes, and view cumulative totals on fixed uplink port 1 |
 | Occupancy | Select Human or Vehicle detection, publish frequency, and optional area of interest for fixed uplink port 2 |
 | Detection Alert | Select Human or Vehicle detection, inactive heartbeat publish, active publish, hold time, and optional area of interest for fixed uplink port 3 |
+| Speed | Select km/h or mph output, the speed limit, and the optional area of interest for fixed uplink port 4, and view the last published summary |
 | Radar | View the live stream and set Radar Detection Sensitivity |
 | LoRA Bridge | Configure bridge IP, callback address, callback credentials, join/restart/link-check, and bridge parameters |
 | LoRA Downlink | View received downlinks and enable/disable supported command bytes |
@@ -102,13 +103,21 @@ Detection Alert uses fixed uplink port `3`. It can detect Humans or Vehicles and
 
 When inactive, Detection Alert publishes payload `0x00` on the inactive heartbeat publish timer. When detections become active, it publishes immediately. While active, it publishes one byte containing the maximum number of selected Human or Vehicle detections seen since the previous active publish.
 
+### Speed
+
+Speed uses fixed uplink port `4` and publishes a five-byte vehicle speed summary covering the period since the previous Speed uplink, at a publish frequency of 1 to 60 minutes.
+
+A vehicle is measured only when its track is lost, and its contribution is the maximum speed it reached inside the area of interest. Humans are ignored. A track is also discarded when it produced no measuring point inside the area of interest, when its maximum speed stayed below 10 km/h, or when its straight-line displacement from birth to loss was under 250 units of the 0-1000 coordinate space.
+
+Maximum, average, and minimum are all taken over those per-vehicle maximum speeds, so the average is the average maximum speed. Values are rounded whole numbers in the configured output unit, km/h or mph. A vehicle counts as speeding when its maximum speed exceeds the configured limit. An interval with no qualifying vehicles still publishes, as five zero bytes.
+
 ## Radar Filtering
 
 The Radar page shows the live stream and reads/sets the camera Radar Detection Sensitivity directly through `/axis-cgi/radar/radaranalytics.cgi` using `low`, `medium`, or `high`. Occupancy counts valid radar objects internally. Detection Alert applies its selected label and optional area of interest before entering active state.
 
 ## LoRaWAN Uplink Payload
 
-Each use case has a fixed LoRaWAN port, so compact payloads do not include a mode byte. Counting publishes on port `1`, Occupancy on port `2`, and Detection Alert on port `3`. Occupancy and Alert values are unsigned 8-bit. Counting values are cumulative unsigned 16-bit big-endian values and wrap modulo 65536 on the wire while full totals remain persisted.
+Each use case has a fixed LoRaWAN port, so compact payloads do not include a mode byte. Counting publishes on port `1`, Occupancy on port `2`, Detection Alert on port `3`, and Speed on port `4`. Occupancy, Alert, and all Speed values are unsigned 8-bit. Counting values are cumulative unsigned 16-bit big-endian values and wrap modulo 65536 on the wire while full totals remain persisted.
 
 | Port | Use case | Payload |
 |------|----------|---------|
@@ -116,6 +125,7 @@ Each use case has a fixed LoRaWAN port, so compact payloads do not include a mod
 | `2` | Occupancy Interval Maximum | 1 byte: `[selected_label_interval_max]` |
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
 | `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
+| `4` | Speed | 5 bytes: `[vehicles, speeding, maximum, average, minimum]`, speeds in the configured unit |
 
 The decoder is available in two places:
 

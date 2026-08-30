@@ -45,6 +45,64 @@
 		.ota-help code {
 			font-size: 0.8rem;
 		}
+		.ota-legend {
+			font-size: 0.8rem;
+		}
+		.ota-legend .badge,
+		.ota-port,
+		.ota-cmd .badge {
+			font-family: 'Courier New', monospace;
+		}
+		.ota-accordion .accordion-button {
+			padding: 0.5rem 0.75rem;
+			font-size: 0.88rem;
+			font-weight: 600;
+		}
+		.ota-accordion .accordion-button:not(.collapsed) {
+			background-color: #f1f5f9;
+			color: inherit;
+			box-shadow: none;
+		}
+		.ota-accordion .accordion-button:focus {
+			box-shadow: none;
+		}
+		.ota-accordion .accordion-body {
+			padding: 0.65rem 0.75rem 0.85rem;
+		}
+		.ota-port {
+			margin-right: 0.5rem;
+		}
+		.ota-purpose {
+			font-size: 0.84rem;
+			line-height: 1.45;
+			margin-bottom: 0.6rem;
+		}
+		.ota-cmd-list {
+			list-style: none;
+			margin: 0;
+			padding: 0;
+		}
+		.ota-cmd {
+			display: flex;
+			gap: 0.5rem;
+			padding: 0.4rem 0;
+			border-top: 1px solid #e9ecef;
+		}
+		.ota-cmd:first-child {
+			border-top: 0;
+		}
+		.ota-cmd .badge {
+			height: fit-content;
+		}
+		.ota-cmd-name {
+			font-size: 0.83rem;
+			font-weight: 600;
+		}
+		.ota-cmd-desc {
+			font-size: 0.78rem;
+			color: #6c757d;
+			line-height: 1.4;
+		}
 	</style>
 </head>
 <body>
@@ -70,9 +128,7 @@
 									<tr>
 										<th>Time</th>
 										<th>Port</th>
-										<th>Len</th>
 										<th>Payload (hex)</th>
-										<th>ASCII</th>
 										<th>RSSI</th>
 										<th>SNR</th>
 										<th>fcntDown</th>
@@ -101,24 +157,34 @@
 					</div>
 					<div class="card-body">
 						<div class="ota-help mb-3">
-							Use OTA downlinks to read capabilities, fetch current configuration, and update service parameters or scene geometry.
-							Download the JavaScript tools to generate valid frames and decode uplink/downlink payloads in Node-RED or custom tooling.
+							OTA downlinks let you read and change this device's settings from your LoRaWAN network
+							server — no local network access needed. Each service listens on its own <strong>port</strong>,
+							and the first byte of the payload is the <strong>command</strong>.
+							The <em>OTA Encoder</em> and <em>OTA Decoder</em> buttons above give you JavaScript that builds
+							valid frames and decodes replies in Node-RED or your own tooling.
 						</div>
+
+						<div class="ota-legend mb-3">
+							<div class="fw-semibold mb-1">The same command bytes work on every service</div>
+							<div class="d-flex flex-wrap gap-2">
+								<span><span class="badge bg-secondary">0x01</span> Get</span>
+								<span><span class="badge bg-secondary">0x02</span> Set / Execute</span>
+								<span><span class="badge bg-secondary">0x03</span> Capabilities</span>
+								<span><span class="badge bg-secondary">0x04</span> List</span>
+							</div>
+						</div>
+
 						<div class="alert alert-light border mb-3 py-2 px-3 ota-help">
-							<div><strong>Common flow:</strong> <code>Capabilities (0x03)</code> → <code>List (0x04)</code> → <code>Get (0x01)</code> → <code>Set (0x02)</code>.</div>
-							<div>Scene services (ports 131-133) require existing scene identities and page-aware geometry handling.</div>
+							<div class="fw-semibold mb-1">Where to start</div>
+							Send <code>Capabilities (0x03)</code> first to learn what a service accepts. For scenes and
+							alerts, <code>List (0x04)</code> gives you the identities to work with. Always
+							<code>Get (0x01)</code> before you <code>Set (0x02)</code> — the write has to carry the
+							fingerprint the read returned. Scene services edit scenes that already exist on the camera;
+							they cannot create new ones.
 						</div>
-						<table class="table table-sm table-hover mb-0" style="font-size:0.82rem;">
-							<thead class="table-light">
-								<tr>
-									<th style="width:46px">Byte</th>
-									<th>Command</th>
-									<th>Description</th>
-								</tr>
-							</thead>
-							<tbody id="command-table-body">
-							</tbody>
-						</table>
+
+						<div class="fw-semibold mb-2" style="font-size:0.86rem">Services</div>
+						<div class="accordion accordion-flush ota-accordion" id="ota-services"></div>
 					</div>
 				</div>
 		</div>
@@ -159,7 +225,7 @@ const DEFAULT_COMMANDS = [
 	{ port: 131, byte: '0x01', message: 'Get Counting Scene', action: 'Read one page of an existing Counting scene configuration.' },
 	{ port: 131, byte: '0x02', message: 'Set Counting Scene', action: 'Update an existing Counting scene using the current scene fingerprint.' },
 	{ port: 131, byte: '0x03', message: 'Counting Capabilities', action: 'Read Counting OTA limits such as max points and bytes per page.' },
-	{ port: 131, byte: '0x04', message: 'List Counting Scenes', action: 'Read stable scene identities before get/set operations.' },
+	{ port: 131, byte: '0x04', message: 'List Counting', action: 'Read stable scene identities before get/set operations.' },
 	{ port: 132, byte: '0x01', message: 'Get Occupancy Scene', action: 'Read one page of an existing Occupancy scene configuration.' },
 	{ port: 132, byte: '0x02', message: 'Set Occupancy Scene', action: 'Update an existing Occupancy scene using current fingerprints.' },
 	{ port: 132, byte: '0x03', message: 'Occupancy Capabilities', action: 'Read Occupancy OTA limits such as max points and bytes per page.' },
@@ -170,9 +236,72 @@ const DEFAULT_COMMANDS = [
 	{ port: 133, byte: '0x04', message: 'List Presence Alerts', action: 'Read stable alert identities before get/set operations.' }
 ];
 
+// Integrator-facing overview of each OTA service port
+const OTA_SERVICES = [
+	{
+		port: 100,
+		name: 'Actions',
+		access: 'Action',
+		accessClass: 'bg-warning text-dark',
+		purpose: 'One-off operations on the bridge, such as restarting it or clearing all stored data. ' +
+		         'Nothing is stored — the device acts and replies on port 100. Read Capabilities first to see ' +
+		         'which action codes this firmware accepts.'
+	},
+	{
+		port: 110,
+		name: 'AI-B100 Configuration',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The LoRaWAN radio settings the bridge transmits with: Data Rate and ADR. ' +
+		         'Capabilities returns the valid range for each value before you write it.'
+	},
+	{
+		port: 120,
+		name: 'Information',
+		access: 'Read-only',
+		accessClass: 'bg-info text-dark',
+		purpose: 'Identity and status values from the camera and bridge. Nothing here can be written. ' +
+		         'Ask Capabilities which item types exist, then read them back one page at a time.'
+	},
+	{
+		port: 130,
+		name: 'Use-Case Transmission',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'Which use cases publish over LoRa, and how often each one transmits. ' +
+		         'Publish state and interval are set per use case.'
+	},
+	{
+		port: 131,
+		name: 'Counting',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The geometry of Counting scenes already configured on the camera. List for stable scene ' +
+		         'identities, Get a page, then Set it back with the fingerprint you received. Large scenes ' +
+		         'span several pages.'
+	},
+	{
+		port: 132,
+		name: 'Occupancy Scenes',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The geometry of Occupancy scenes already configured on the camera. Same paged flow as ' +
+		         'Counting: List, Get, then Set with the current fingerprint.'
+	},
+	{
+		port: 133,
+		name: 'Presence Alerts',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'Presence Alert zones already configured on the camera, including their schedule. ' +
+		         'List for alert identities, then read and write pages the same way as the scene services.'
+	}
+];
+
 $(document).ready(function() {
-	let lastRenderedFcnt = -1;
-	let clearedAtFcnt = -2;
+	let lastRenderedKey = '';
+	let lastEntries = [];
+	let clearedKeys = [];
 	const commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
 	const translatorModal = new bootstrap.Modal(document.getElementById('translatorModal'));
 
@@ -190,7 +319,7 @@ $(document).ready(function() {
 			$('#app-name').text(data.manifest.acapPackageConf.setup.friendlyName);
 		}
 	});
-	renderCommandTable();
+	renderOtaServices();
 	const RSSI_LEVELS = [
 		{ min: -70,  label: 'Excellent', cls: 'sig-good' },
 		{ min: -85,  label: 'Good',      cls: 'sig-ok'   },
@@ -220,46 +349,43 @@ $(document).ready(function() {
 		return str; // pass through non-hex as-is
 	}
 
-	// Try to render an ASCII view from a HEX payload string
-	function hexToAsciiSafe(hexStr) {
-		const clean = hexStr.replace(/\s/g, '');
-		if (!/^[0-9A-Fa-f]+$/.test(clean) || clean.length % 2 !== 0) return '';
-		let out = '';
-		for (let i = 0; i < clean.length; i += 2) {
-			const code = parseInt(clean.substr(i, 2), 16);
-			out += (code >= 32 && code < 127) ? String.fromCharCode(code) : '.';
-		}
-		return out;
+	function renderOtaServices() {
+		const container = $('#ota-services');
+		container.empty();
+		OTA_SERVICES.forEach(function(svc) {
+			const cmds = commands.filter(function(c) { return c.port === svc.port; });
+			const items = cmds.map(function(c) {
+				return `<li class="ota-cmd">
+						<span class="badge bg-secondary">${c.byte}</span>
+						<div>
+							<div class="ota-cmd-name">${c.message}</div>
+							<div class="ota-cmd-desc">${c.action}</div>
+						</div>
+					</li>`;
+			}).join('');
+			const id = 'ota-svc-' + svc.port;
+			container.append(`
+				<div class="accordion-item">
+					<h2 class="accordion-header">
+						<button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+								data-bs-target="#${id}" aria-expanded="false" aria-controls="${id}">
+							<span class="badge bg-primary ota-port">${svc.port}</span>
+							<span>${svc.name}</span>
+						</button>
+					</h2>
+					<div id="${id}" class="accordion-collapse collapse" data-bs-parent="#ota-services">
+						<div class="accordion-body">
+							<div class="mb-2"><span class="badge ${svc.accessClass}">${svc.access}</span></div>
+							<p class="ota-purpose">${svc.purpose}</p>
+							<ul class="ota-cmd-list">${items}</ul>
+						</div>
+					</div>
+				</div>`);
+		});
 	}
 
-	const PORT_GROUPS = {
-		100: 'Port 100 — Actions',
-		110: 'Port 110 — AI-B100 Configuration',
-		120: 'Port 120 — Information',
-		130: 'Port 130 — Use-Case Transmission',
-		131: 'Port 131 — Counting OTA',
-		132: 'Port 132 — Occupancy OTA',
-		133: 'Port 133 — Presence Alert OTA'
-	};
-
-	function renderCommandTable() {
-		const tbody = $('#command-table-body');
-		tbody.empty();
-		let lastPort = null;
-		commands.forEach(function(cmd) {
-			if (cmd.port !== lastPort) {
-				lastPort = cmd.port;
-				const label = PORT_GROUPS[cmd.port] || ('Port ' + cmd.port);
-				tbody.append(`<tr class="table-secondary"><td colspan="3"><strong>${label}</strong></td></tr>`);
-			}
-			tbody.append(`
-				<tr>
-					<td><span class="badge bg-secondary">${cmd.byte}</span></td>
-					<td><strong>${cmd.message}</strong></td>
-					<td><small>${cmd.action}</small></td>
-				</tr>
-			`);
-		});
+	function entryKey(entry) {
+		return [entry.time, entry.port, entry.length, entry.payload, entry.fcntDown].join('|');
 	}
 
 	function pollDownlinks() {
@@ -272,12 +398,12 @@ $(document).ready(function() {
 				updateNavDot(data);
 				const lw = data.lorawan;
 				if (!lw) return;
-				const entries = lw.downlinks;
-				if (!Array.isArray(entries) || entries.length === 0) return;
-				const newestFcnt = entries[entries.length - 1].fcntDown;
-				if (newestFcnt === lastRenderedFcnt) return;
-				lastRenderedFcnt = newestFcnt;
-				const display = entries.filter(function(e) { return e.fcntDown > clearedAtFcnt; });
+				const entries = Array.isArray(lw.downlinks) ? lw.downlinks : [];
+				const key = JSON.stringify(entries);
+				if (key === lastRenderedKey) return;
+				lastRenderedKey = key;
+				lastEntries = entries;
+				const display = entries.filter(function(entry) { return clearedKeys.indexOf(entryKey(entry)) === -1; });
 				renderDownlinkTable(display);
 			}
 		});
@@ -289,21 +415,18 @@ $(document).ready(function() {
 			? parts[1] + '<br><small class="text-muted">' + parts[0] + '</small>'
 			: (msg.time || '—');
 		const port      = msg.port != null ? msg.port : '—';
-		const len       = msg.length != null ? msg.length : '—';
 		const ptype     = (msg.payload_type || 'HEX').toUpperCase();
 		const rawPayload= msg.payload || '';
 
-		let hexCell, asciiCell;
+		let hexCell;
 		if (ptype === 'HEX') {
-			hexCell   = `<code>${formatHex(rawPayload)}</code>`;
-			asciiCell = `<small class="text-muted">${hexToAsciiSafe(rawPayload)}</small>`;
+			hexCell = `<code>${formatHex(rawPayload)}</code>`;
 		} else {
 			// ASCII payload — convert chars to hex for the hex column
 			let hexStr = '';
 			for (let i = 0; i < rawPayload.length; i++)
 				hexStr += ('0' + rawPayload.charCodeAt(i).toString(16)).slice(-2);
-			hexCell   = `<code>${formatHex(hexStr)}</code>`;
-			asciiCell = `<small class="text-muted">${$('<div>').text(rawPayload).html()}</small>`;
+			hexCell = `<code>${formatHex(hexStr)}</code>`;
 		}
 
 		const rssi = msg.rssi != null ? msg.rssi : null;
@@ -314,9 +437,7 @@ $(document).ready(function() {
 		return `<tr>
 			<td style="white-space:nowrap">${timeStr}</td>
 			<td><span class="badge bg-secondary">${port}</span></td>
-			<td>${len}</td>
 			<td class="payload-cell">${hexCell}</td>
-			<td class="payload-cell">${asciiCell}</td>
 			<td>${rssiCell}</td>
 			<td>${snrCell}</td>
 			<td>${msg.fcntDown != null ? msg.fcntDown : '—'}</td>
@@ -342,7 +463,7 @@ $(document).ready(function() {
 
 	$('#clear-log').on('click', function() {
 		if (confirm('Clear all downlink messages?')) {
-			clearedAtFcnt = lastRenderedFcnt;
+			clearedKeys = lastEntries.map(entryKey);
 			$('#downlink-tbody').empty();
 			$('#no-messages').show();
 			$('#message-count').text('0');

@@ -105,8 +105,7 @@
 							</div>
 						</div>
 						<div class="mt-3 d-flex flex-wrap gap-2">
-							<button id="saveCountingSettings" class="btn btn-primary">Save Settings</button>
-							<button id="publishCountingNow" class="btn btn-success">Publish Now</button>
+							<button id="publishCountingNow" class="btn btn-success">Force Publish</button>
 						</div>
 						<div class="text-muted mt-2">Counting uses fixed uplink port 1. Uplinks are sent unconfirmed; every 10th message is confirmed for link health.</div>
 					</div>
@@ -140,8 +139,7 @@
 							</div>
 						</div>
 						<div class="mt-3 d-flex flex-wrap gap-2">
-							<button id="saveOccupancySettings" class="btn btn-primary">Save Settings</button>
-							<button id="publishOccupancyNow" class="btn btn-success">Publish Now</button>
+							<button id="publishOccupancyNow" class="btn btn-success">Force Publish</button>
 						</div>
 						<div class="text-muted mt-2">Occupancy uses fixed uplink port 2. Uplinks are sent unconfirmed; every 10th message is confirmed for link health.</div>
 					</div>
@@ -167,8 +165,7 @@
 							<div class="form-control bg-light">State changes only</div>
 						</div>
 						<div class="mt-3 d-flex flex-wrap gap-2">
-							<button id="savePresenceSettings" class="btn btn-primary">Save Settings</button>
-							<button id="publishPresenceNow" class="btn btn-success">Publish Now</button>
+							<button id="publishPresenceNow" class="btn btn-success">Force Publish</button>
 						</div>
 						<div class="text-muted mt-2">This switch controls retained threshold-state publishing on fixed uplink port 3.</div>
 					</div>
@@ -229,6 +226,7 @@
 let timerInterval = null;
 let currentSettings = {};
 let translatorModal = null;
+let settingsLoaded = false;
 const COUNTING_PORT = 1;
 const OCCUPANCY_PORT = 2;
 const PRESENCE_PORT = 3;
@@ -258,7 +256,8 @@ $(document).ready(function() {
 	$('#occupancyInterval').on('input', function() {
 		$('#occupancyIntervalValue').text($(this).val());
 	});
-	$('#saveCountingSettings, #saveOccupancySettings, #savePresenceSettings').on('click', saveSettings);
+	$('#countingInterval, #occupancyInterval').on('change', saveSettings);
+	$('#countingEnabled, #occupancyEnabled, #presenceEnabled').on('change', saveSettings);
 	$('#publishCountingNow').on('click', function() { publishNow('counting', this); });
 	$('#publishOccupancyNow').on('click', function() { publishNow('occupancy', this); });
 	$('#publishPresenceNow').on('click', function() { publishNow('presence', this); });
@@ -312,6 +311,7 @@ function loadSettings() {
 
 			$('#presenceEnabled').prop('checked', presence.enabled === true);
 			$('#presencePortDisplay').text(PRESENCE_PORT);
+			settingsLoaded = true;
 		},
 		error: function(xhr, status, error) {
 			console.error('Failed to load settings:', error);
@@ -320,6 +320,7 @@ function loadSettings() {
 }
 
 function saveSettings() {
+	if (!settingsLoaded) return;
 	const transmission = currentSettings.transmission || {};
 	const counting = transmission.counting || {};
 	const occupancy = transmission.occupancy || {};

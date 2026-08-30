@@ -6,6 +6,7 @@
 #include "alert.h"
 #include "counting.h"
 #include "occupancy.h"
+#include "speed.h"
 
 static void test_counting_transition_balance(void) {
 	Counting_Reset();
@@ -123,10 +124,59 @@ static void test_presence_schedule(void) {
 	assert(!Alert_Active());
 }
 
+static void test_speed_summary_and_payload(void) {
+	uint8_t payload[SPEED_PAYLOAD_SIZE];
+
+	Speed_Reset();
+	Speed_Set_Limit(50.0);
+	assert(Speed_Build_Payload(payload, sizeof(payload), 0) == SPEED_PAYLOAD_SIZE);
+	assert(payload[0] == 0 && payload[1] == 0 && payload[2] == 0 && payload[3] == 0 && payload[4] == 0);
+
+	Speed_Record_Vehicle(40.0);
+	Speed_Record_Vehicle(60.0);
+	Speed_Record_Vehicle(50.0);
+	SpeedSummary summary = Speed_Get_Summary();
+	assert(summary.vehicles == 3);
+	assert(summary.speeding == 1);
+	assert(summary.maximum == 60.0);
+	assert(summary.minimum == 40.0);
+	assert(summary.average == 50.0);
+
+	assert(Speed_Build_Payload(payload, sizeof(payload), 0) == SPEED_PAYLOAD_SIZE);
+	assert(payload[0] == 3);
+	assert(payload[1] == 1);
+	assert(payload[2] == 60);
+	assert(payload[3] == 50);
+	assert(payload[4] == 40);
+
+	assert(Speed_Build_Payload(payload, sizeof(payload), 1) == SPEED_PAYLOAD_SIZE);
+	assert(payload[2] == 37);
+	assert(payload[3] == 31);
+	assert(payload[4] == 25);
+
+	Speed_Reset_Interval();
+	summary = Speed_Get_Summary();
+	assert(summary.vehicles == 0 && summary.maximum == 0.0 && summary.minimum == 0.0);
+}
+
+static void test_speed_clamping(void) {
+	uint8_t payload[SPEED_PAYLOAD_SIZE];
+	Speed_Reset();
+	Speed_Set_Limit(50.0);
+	Speed_Record_Vehicle(50.0);
+	assert(Speed_Get_Summary().speeding == 0);
+	Speed_Record_Vehicle(400.0);
+	assert(Speed_Build_Payload(payload, sizeof(payload), 0) == SPEED_PAYLOAD_SIZE);
+	assert(payload[2] == 255);
+	assert(Speed_Build_Payload(payload, 2, 0) == 0);
+}
+
 int main(void) {
 	test_counting_transition_balance();
 	test_completed_track_line_counting();
 	test_occupancy_peak();
 	test_presence_schedule();
+	test_speed_summary_and_payload();
+	test_speed_clamping();
 	return 0;
 }

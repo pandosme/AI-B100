@@ -23,6 +23,7 @@
 #include "occupancy.h"
 #include "ota_counting.h"
 #include "ota_protocol.h"
+#include "speed.h"
 
 #define APP_PACKAGE	"aib100"
 #define B100_STATUS_CALLBACK_NODE "b100_status"
@@ -39,6 +40,7 @@
 #define LORA_PORT_COUNTING 1
 #define LORA_PORT_OCCUPANCY 2
 #define LORA_PORT_ALERT 3
+#define LORA_PORT_SPEED 4
 #define LORA_PORT_DOWNLINK_CONTROL 100
 #define LORA_PORT_DOWNLINK_CONFIG 110
 #define LORA_PORT_RADAR_CONFIG 111
@@ -49,6 +51,8 @@
 #define LORA_PORT_COUNTING_OTA_CONFIG 131
 #define LORA_PORT_OCCUPANCY_OTA_CONFIG 132
 #define LORA_PORT_ALERT_OTA_CONFIG 133
+#define LORA_PORT_SPEED_OTA_CONFIG 134
+#define SPEED_OTA_MAX_POINTS 8
 
 #define RADAR_OTA_FIELD_DETECTION_SENSITIVITY 0x0001
 #define OTA_RESPONSE_QUEUE_MAX 32
@@ -138,6 +142,14 @@ static int g_alert_active_interval_seconds = 60;
 static int g_alert_transition_seconds = 2;
 static int g_alert_label_bucket = 1;
 static time_t g_alert_last_publish_time = 0;
+static int g_speed_publish_enabled = 0;
+static int g_speed_interval_minutes = 15;
+static int g_speed_unit_mph = 0;
+static int g_speed_limit = 50;
+static time_t g_speed_next_publish_time = 0;
+static time_t g_speed_last_publish_time = 0;
+static uint8_t g_speed_last_payload[SPEED_PAYLOAD_SIZE] = {0};
+static int g_speed_has_last_payload = 0;
 static pthread_mutex_t g_publish_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Radar occupancy settings and runtime state
@@ -156,6 +168,8 @@ typedef struct {
 	int inside_area;
 	int occupancy_counted_inside;
 	int occupancy_counted_bucket;
+	int speed_area_samples;
+	double speed_max_in_area;
 } RadarObjectState;
 
 static RadarObjectState g_radar_objects[RADAR_MAX_OBJECTS];
@@ -194,6 +208,15 @@ static int g_alert_aoi_y2 = 1000;
 static double g_alert_area_x[RADAR_MAX_POLYGON_POINTS] = {0, 1000, 1000, 0};
 static double g_alert_area_y[RADAR_MAX_POLYGON_POINTS] = {0, 0, 1000, 1000};
 static int g_alert_area_point_count = 4;
+
+static int g_speed_aoi_enabled = 0;
+static int g_speed_aoi_x1 = 0;
+static int g_speed_aoi_x2 = 1000;
+static int g_speed_aoi_y1 = 0;
+static int g_speed_aoi_y2 = 1000;
+static double g_speed_area_x[RADAR_MAX_POLYGON_POINTS] = {0, 1000, 1000, 0};
+static double g_speed_area_y[RADAR_MAX_POLYGON_POINTS] = {0, 0, 1000, 1000};
+static int g_speed_area_point_count = 4;
 
 // Settings cache
 static char g_b100_ip[64] = "192.168.1.250";
@@ -434,6 +457,61 @@ Alert_Load_Area_Points(cJSON* points) {
 	g_alert_aoi_y2 = (int)max_y;
 }
 
+static void
+Speed_Set_Rectangle_Area_Points(void) {
+	g_speed_area_point_count = 4;
+	g_speed_area_x[0] = g_speed_aoi_x1;
+	g_speed_area_y[0] = g_speed_aoi_y1;
+	g_speed_area_x[1] = g_speed_aoi_x2;
+	g_speed_area_y[1] = g_speed_aoi_y1;
+	g_speed_area_x[2] = g_speed_aoi_x2;
+	g_speed_area_y[2] = g_speed_aoi_y2;
+	g_speed_area_x[3] = g_speed_aoi_x1;
+	g_speed_area_y[3] = g_speed_aoi_y2;
+}
+
+static void
+Speed_Load_Area_Points(cJSON* points) {
+	if (!points || !cJSON_IsArray(points) || cJSON_GetArraySize(points) < 3) {
+		Speed_Set_Rectangle_Area_Points();
+		return;
+	}
+
+	int count = 0;
+	double min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+	cJSON* point = NULL;
+	cJSON_ArrayForEach(point, points) {
+		if (count >= RADAR_MAX_POLYGON_POINTS)
+			break;
+
+		cJSON* x_json = cJSON_GetObjectItem(point, "x");
+		cJSON* y_json = cJSON_GetObjectItem(point, "y");
+		if (!x_json || !y_json)
+			continue;
+
+		double x = Clamp_Int(x_json->valueint, 0, 1000);
+		double y = Clamp_Int(y_json->valueint, 0, 1000);
+		g_speed_area_x[count] = x;
+		g_speed_area_y[count] = y;
+		if (x < min_x) min_x = x;
+		if (x > max_x) max_x = x;
+		if (y < min_y) min_y = y;
+		if (y > max_y) max_y = y;
+		count++;
+	}
+
+	if (count < 3) {
+		Speed_Set_Rectangle_Area_Points();
+		return;
+	}
+
+	g_speed_area_point_count = count;
+	g_speed_aoi_x1 = (int)min_x;
+	g_speed_aoi_x2 = (int)max_x;
+	g_speed_aoi_y1 = (int)min_y;
+	g_speed_aoi_y2 = (int)max_y;
+}
+
 static int
 Radar_Point_In_Area(double x, double y) {
 	if (!g_radar_aoi_enabled)
@@ -484,6 +562,25 @@ Alert_Point_In_Area(double x, double y) {
 	for (int i = 0, j = g_alert_area_point_count - 1; i < g_alert_area_point_count; j = i++) {
 		double xi = g_alert_area_x[i], yi = g_alert_area_y[i];
 		double xj = g_alert_area_x[j], yj = g_alert_area_y[j];
+		if (((yi > y) != (yj > y)) &&
+		    (x < (xj - xi) * (y - yi) / ((yj - yi) == 0 ? 0.000001 : (yj - yi)) + xi))
+			inside = !inside;
+	}
+	return inside;
+}
+
+static int
+Speed_Point_In_Area(double x, double y) {
+	if (!g_speed_aoi_enabled)
+		return 1;
+
+	if (g_speed_area_point_count < 3)
+		return (x >= g_speed_aoi_x1 && x <= g_speed_aoi_x2 && y >= g_speed_aoi_y1 && y <= g_speed_aoi_y2);
+
+	int inside = 0;
+	for (int i = 0, j = g_speed_area_point_count - 1; i < g_speed_area_point_count; j = i++) {
+		double xi = g_speed_area_x[i], yi = g_speed_area_y[i];
+		double xj = g_speed_area_x[j], yj = g_speed_area_y[j];
 		if (((yi > y) != (yj > y)) &&
 		    (x < (xj - xi) * (y - yi) / ((yj - yi) == 0 ? 0.000001 : (yj - yi)) + xi))
 			inside = !inside;
@@ -1603,6 +1700,162 @@ Apply_Alert_Framed_Body(const uint8_t* body, size_t body_length) {
 		? OTA_STATUS_OK : OTA_STATUS_APPLY_FAILED;
 }
 
+static int
+Update_Speed_Settings_JSON(int enabled,
+	                        int interval_minutes,
+	                        int unit_mph,
+	                        int speed_limit,
+	                        int aoi_enabled,
+	                        int point_count,
+	                        int point_x[SPEED_OTA_MAX_POINTS],
+	                        int point_y[SPEED_OTA_MAX_POINTS]) {
+	cJSON* settings_obj = ACAP_Get_Config("settings");
+	if (!settings_obj)
+		return 0;
+
+	cJSON* transmission = cJSON_GetObjectItem(settings_obj, "transmission");
+	if (!transmission) {
+		transmission = cJSON_CreateObject();
+		if (!transmission) return 0;
+		cJSON_AddItemToObject(settings_obj, "transmission", transmission);
+	}
+
+	cJSON* speed = cJSON_GetObjectItem(transmission, "speed");
+	if (!speed) {
+		speed = cJSON_CreateObject();
+		if (!speed) return 0;
+		cJSON_AddItemToObject(transmission, "speed", speed);
+	}
+
+	cJSON_ReplaceItemInObject(speed, "enabled", cJSON_CreateBool(enabled));
+	cJSON_ReplaceItemInObject(speed, "intervalMinutes", cJSON_CreateNumber(interval_minutes));
+	cJSON_ReplaceItemInObject(speed, "unit", cJSON_CreateString(unit_mph ? "mph" : "kmh"));
+	cJSON_ReplaceItemInObject(speed, "speedLimit", cJSON_CreateNumber(speed_limit));
+
+	cJSON* aoi = cJSON_GetObjectItem(speed, "aoi");
+	if (!aoi) {
+		aoi = cJSON_CreateObject();
+		if (!aoi) return 0;
+		cJSON_AddItemToObject(speed, "aoi", aoi);
+	}
+
+	cJSON_ReplaceItemInObject(aoi, "enabled", cJSON_CreateBool(aoi_enabled));
+
+	int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+	cJSON* points = cJSON_CreateArray();
+	if (!points) return 0;
+	for (int i = 0; i < point_count; i++) {
+		if (point_x[i] < min_x) min_x = point_x[i];
+		if (point_x[i] > max_x) max_x = point_x[i];
+		if (point_y[i] < min_y) min_y = point_y[i];
+		if (point_y[i] > max_y) max_y = point_y[i];
+		cJSON* point = cJSON_CreateObject();
+		if (!point) continue;
+		cJSON_AddNumberToObject(point, "x", point_x[i]);
+		cJSON_AddNumberToObject(point, "y", point_y[i]);
+		cJSON_AddItemToArray(points, point);
+	}
+
+	if (point_count == 0) {
+		min_x = 0; max_x = 1000; min_y = 0; max_y = 1000;
+	}
+
+	cJSON_ReplaceItemInObject(aoi, "x1", cJSON_CreateNumber(min_x));
+	cJSON_ReplaceItemInObject(aoi, "x2", cJSON_CreateNumber(max_x));
+	cJSON_ReplaceItemInObject(aoi, "y1", cJSON_CreateNumber(min_y));
+	cJSON_ReplaceItemInObject(aoi, "y2", cJSON_CreateNumber(max_y));
+	cJSON_ReplaceItemInObject(aoi, "points", points);
+
+	return ACAP_FILE_Write("localdata/settings.json", settings_obj) ? 1 : 0;
+}
+
+static OTA_Status
+Build_Speed_Framed_Body(uint8_t* body, size_t* body_length) {
+	if (!body || !body_length) return OTA_STATUS_INVALID_VALUE;
+	pthread_mutex_lock(&g_publish_mutex);
+	int point_count = Clamp_Int(g_speed_area_point_count, 3, SPEED_OTA_MAX_POINTS);
+	body[0] = 2;
+	body[1] = (g_speed_publish_enabled ? 0x01 : 0) |
+		(g_speed_unit_mph ? 0x02 : 0) |
+		(g_speed_aoi_enabled ? 0x04 : 0);
+	body[2] = (uint8_t)Clamp_Int(g_speed_interval_minutes, 1, 60);
+	body[3] = (uint8_t)Clamp_Int(g_speed_limit, 1, 255);
+	body[4] = (uint8_t)point_count;
+	for (int index = 0; index < point_count; index++)
+		Write_Packed_Point(body + 5 + index * 3,
+			(int)g_speed_area_x[index], (int)g_speed_area_y[index]);
+	pthread_mutex_unlock(&g_publish_mutex);
+	*body_length = (size_t)(5 + point_count * 3);
+	return OTA_STATUS_OK;
+}
+
+static OTA_Status
+Apply_Speed_Framed_Body(const uint8_t* body, size_t body_length) {
+	if (!body || body_length < 5) return OTA_STATUS_INVALID_LENGTH;
+	if (body[0] != 2) return OTA_STATUS_UNSUPPORTED;
+	if ((body[1] & ~0x07) != 0) return OTA_STATUS_INVALID_VALUE;
+	if (body[2] < 1 || body[2] > 60 || body[3] < 1)
+		return OTA_STATUS_INVALID_RANGE;
+	int point_count = body[4];
+	int aoi_enabled = (body[1] & 0x04) != 0;
+	if (point_count > SPEED_OTA_MAX_POINTS ||
+		(point_count > 0 && point_count < 3) || (aoi_enabled && point_count == 0))
+		return OTA_STATUS_INVALID_RANGE;
+	if (body_length != (size_t)(5 + point_count * 3)) return OTA_STATUS_INVALID_LENGTH;
+
+	int enabled = (body[1] & 0x01) != 0;
+	int unit_mph = (body[1] & 0x02) != 0;
+	int interval_minutes = body[2];
+	int speed_limit = body[3];
+
+	int point_x[SPEED_OTA_MAX_POINTS] = {0};
+	int point_y[SPEED_OTA_MAX_POINTS] = {0};
+	for (int index = 0; index < point_count; index++) {
+		if (!Read_Packed_Point(body + 5 + index * 3, &point_x[index], &point_y[index]))
+			return OTA_STATUS_INVALID_RANGE;
+	}
+
+	pthread_mutex_lock(&g_publish_mutex);
+	g_speed_publish_enabled = enabled;
+	g_speed_unit_mph = unit_mph;
+	g_speed_interval_minutes = interval_minutes;
+	g_speed_limit = speed_limit;
+	g_speed_aoi_enabled = aoi_enabled;
+
+	if (point_count >= 3) {
+		int min_x = 1000, max_x = 0, min_y = 1000, max_y = 0;
+		for (int i = 0; i < point_count; i++) {
+			g_speed_area_x[i] = point_x[i];
+			g_speed_area_y[i] = point_y[i];
+			if (point_x[i] < min_x) min_x = point_x[i];
+			if (point_x[i] > max_x) max_x = point_x[i];
+			if (point_y[i] < min_y) min_y = point_y[i];
+			if (point_y[i] > max_y) max_y = point_y[i];
+		}
+		g_speed_area_point_count = point_count;
+		g_speed_aoi_x1 = min_x;
+		g_speed_aoi_x2 = max_x;
+		g_speed_aoi_y1 = min_y;
+		g_speed_aoi_y2 = max_y;
+	} else {
+		g_speed_aoi_x1 = 0;
+		g_speed_aoi_x2 = 1000;
+		g_speed_aoi_y1 = 0;
+		g_speed_aoi_y2 = 1000;
+		Speed_Set_Rectangle_Area_Points();
+	}
+	g_speed_next_publish_time = time(NULL) + (g_speed_interval_minutes * 60);
+	pthread_mutex_unlock(&g_publish_mutex);
+	Speed_Set_Limit(unit_mph ? speed_limit / 0.621371 : speed_limit);
+
+	if (!Update_Speed_Settings_JSON(enabled, interval_minutes, unit_mph, speed_limit,
+		                         aoi_enabled, point_count, point_x, point_y)) {
+		return OTA_STATUS_APPLY_FAILED;
+	}
+
+	return OTA_STATUS_OK;
+}
+
 static void
 Handle_Radar_Service_OTA(int port, const OTA_Frame* frame) {
 	uint8_t body[OTA_MAX_BODY_SIZE];
@@ -1613,18 +1866,18 @@ Handle_Radar_Service_OTA(int port, const OTA_Frame* frame) {
 			Send_OTA_Error(port, frame->transaction_id, frame->command, OTA_STATUS_INVALID_LENGTH);
 			return;
 		}
-		status = port == LORA_PORT_OCCUPANCY_OTA_CONFIG
-			? Build_Occupancy_Framed_Body(body, &body_length)
-			: Build_Alert_Framed_Body(body, &body_length);
+		status = port == LORA_PORT_OCCUPANCY_OTA_CONFIG ? Build_Occupancy_Framed_Body(body, &body_length)
+			: port == LORA_PORT_ALERT_OTA_CONFIG ? Build_Alert_Framed_Body(body, &body_length)
+			: Build_Speed_Framed_Body(body, &body_length);
 		if (status == OTA_STATUS_OK)
 			Queue_OTA_Frame(port, OTA_COMMAND_GET_RESPONSE, frame->transaction_id, body, body_length);
 		else Send_OTA_Error(port, frame->transaction_id, frame->command, status);
 		return;
 	}
 	if (frame->command == OTA_COMMAND_SET) {
-		status = port == LORA_PORT_OCCUPANCY_OTA_CONFIG
-			? Apply_Occupancy_Framed_Body(frame->body, frame->body_length)
-			: Apply_Alert_Framed_Body(frame->body, frame->body_length);
+		status = port == LORA_PORT_OCCUPANCY_OTA_CONFIG ? Apply_Occupancy_Framed_Body(frame->body, frame->body_length)
+			: port == LORA_PORT_ALERT_OTA_CONFIG ? Apply_Alert_Framed_Body(frame->body, frame->body_length)
+			: Apply_Speed_Framed_Body(frame->body, frame->body_length);
 		uint8_t ack[] = {(uint8_t)status};
 		Queue_OTA_Frame(port, OTA_COMMAND_SET_ACK, frame->transaction_id, ack, sizeof(ack));
 		return;
@@ -1640,9 +1893,15 @@ Handle_Radar_Service_OTA(int port, const OTA_Frame* frame) {
 				OCCUPANCY_TYPE_MAXIMUM};
 			Queue_OTA_Frame(port, OTA_COMMAND_CAPS_RESPONSE,
 				frame->transaction_id, caps, sizeof(caps));
-		} else {
+		} else if (port == LORA_PORT_ALERT_OTA_CONFIG) {
 			uint8_t caps[] = {2, ALERT_OTA_MAX_POINTS, 2, 3, ALERT_OTA_MAX_POINTS,
 				5, 60, 60, 0, 44, 1, 2, 20, 1};
+			Queue_OTA_Frame(port, OTA_COMMAND_CAPS_RESPONSE,
+				frame->transaction_id, caps, sizeof(caps));
+		} else {
+			// version, maxPoints, coordEncoding, areaPoints min/max, intervalMin/Max, speedLimit min/max
+			uint8_t caps[] = {2, SPEED_OTA_MAX_POINTS, 2, 3,
+				SPEED_OTA_MAX_POINTS, 1, 60, 1, 255};
 			Queue_OTA_Frame(port, OTA_COMMAND_CAPS_RESPONSE,
 				frame->transaction_id, caps, sizeof(caps));
 		}
@@ -1860,6 +2119,12 @@ Radar_Detections_Callback(cJSON* detections) {
 		cJSON* speed_json = radar ? cJSON_GetObjectItem(radar, "speed") : cJSON_GetObjectItem(item, "speed");
 		if (speed_json) object->speed = speed_json->valuedouble;
 
+		if (bucket == 2 && confidence >= g_radar_min_confidence && Speed_Point_In_Area(x, y)) {
+			object->speed_area_samples++;
+			if (object->speed > object->speed_max_in_area)
+				object->speed_max_in_area = object->speed;
+		}
+
 		int occupancy_in_area = Occupancy_Point_In_Area(x, y);
 		int occupancy_eligible = confidence >= g_radar_min_confidence &&
 		                         Occupancy_Class_Enabled(bucket) &&
@@ -1894,6 +2159,39 @@ Radar_Detections_Callback(cJSON* detections) {
 }
 
 static void
+Speed_Finalize_Track(const char* id, int class_bucket, double birth_x, double birth_y,
+                     double death_x, double death_y) {
+	if (!id || class_bucket != 2)
+		return;
+
+	pthread_mutex_lock(&g_radar_mutex);
+	int samples = 0;
+	double max_speed = 0.0;
+	for (int i = 0; i < g_radar_object_count; i++) {
+		if (strcmp(g_radar_objects[i].id, id) != 0)
+			continue;
+		samples = g_radar_objects[i].speed_area_samples;
+		max_speed = g_radar_objects[i].speed_max_in_area;
+		g_radar_objects[i].speed_area_samples = 0;
+		g_radar_objects[i].speed_max_in_area = 0.0;
+		break;
+	}
+	pthread_mutex_unlock(&g_radar_mutex);
+
+	if (samples <= 0)
+		return;
+	if (max_speed < SPEED_MIN_QUALIFYING_KMH)
+		return;
+
+	double dx = death_x - birth_x;
+	double dy = death_y - birth_y;
+	if (sqrt((dx * dx) + (dy * dy)) < SPEED_MIN_DISPLACEMENT)
+		return;
+
+	Speed_Record_Vehicle(max_speed);
+}
+
+static void
 Radar_Tracker_Callback(cJSON* detection, int timer) {
 	(void)timer;
 	if (detection) {
@@ -1917,6 +2215,11 @@ Radar_Tracker_Callback(cJSON* detection, int timer) {
 				g_radar_min_confidence, age->valuedouble, g_radar_min_dwell_seconds,
 				birth_x->valuedouble, birth_y->valuedouble,
 				death_x->valuedouble, death_y->valuedouble);
+			cJSON* id = cJSON_GetObjectItem(detection, "id");
+			if (id && cJSON_IsString(id) && confidence->valueint >= g_radar_min_confidence)
+				Speed_Finalize_Track(id->valuestring, class_bucket,
+					birth_x->valuedouble, birth_y->valuedouble,
+					death_x->valuedouble, death_y->valuedouble);
 		}
 	}
 	if (detection)
@@ -1990,6 +2293,22 @@ Radar_Status_JSON(void) {
 	}
 	cJSON_AddItemToObject(occupancy_aoi, "points", occupancy_points);
 	cJSON_AddItemToObject(root, "occupancyAoi", occupancy_aoi);
+
+	cJSON* speed_aoi = cJSON_CreateObject();
+	cJSON_AddBoolToObject(speed_aoi, "enabled", g_speed_aoi_enabled);
+	cJSON_AddNumberToObject(speed_aoi, "x1", g_speed_aoi_x1);
+	cJSON_AddNumberToObject(speed_aoi, "x2", g_speed_aoi_x2);
+	cJSON_AddNumberToObject(speed_aoi, "y1", g_speed_aoi_y1);
+	cJSON_AddNumberToObject(speed_aoi, "y2", g_speed_aoi_y2);
+	cJSON* speed_points = cJSON_CreateArray();
+	for (int i = 0; i < g_speed_area_point_count; i++) {
+		cJSON* point = cJSON_CreateObject();
+		cJSON_AddNumberToObject(point, "x", g_speed_area_x[i]);
+		cJSON_AddNumberToObject(point, "y", g_speed_area_y[i]);
+		cJSON_AddItemToArray(speed_points, point);
+	}
+	cJSON_AddItemToObject(speed_aoi, "points", speed_points);
+	cJSON_AddItemToObject(root, "speedAoi", speed_aoi);
 
 	cJSON* counts_json = cJSON_CreateObject();
 	cJSON_AddNumberToObject(counts_json, "total", current_counts.total);
@@ -2108,6 +2427,37 @@ Radar_Status_JSON(void) {
 	cJSON_AddNumberToObject(alert, "lastPublishTime", (double)g_alert_last_publish_time);
 	cJSON_AddBoolToObject(alert, "active", Alert_Active());
 	cJSON_AddItemToObject(publish, "alert", alert);
+	SpeedSummary speed_summary = Speed_Get_Summary();
+	const char* speed_unit = g_speed_unit_mph ? "mph" : "km/h";
+	cJSON* speed = cJSON_CreateObject();
+	cJSON_AddBoolToObject(speed, "enabled", g_speed_publish_enabled);
+	cJSON_AddNumberToObject(speed, "port", LORA_PORT_SPEED);
+	cJSON_AddStringToObject(speed, "unit", speed_unit);
+	cJSON_AddNumberToObject(speed, "speedLimit", g_speed_limit);
+	cJSON_AddBoolToObject(speed, "aoiEnabled", g_speed_aoi_enabled);
+	cJSON_AddNumberToObject(speed, "intervalMinutes", g_speed_interval_minutes);
+	cJSON_AddNumberToObject(speed, "nextPublishTime", (double)g_speed_next_publish_time);
+	cJSON_AddNumberToObject(speed, "secondsUntilPublish", g_speed_next_publish_time > now ? (int)(g_speed_next_publish_time - now) : 0);
+	cJSON_AddNumberToObject(speed, "lastPublishTime", (double)g_speed_last_publish_time);
+	cJSON* speed_current = cJSON_CreateObject();
+	cJSON_AddNumberToObject(speed_current, "vehicles", speed_summary.vehicles);
+	cJSON_AddNumberToObject(speed_current, "speeding", speed_summary.speeding);
+	cJSON_AddNumberToObject(speed_current, "maximum", Speed_Convert(speed_summary.maximum, g_speed_unit_mph));
+	cJSON_AddNumberToObject(speed_current, "average", Speed_Convert(speed_summary.average, g_speed_unit_mph));
+	cJSON_AddNumberToObject(speed_current, "minimum", Speed_Convert(speed_summary.minimum, g_speed_unit_mph));
+	cJSON_AddItemToObject(speed, "current", speed_current);
+	if (g_speed_has_last_payload) {
+		cJSON* speed_last = cJSON_CreateObject();
+		cJSON_AddNumberToObject(speed_last, "vehicles", g_speed_last_payload[0]);
+		cJSON_AddNumberToObject(speed_last, "speeding", g_speed_last_payload[1]);
+		cJSON_AddNumberToObject(speed_last, "maximum", g_speed_last_payload[2]);
+		cJSON_AddNumberToObject(speed_last, "average", g_speed_last_payload[3]);
+		cJSON_AddNumberToObject(speed_last, "minimum", g_speed_last_payload[4]);
+		cJSON_AddStringToObject(speed_last, "unit", speed_unit);
+		cJSON_AddNumberToObject(speed_last, "publishTime", (double)g_speed_last_publish_time);
+		cJSON_AddItemToObject(speed, "last", speed_last);
+	}
+	cJSON_AddItemToObject(publish, "speed", speed);
 	cJSON_AddItemToObject(root, "publish", publish);
 	cJSON_AddItemToObject(root, "publishLog", g_publish_log ? cJSON_Duplicate(g_publish_log, 1) : cJSON_CreateArray());
 	pthread_mutex_unlock(&g_publish_mutex);
@@ -2308,14 +2658,34 @@ Migrate_Settings(cJSON* settings_obj) {
 				changed = 1;
 			}
 		}
+		cJSON* speed = cJSON_GetObjectItem(transmission, "speed");
+		if (!speed || !cJSON_IsObject(speed)) {
+			if (speed) cJSON_DeleteItemFromObject(transmission, "speed");
+			speed = cJSON_CreateObject();
+			cJSON_AddItemToObject(transmission, "speed", speed);
+			cJSON_AddBoolToObject(speed, "enabled", 0);
+			cJSON_AddNumberToObject(speed, "port", LORA_PORT_SPEED);
+			cJSON_AddNumberToObject(speed, "intervalMinutes", 15);
+			cJSON_AddStringToObject(speed, "unit", "kmh");
+			cJSON_AddNumberToObject(speed, "speedLimit", 50);
+			cJSON* aoi = cJSON_CreateObject();
+			cJSON_AddItemToObject(speed, "aoi", aoi);
+			cJSON_AddBoolToObject(aoi, "enabled", 0);
+			cJSON_AddNumberToObject(aoi, "x1", 0);
+			cJSON_AddNumberToObject(aoi, "x2", 1000);
+			cJSON_AddNumberToObject(aoi, "y1", 0);
+			cJSON_AddNumberToObject(aoi, "y2", 1000);
+			cJSON_AddItemToObject(aoi, "points", cJSON_CreateArray());
+			changed = 1;
+		}
 	}
 	if (cJSON_GetObjectItem(settings_obj, "downlinkCommands")) {
 		cJSON_DeleteItemFromObject(settings_obj, "downlinkCommands");
 		changed = 1;
 	}
 	cJSON* version = cJSON_GetObjectItem(settings_obj, "settingsVersion");
-	if (!version || !cJSON_IsNumber(version) || version->valueint != 2) {
-		Set_JSON_Number(settings_obj, "settingsVersion", 2);
+	if (!version || !cJSON_IsNumber(version) || version->valueint != 3) {
+		Set_JSON_Number(settings_obj, "settingsVersion", 3);
 		changed = 1;
 	}
 	if (changed && !ACAP_FILE_Write("localdata/settings.json", settings_obj))
@@ -2338,6 +2708,8 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 	int old_alert_enabled = g_alert_publish_enabled;
 	int old_alert_heartbeat_minutes = g_alert_heartbeat_minutes;
 	int old_alert_active_interval_seconds = g_alert_active_interval_seconds;
+	int old_speed_enabled = g_speed_publish_enabled;
+	int old_speed_interval_minutes = g_speed_interval_minutes;
 	int reset_alert_timers = 0;
 	int alert_schedule_enabled = 0;
 	int alert_schedule_start = 18 * 60;
@@ -2437,9 +2809,44 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 		}
 	}
 
+	cJSON* speed = cJSON_GetObjectItem(transmission, "speed");
+	double speed_limit_kmh = 0.0;
+	if (speed) {
+		cJSON* enabled = cJSON_GetObjectItem(speed, "enabled");
+		if (enabled) g_speed_publish_enabled = cJSON_IsTrue(enabled);
+		cJSON* interval = cJSON_GetObjectItem(speed, "intervalMinutes");
+		if (interval) g_speed_interval_minutes = Clamp_Int(interval->valueint, 1, 60);
+		cJSON* unit = cJSON_GetObjectItem(speed, "unit");
+		if (unit && unit->valuestring) g_speed_unit_mph = strcasecmp(unit->valuestring, "mph") == 0;
+		cJSON* limit = cJSON_GetObjectItem(speed, "speedLimit");
+		if (limit) g_speed_limit = Clamp_Int(limit->valueint, 1, 255);
+		// The module compares against km/h, the setting is in the selected unit.
+		speed_limit_kmh = g_speed_unit_mph ? g_speed_limit / 0.621371 : g_speed_limit;
+		cJSON* aoi = cJSON_GetObjectItem(speed, "aoi");
+		if (aoi) {
+			cJSON* enabled_aoi = cJSON_GetObjectItem(aoi, "enabled");
+			if (enabled_aoi) g_speed_aoi_enabled = cJSON_IsTrue(enabled_aoi);
+			cJSON* x1 = cJSON_GetObjectItem(aoi, "x1");
+			cJSON* x2 = cJSON_GetObjectItem(aoi, "x2");
+			cJSON* y1 = cJSON_GetObjectItem(aoi, "y1");
+			cJSON* y2 = cJSON_GetObjectItem(aoi, "y2");
+			if (x1) g_speed_aoi_x1 = Clamp_Int(x1->valueint, 0, 1000);
+			if (x2) g_speed_aoi_x2 = Clamp_Int(x2->valueint, 0, 1000);
+			if (y1) g_speed_aoi_y1 = Clamp_Int(y1->valueint, 0, 1000);
+			if (y2) g_speed_aoi_y2 = Clamp_Int(y2->valueint, 0, 1000);
+			if (g_speed_aoi_x2 < g_speed_aoi_x1) g_speed_aoi_x2 = g_speed_aoi_x1;
+			if (g_speed_aoi_y2 < g_speed_aoi_y1) g_speed_aoi_y2 = g_speed_aoi_y1;
+			cJSON* points = cJSON_GetObjectItem(aoi, "points");
+			Speed_Load_Area_Points(points);
+		} else {
+			Speed_Set_Rectangle_Area_Points();
+		}
+	}
+
 	if (initialize_schedule) {
 		g_counting_next_publish_time = now + (g_counting_interval_minutes * 60);
 		g_occupancy_next_publish_time = now + (g_occupancy_interval_minutes * 60);
+		g_speed_next_publish_time = now + (g_speed_interval_minutes * 60);
 	} else {
 		int counting_schedule_changed = counting &&
 			((!old_counting_enabled && g_counting_publish_enabled) ||
@@ -2453,17 +2860,25 @@ Load_Transmission_Config(cJSON* transmission, int initialize_schedule) {
 			((!old_alert_enabled && g_alert_publish_enabled) ||
 			 old_alert_heartbeat_minutes != g_alert_heartbeat_minutes ||
 			 old_alert_active_interval_seconds != g_alert_active_interval_seconds);
+		int speed_schedule_changed = speed &&
+			((!old_speed_enabled && g_speed_publish_enabled) ||
+			 old_speed_interval_minutes != g_speed_interval_minutes ||
+			 g_speed_next_publish_time == 0);
 
 		if (counting_schedule_changed)
 			g_counting_next_publish_time = now + (g_counting_interval_minutes * 60);
 		if (occupancy_schedule_changed)
 			g_occupancy_next_publish_time = now + (g_occupancy_interval_minutes * 60);
+		if (speed_schedule_changed)
+			g_speed_next_publish_time = now + (g_speed_interval_minutes * 60);
 		if (alert_schedule_changed) {
 			g_alert_last_publish_time = 0;
 			reset_alert_timers = 1;
 		}
 	}
 	pthread_mutex_unlock(&g_publish_mutex);
+	if (speed_limit_kmh > 0.0)
+		Speed_Set_Limit(speed_limit_kmh);
 	Alert_Set_Schedule(alert_schedule_enabled, alert_schedule_start, alert_schedule_end);
 	if (reset_alert_timers)
 		Alert_Reset_Timers();
@@ -2913,7 +3328,7 @@ B100_Downlink_Handler(B100_Downlink* downlink) {
 		port == LORA_PORT_RADAR_CONFIG || port == LORA_PORT_DOWNLINK_QUERY ||
 		port == LORA_PORT_USE_CASE_CONFIG || port == LORA_PORT_COUNTING_OTA_CONFIG ||
 		port == LORA_PORT_OCCUPANCY_OTA_CONFIG ||
-		port == LORA_PORT_ALERT_OTA_CONFIG) {
+		port == LORA_PORT_ALERT_OTA_CONFIG || port == LORA_PORT_SPEED_OTA_CONFIG) {
 		OTA_Frame frame;
 		OTA_Status status = OTA_Decode_Frame(bytes, (size_t)byte_count, &frame);
 		if (status == OTA_STATUS_OK) {
@@ -3691,6 +4106,33 @@ static int Publish_Radar_To_LoRa() {
 	return Publish_Occupancy_To_LoRa();
 }
 
+static int
+Publish_Speed_To_LoRa(void) {
+	pthread_mutex_lock(&g_publish_mutex);
+	int enabled = g_speed_publish_enabled;
+	int unit_mph = g_speed_unit_mph;
+	pthread_mutex_unlock(&g_publish_mutex);
+	if (!enabled)
+		return 0;
+
+	uint8_t buffer[SPEED_PAYLOAD_SIZE];
+	size_t length = Speed_Build_Payload(buffer, sizeof(buffer), unit_mph);
+	if (length != SPEED_PAYLOAD_SIZE)
+		return 0;
+	if (!Send_LoRa_Payload("speed", LORA_PORT_SPEED, buffer, (int)length))
+		return 0;
+	Speed_Reset_Interval();
+	pthread_mutex_lock(&g_publish_mutex);
+	time_t now = time(NULL);
+	g_speed_last_publish_time = now;
+	g_speed_next_publish_time = now + (g_speed_interval_minutes * 60);
+	memcpy(g_speed_last_payload, buffer, sizeof(g_speed_last_payload));
+	g_speed_has_last_payload = 1;
+	Append_Publish_Log("speed", LORA_PORT_SPEED, buffer, (int)length);
+	pthread_mutex_unlock(&g_publish_mutex);
+	return 1;
+}
+
 void*
 Publish_Thread(void* arg) {
 	LOG("Publish thread started\n");
@@ -3700,6 +4142,7 @@ Publish_Thread(void* arg) {
 	time_t start_time = time(NULL);
 	g_counting_next_publish_time = start_time + (g_counting_interval_minutes * 60);
 	g_occupancy_next_publish_time = start_time + (g_occupancy_interval_minutes * 60);
+	g_speed_next_publish_time = start_time + (g_speed_interval_minutes * 60);
 	pthread_mutex_unlock(&g_publish_mutex);
 	
 	while (running) {
@@ -3714,12 +4157,16 @@ Publish_Thread(void* arg) {
 		int alert_enabled = g_alert_publish_enabled;
 		int alert_heartbeat_minutes = g_alert_heartbeat_minutes;
 		int alert_active_interval_seconds = g_alert_active_interval_seconds;
+		int speed_enabled = g_speed_publish_enabled;
+		time_t speed_next = g_speed_next_publish_time;
 		pthread_mutex_unlock(&g_publish_mutex);
 		
 		if (counting_enabled && now >= counting_next)
 			Publish_Counting_To_LoRa();
 		if (occupancy_enabled && now >= occupancy_next)
 			Publish_Occupancy_To_LoRa();
+		if (speed_enabled && now >= speed_next)
+			Publish_Speed_To_LoRa();
 		if (alert_enabled) {
 			int heartbeat = 0;
 			if (Alert_Should_Publish(now, alert_heartbeat_minutes, alert_active_interval_seconds, &heartbeat))
@@ -3750,6 +4197,8 @@ HTTP_Endpoint_publish(const ACAP_HTTP_Response response, const ACAP_HTTP_Request
 		result = Publish_Counting_To_LoRa();
 	} else if (stream && strcmp(stream, "alert") == 0) {
 		result = Publish_Alert_To_LoRa(!Alert_Active());
+	} else if (stream && strcmp(stream, "speed") == 0) {
+		result = Publish_Speed_To_LoRa();
 	} else {
 		result = Publish_Occupancy_To_LoRa();
 	}
@@ -4055,6 +4504,8 @@ HTTP_Endpoint_linkcheck(const ACAP_HTTP_Response response, const ACAP_HTTP_Reque
 
 void
 HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Request request) {
+	char* inline_param = ACAP_HTTP_Request_Param(request, "inline");
+	int inline_mode = inline_param && (strcmp(inline_param, "1") == 0 || strcmp(inline_param, "true") == 0 || strcmp(inline_param, "yes") == 0);
 	const char* dev_model  = ACAP_DEVICE_Prop("model")  ? ACAP_DEVICE_Prop("model")  : "unknown";
 	const char* dev_serial = ACAP_DEVICE_Prop("serial") ? ACAP_DEVICE_Prop("serial") : "000000";
 	const char* dev_date   = ACAP_DEVICE_Date();
@@ -4082,47 +4533,82 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		ACAP_HTTP_Respond_Error(response, 500, "Could not generate Counting fields");
 		return;
 	}
+	pthread_mutex_lock(&g_publish_mutex);
+	const char* speed_unit = g_speed_unit_mph ? "mph" : "km/h";
+	int speed_limit = g_speed_limit;
+	pthread_mutex_unlock(&g_publish_mutex);
 	char js[20000];
-	snprintf(js, sizeof(js),
+	int js_len = snprintf(js, sizeof(js),
 		"/**\n"
 		" * Radar LoRaWAN Decoder\n"
 		" * Device  : %s  (serial %s)\n"
 		" * Generated: %s\n"
 		" *\n"
 		" * Payloads\n"
+		" * - Port 1, Counting: cumulative uint16 big-endian values in configured scene order, Human before Vehicle.\n"
+		" *   Only scenes with a selected label contribute values; see CountingFields for the exact order.\n"
+		" *   Values wrap at 65536, so consumers tracking totals must handle wrap-around.\n"
 		" * - Port 2, Occupancy, 1 byte: maximum selected-label objects during the interval.\n"
 		" * - Port 3, Detection Alert, 1 byte: maximum selected-label objects while alert is active.\n"
 		" *   Value 0 on port 3 means inactive or heartbeat.\n"
-		" * - Port 1, Counting: cumulative uint16 big-endian values in configured scene order, Human then Vehicle.\n"
+		" * - Port 4, Speed, 5 bytes: [vehicles, speeding, maximum, average, minimum].\n"
+		" *   Speeds are whole %s, measured per vehicle as its maximum speed inside the area of interest.\n"
+		" *   A vehicle counts as speeding when that maximum exceeds the configured limit of %d %s.\n"
+		" *   All five counters cover the period since the previous Speed uplink; all zeros means no qualifying vehicles.\n"
+		" * - Port 121, Camera Info, ASCII: model,serial,firmware,uptime,cpuLoad,appVersion.\n"
+		" * - Port 122, Bridge Info, ASCII: hardware,firmware,powerSource,temperature,restarts,devAddr.\n"
 		" *\n"
 		" * The selected label, Humans or Vehicles, is configured in the ACAP UI and is not encoded in uplinks.\n"
-		" * Framed OTA configuration messages are decoded by the dedicated OTA Decoder.\n"
+		" * Framed OTA configuration messages on ports 130, 131, 132, and 133 are decoded by the dedicated OTA decoders.\n"
+		" *\n"
+		" * Usage\n"
+		" *   The payload must be an even-length hexadecimal string, for example '0D00251F15'.\n"
+		" *   Call Decode(port, hexPayload); Decode(hexPayload, port) is also accepted.\n"
+		" *   decodeUplink({ bytes: ..., fPort: ... }) is provided for LoRaWAN network servers.\n"
 		" *\n"
 		" */\n\n"
 		"function Byte(value) { return value & 0xff; }\n"
 		"var CountingFields = %s;\n"
+		"var SpeedUnit = '%s';\n"
+		"var SpeedLimit = %d;\n"
 		"function HexToBytes(hex) {\n"
-		"  var clean = String(hex || '').replace(/\\s+/g, '').toUpperCase();\n"
+		"  if (typeof hex !== 'string') throw new Error('Payload must be a hexadecimal string');\n"
+		"  var clean = hex.replace(/\\s+/g, '').toUpperCase();\n"
 		"  if (!clean.length) throw new Error('Missing hex payload');\n"
 		"  if (clean.length %% 2 !== 0 || !/^[0-9A-F]+$/.test(clean)) throw new Error('Hex payload must be an even-length hexadecimal string');\n"
 		"  var bytes = [];\n"
 		"  for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.substr(i, 2), 16));\n"
 		"  return bytes;\n"
 		"}\n"
-		"function Bytes(buffer) {\n"
-		"  if (!buffer) throw new Error('Missing buffer');\n"
-		"  if (typeof buffer === 'string') return HexToBytes(buffer);\n"
-		"  if (Array.isArray(buffer)) return buffer.map(Byte);\n"
-		"  if (typeof Uint8Array !== 'undefined' && buffer instanceof Uint8Array) return Array.prototype.slice.call(buffer).map(Byte);\n"
-		"  if (buffer.bytes) return Bytes(buffer.bytes);\n"
-		"  throw new Error('Payload must be a hex string, array, Buffer, or Uint8Array');\n"
+		"function BytesToHex(values) {\n"
+		"  var hex = '';\n"
+		"  for (var i = 0; i < values.length; i++) hex += ('0' + Byte(values[i]).toString(16)).slice(-2);\n"
+		"  return hex.toUpperCase();\n"
+		"}\n"
+		"function Arguments(first, second) {\n"
+		"  if (typeof first === 'string') return { hex: first, port: second };\n"
+		"  if (typeof second === 'string') return { hex: second, port: first };\n"
+		"  throw new Error('Payload must be a hexadecimal string');\n"
+		"}\n"
+		"function Text(bytes) {\n"
+		"  var text = '';\n"
+		"  for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(Byte(bytes[i]));\n"
+		"  return text;\n"
+		"}\n"
+		"function Fields(bytes, names) {\n"
+		"  var text = Text(bytes);\n"
+		"  var parts = text.split(',');\n"
+		"  var result = { text: text };\n"
+		"  for (var i = 0; i < names.length; i++) result[names[i]] = parts[i] !== undefined ? parts[i] : null;\n"
+		"  return result;\n"
 		"}\n"
 		"function RequireLength(bytes, length, name) {\n"
 		"  if (bytes.length !== length) throw new Error(name + ' payload must be ' + length + ' byte' + (length === 1 ? '' : 's'));\n"
 		"}\n"
-		"function Decode(buffer, port) {\n"
-		"  var bytes = Bytes(buffer);\n"
-		"  var fPort = Number(port);\n\n"
+		"function Decode(port, hexPayload) {\n"
+		"  var args = Arguments(port, hexPayload);\n"
+		"  var bytes = HexToBytes(args.hex);\n"
+		"  var fPort = Number(args.port);\n\n"
 		"  if (fPort === 2) {\n"
 		"    RequireLength(bytes, 1, 'Occupancy');\n"
 		"    return { port: fPort, useCase: 'occupancy', maximumObjects: Byte(bytes[0]) };\n"
@@ -4141,11 +4627,31 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"    });\n"
 		"    return result;\n"
 		"  }\n\n"
+		"  if (fPort === 4) {\n"
+		"    RequireLength(bytes, 5, 'Speed');\n"
+		"    return { port: fPort, useCase: 'speed', unit: SpeedUnit, speedLimit: SpeedLimit,\n"
+		"      vehicles: Byte(bytes[0]), speeding: Byte(bytes[1]),\n"
+		"      maximumSpeed: Byte(bytes[2]), averageSpeed: Byte(bytes[3]), minimumSpeed: Byte(bytes[4]) };\n"
+		"  }\n\n"
+		"  if (fPort === 121) {\n"
+		"    var camera = Fields(bytes, ['model', 'serial', 'firmware', 'uptime', 'cpuLoad', 'appVersion']);\n"
+		"    camera.port = fPort;\n"
+		"    camera.useCase = 'cameraInfo';\n"
+		"    return camera;\n"
+		"  }\n\n"
+		"  if (fPort === 122) {\n"
+		"    var bridge = Fields(bytes, ['hardware', 'firmware', 'powerSource', 'temperature', 'restarts', 'devAddr']);\n"
+		"    bridge.port = fPort;\n"
+		"    bridge.useCase = 'bridgeInfo';\n"
+		"    return bridge;\n"
+		"  }\n\n"
 		"  throw new Error('Unsupported Radar LoRaWAN port: ' + fPort);\n"
 		"}\n\n"
 		"function decodeUplink(input) {\n"
 		"  try {\n"
-		"    return { data: Decode(input.bytes, input.fPort) };\n"
+		"    var payload = input.bytes;\n"
+		"    if (typeof payload !== 'string') payload = BytesToHex(payload || []);\n"
+		"    return { data: Decode(input.fPort, payload) };\n"
 		"  } catch (error) {\n"
 		"    return { errors: [error.message] };\n"
 		"  }\n"
@@ -4153,16 +4659,36 @@ HTTP_Endpoint_translator(const ACAP_HTTP_Response response, const ACAP_HTTP_Requ
 		"\nfunction decodeDownlink(input) {\n"
 		"  return decodeUplink(input);\n"
 		"}\n",
-		dev_model, dev_serial, dev_date, counting_fields
+		dev_model, dev_serial, dev_date,
+		speed_unit, speed_limit, speed_unit,
+		counting_fields, speed_unit, speed_limit
 	);
 	free(counting_fields);
+	if (js_len < 0) {
+		ACAP_HTTP_Respond_Error(response, 500, "Failed to generate JavaScript translator");
+		return;
+	}
+	if ((size_t)js_len >= sizeof(js)) {
+		LOG_WARN("Translator: output truncated (len=%d, cap=%zu)\n", js_len, sizeof(js));
+		ACAP_HTTP_Respond_Error(response, 500, "JavaScript translator too large");
+		return;
+	}
 
 	char filename[128];
 	snprintf(filename, sizeof(filename), "Decoder-AI-B100-Radar-%s-%s.js",
 	         dev_serial, dev_date);
 
-	ACAP_HTTP_Header_FILE(response, filename, "application/javascript", strlen(js));
-	ACAP_HTTP_Respond_Data(response, strlen(js), js);
+	size_t js_length = (size_t)js_len;
+	if (inline_mode) {
+		ACAP_HTTP_Respond_String(response,
+			"Content-Type: application/javascript; charset=utf-8\r\n"
+			"Cache-Control: no-cache\r\n"
+			"Content-Length: %zu\r\n\r\n",
+			js_length);
+	} else {
+		ACAP_HTTP_Header_FILE(response, filename, "application/javascript", js_length);
+	}
+	ACAP_HTTP_Respond_Data(response, js_length, js);
 }
 
 void
@@ -4205,8 +4731,8 @@ HTTP_Endpoint_alert_ota_translator(const ACAP_HTTP_Response response, const ACAP
 		" * byte[47]  crc8 over bytes[0..46]\n"
 		" *\n"
 		" * Public API\n"
-		" * - Encode_Config(config, command) : JSON -> HEX payload\n"
-		" * - Decode_config(input)           : HEX/bytes -> JSON\n"
+		" * - Encode(config, command) : JSON -> HEX payload\n"
+		" * - Decode(input)           : HEX -> JSON\n"
 		" */\n\n"
 		"var AI_B100_ALERT_OTA_PORT = 133;\n"
 		"var AI_B100_ALERT_OTA_MAX_POINTS = 10;\n\n"
@@ -4302,14 +4828,14 @@ HTTP_Endpoint_alert_ota_translator(const ACAP_HTTP_Response response, const ACAP
 		"    crc8: aiByte(body[47])\n"
 		"  };\n"
 		"}\n\n"
-		"function Encode_Config(config, command) {\n"
+		"function Encode(config, command) {\n"
 		"  var cmd = aiByte(command);\n"
 		"  if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n"
 		"  if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n"
 		"  return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n"
 		"}\n\n"
-		"function Decode_config(input) {\n"
-		"  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n"
+		"function Decode(input) {\n"
+		"  var bytes = aiHexToBytes(input);\n"
 		"  if (!bytes.length) throw new Error('Empty payload');\n"
 		"  var command = aiByte(bytes[0]);\n"
 		"  var names = { 0x01: 'GET_CONFIG', 0x02: 'SET_CONFIG', 0x03: 'GET_CAPS', 0x81: 'GET_CONFIG_RESP', 0x82: 'SET_CONFIG_ACK', 0x83: 'GET_CAPS_RESP' };\n"
@@ -4380,8 +4906,8 @@ HTTP_Endpoint_alert_ota_translator(const ACAP_HTTP_Response response, const ACAP
 		"\n"
 		"  throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n"
 		"}\n\n"
-		"var aiB100AlertOtaJsonToHex = Encode_Config;\n"
-		"var aiB100AlertOtaBufferToJson = Decode_config;\n",
+		"var aiB100AlertOtaJsonToHex = Encode;\n"
+		"var aiB100AlertOtaBufferToJson = Decode;\n",
 		dev_model, dev_serial, dev_date
 	);
 
@@ -4431,8 +4957,8 @@ HTTP_Endpoint_occupancy_ota_translator(const ACAP_HTTP_Response response, const 
 		" * byte[47]  crc8 over bytes[0..46]\n"
 		" *\n"
 		" * Public API\n"
-		" * - Encode_Config(config, command) : JSON -> HEX payload\n"
-		" * - Decode_config(input)           : HEX/bytes -> JSON\n"
+		" * - Encode(config, command) : JSON -> HEX payload\n"
+		" * - Decode(input)           : HEX -> JSON\n"
 		" */\n\n"
 		"var AI_B100_OCCUPANCY_OTA_PORT = 132;\n"
 		"var AI_B100_OCCUPANCY_OTA_MAX_POINTS = 10;\n\n"
@@ -4544,14 +5070,14 @@ HTTP_Endpoint_occupancy_ota_translator(const ACAP_HTTP_Response response, const 
 		"    crc8: aiByte(body[47])\n"
 		"  };\n"
 		"}\n\n"
-		"function Encode_Config(config, command) {\n"
+		"function Encode(config, command) {\n"
 		"  var cmd = aiByte(command);\n"
 		"  if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n"
 		"  if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n"
 		"  return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n"
 		"}\n\n"
-		"function Decode_config(input) {\n"
-		"  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n"
+		"function Decode(input) {\n"
+		"  var bytes = aiHexToBytes(input);\n"
 		"  if (!bytes.length) throw new Error('Empty payload');\n"
 		"  var command = aiByte(bytes[0]);\n"
 		"  var names = { 0x01: 'GET_CONFIG', 0x02: 'SET_CONFIG', 0x03: 'GET_CAPS', 0x81: 'GET_CONFIG_RESP', 0x82: 'SET_CONFIG_ACK', 0x83: 'GET_CAPS_RESP' };\n"
@@ -4625,8 +5151,8 @@ HTTP_Endpoint_occupancy_ota_translator(const ACAP_HTTP_Response response, const 
 		"\n"
 		"  throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n"
 		"}\n\n"
-		"var aiB100OccupancyOtaJsonToHex = Encode_Config;\n"
-		"var aiB100OccupancyOtaBufferToJson = Decode_config;\n",
+		"var aiB100OccupancyOtaJsonToHex = Encode;\n"
+		"var aiB100OccupancyOtaBufferToJson = Decode;\n",
 		dev_model, dev_serial, dev_date
 	);
 
@@ -4683,8 +5209,8 @@ HTTP_Endpoint_radar_ota_translator(const ACAP_HTTP_Response response, const ACAP
 		" * byte[7]   crc8 over bytes[0..6]\n"
 		" *\n"
 		" * Public API\n"
-		" * - Encode_Config(config, command) : JSON -> HEX payload\n"
-		" * - Decode_config(input)           : HEX/bytes -> JSON\n"
+		" * - Encode(config, command) : JSON -> HEX payload\n"
+		" * - Decode(input)           : HEX -> JSON\n"
 		" */\n\n"
 		"var AI_B100_RADAR_OTA_PORT = 130;\n"
 		"var RADAR_OTA_FIELD_DETECTION_SENSITIVITY = 0x0001;\n\n"
@@ -4766,14 +5292,14 @@ HTTP_Endpoint_radar_ota_translator(const ACAP_HTTP_Response response, const ACAP
 		"    crc8: aiByte(body[7])\n"
 		"  };\n"
 		"}\n\n"
-		"function Encode_Config(config, command) {\n"
+		"function Encode(config, command) {\n"
 		"  var cmd = aiByte(command);\n"
 		"  if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);\n"
 		"  if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');\n"
 		"  return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));\n"
 		"}\n\n"
-		"function Decode_config(input) {\n"
-		"  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);\n"
+		"function Decode(input) {\n"
+		"  var bytes = aiHexToBytes(input);\n"
 		"  if (!bytes.length) throw new Error('Empty payload');\n"
 		"  var command = aiByte(bytes[0]);\n"
 		"  if (command === 0x01 || command === 0x03) return { port: AI_B100_RADAR_OTA_PORT, command: command, type: command === 0x01 ? 'get_config_request' : 'get_caps_request' };\n"
@@ -4794,8 +5320,8 @@ HTTP_Endpoint_radar_ota_translator(const ACAP_HTTP_Response response, const ACAP
 		"  }\n"
 		"  throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());\n"
 		"}\n\n"
-		"var aiB100RadarOtaJsonToHex = Encode_Config;\n"
-		"var aiB100RadarOtaBufferToJson = Decode_config;\n",
+		"var aiB100RadarOtaJsonToHex = Encode;\n"
+		"var aiB100RadarOtaBufferToJson = Decode;\n",
 		dev_model, dev_serial, dev_date
 	);
 

@@ -13,7 +13,7 @@ Current ACAP variants:
 | Directory | Friendly name | Source analytics | Active uplinks |
 | --- | --- | --- | --- |
 | `aoa/` | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2, Presence on port 3 |
-| `radar/` | AI-B100 Radar | Axis radar scene provider | Occupancy on port 2, Detection Alert on port 3; Counting is reserved on port 1 but hidden |
+| `radar/` | AI-B100 Radar | Axis radar scene provider | Occupancy on port 2, Detection Alert on port 3, Speed on port 4; Counting is reserved on port 1 but hidden |
 
 Both variants intentionally use ACAP `appName` `aib100`. This keeps the camera URL path, settings store, and AI-B100 callback paths stable when switching between AOA and Radar variants. The variants are alternatives: install and run the one that matches the target camera and use case.
 
@@ -51,7 +51,7 @@ ai-b100/
 |   |-- build.sh / install.sh / Dockerfile / README.md
 |   |-- decoder/            # OTA translators (ports 130/132/133) and a generated uplink decoder sample
 |   `-- app/
-|       |-- main.c, counting.c/h, occupancy.c/h, alert.c/h
+|       |-- main.c, counting.c/h, occupancy.c/h, alert.c/h, speed.c/h
 |       |-- RadarDetection.*, radarscene.pb-c.*, protobuf-c.*
 |       |-- manifest.json, Makefile
 |       |-- html/           # Publish, Occupancy, Detection Alert, Radar, Bridge, Downlink, GPS, About
@@ -313,6 +313,21 @@ Detection Alert:
 - Inactive payload is one byte `0x00`.
 - Active payload is one byte `[selected_label_active_max]`.
 
+Speed:
+
+- Active use case on fixed uplink port `4`.
+- Publishes a five-byte summary of vehicle speeds since the previous Speed uplink:
+  `[vehicles, speeding, maximum, average, minimum]`, all `uint8`.
+- Speeds are whole numbers in the configured output unit, `kmh` or `mph`. The radar driver already
+  converts velocity to km/h, so the module keeps km/h internally and converts at encode time.
+- A vehicle is measured only when its track is lost, using the maximum speed it reached inside the
+  area of interest. Maximum, average, and minimum are all taken over those per-vehicle maxima.
+- Humans are ignored. Tracks are discarded when they had no measuring point in the area of interest,
+  when the in-area maximum was below 10 km/h, or when the straight-line birth-to-loss displacement
+  was under 250 units of the 0-1000 space.
+- An interval with no qualifying vehicles still publishes five zero bytes.
+- The area of interest is a polygon of at most 8 points in the UI.
+
 ### Radar UI Pages
 
 | Page | Purpose |
@@ -320,6 +335,7 @@ Detection Alert:
 | Publish | Enable/disable Occupancy and Detection Alert, show fixed ports/timers, manual publish, recent uplinks, decoder download |
 | Occupancy | Select label, publish frequency, and optional area of interest for port 2 |
 | Detection Alert | Select label, heartbeat, active interval, hold time, and optional area of interest for port 3 |
+| Speed | Select output unit, speed limit, and optional area of interest for port 4, and view the last published summary |
 | Radar | Live stream, Radar Detection Sensitivity, and Radar OTA encoder/decoder for port 130 |
 | LoRA Bridge | Bridge configuration and bridge actions |
 | LoRA Downlink | Downlink log and command enablement |
@@ -351,6 +367,7 @@ The Radar config body is 8 bytes: `version`, `fieldMask` as uint16 BE, `detectio
 | `2` | Occupancy Interval Maximum | 1 byte: `[selected_label_interval_max]` |
 | `3` | Detection Alert inactive | 1 byte: `[0x00]` |
 | `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
+| `4` | Speed | 5 bytes: `[vehicles, speeding, maximum, average, minimum]` |
 
 The reference decoders in `radar/decoder/` and the generated `/translator` output must match this contract. Do not re-add `Occupancy Area Balance` or a two-byte port 2 decoder branch while the use case is hidden.
 
@@ -359,6 +376,7 @@ The reference decoders in `radar/decoder/` and the generated `/translator` outpu
 Radar use-case timers must remain independent.
 
 - Counting and Occupancy use explicit `g_counting_next_publish_time` and `g_occupancy_next_publish_time` in `radar/app/main.c`.
+- Speed uses `g_speed_next_publish_time` and resets only when it is newly enabled, its interval changes, its schedule is uninitialized, or a Speed publish succeeds.
 - Detection Alert owns its heartbeat/active timers inside `radar/app/alert.c` and exposes `Alert_Should_Publish`, `Alert_Next_Publish_Time`, `Alert_Mark_Published`, and `Alert_Reset_Timers`.
 - Initial settings load calls `Load_Transmission_Config(transmission, 1)` to initialize schedules.
 - Runtime settings updates must call `Load_Transmission_Config(data, 0)`.

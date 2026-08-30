@@ -1,5 +1,5 @@
 {
-  "settingsVersion": 2,
+  "settingsVersion": 3,
   "b100": {
     "ip": "192.168.1.250",
     "port": 81,
@@ -56,6 +56,26 @@
         "start": "18:00",
         "end": "06:00"
       },
+      "aoi": {
+        "enabled": false,
+        "x1": 0,
+        "x2": 1000,
+        "y1": 0,
+        "y2": 1000,
+        "points": [
+          { "x": 0, "y": 0 },
+          { "x": 1000, "y": 0 },
+          { "x": 1000, "y": 1000 },
+          { "x": 0, "y": 1000 }
+        ]
+      }
+    },
+    "speed": {
+      "enabled": false,
+      "port": 4,
+      "intervalMinutes": 15,
+      "unit": "kmh",
+      "speedLimit": 50,
       "aoi": {
         "enabled": false,
         "x1": 0,

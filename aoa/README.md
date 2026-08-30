@@ -239,10 +239,9 @@ The decoder includes:
 - enabled classes per scenario
 - buffer layout comments
 - example decoded JSON output
-- a `decodeByPort(port, bytes)` dispatcher
-- explicit wrappers: `JavaScriptTranslator(port, bytes)`, `Decode(fPort, bytes)`, and `Decoder(bytes, port)`
+- a `Decode(port, hexPayload)` dispatcher, the single entry point of the decoder
 
-The decoder accepts only an even-length hexadecimal string such as `"01"` or `"0001"`. The caller must convert base64, binary buffers, or other representations to hex before decoding. With the Node-RED flow setting `msg.topic` to the numeric port and `msg.payload` to the hex string, use `msg.payload = JavaScriptTranslator(msg.topic, msg.payload)`.
+The decoder accepts only an even-length hexadecimal string such as `"01"` or `"0001"`. The caller must convert base64, binary buffers, or other representations to hex before decoding. Either argument order works, so `Decode(hexPayload, port)` is also accepted. With the Node-RED flow setting `msg.topic` to the numeric port and `msg.payload` to the hex string, use `msg.payload = Decode(msg.topic, msg.payload)`.
 
 Download a fresh decoder after changing scenario selections, labels, areas, or Occupancy value type.
 

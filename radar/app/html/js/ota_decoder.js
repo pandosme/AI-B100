@@ -1,6 +1,6 @@
 /** AI-B100 Radar OTA Decoder
  *
- * Usage: decodeRadarOta(111, '810101010002...')
+ * Usage: Decode(111, '810101010002...')
  */
 var RADAR_OTA_COMMAND_NAMES = {
 	1: 'get', 2: 'set', 3: 'caps', 4: 'list', 129: 'get_response',
@@ -20,7 +20,8 @@ var RADAR_OTA_GROUPS = {
 	transmission: 130,
 	counting: 131,
 	occupancy: 132,
-	presenceAlert: 133
+	presenceAlert: 133,
+	speed: 134
 };
 
 function radarOtaDecodeCrc8(values) {
@@ -185,6 +186,23 @@ function radarOtaDecodeServiceConfig(port, decoded, body) {
 	return decoded;
 }
 
+function radarOtaDecodeSpeedConfig(decoded, body) {
+	var fixedLength = 5;
+	if (body.length < fixedLength || body[0] !== 2) throw new Error('Invalid Speed configuration version');
+	var flags = body[1];
+	var pointCount = body[4];
+	if (pointCount > 8 || body.length !== fixedLength + pointCount * 3)
+		throw new Error('Invalid Speed configuration length');
+	decoded.config = {
+		enabled: Boolean(flags & 1),
+		unit: flags & 2 ? 'mph' : 'kmh',
+		intervalMinutes: body[2],
+		speedLimit: body[3],
+		aoi: { enabled: Boolean(flags & 4), points: radarOtaDecodePackedPoints(body, fixedLength, pointCount) }
+	};
+	return decoded;
+}
+
 function radarOtaDecodeLegacyConfig(port, values) {
 	var command = values[0];
 	if (command === 0x01 || command === 0x03)
@@ -231,14 +249,14 @@ function radarOtaDecodeAscii(port, payload) {
 	return { port: port, direction: 'response', text: text, fields: text.split(',') };
 }
 
-function decodeRadarOta(port, payload) {
+function Decode(port, payload) {
 	port = Number(port);
 	if (port === 121 || port === 122) return radarOtaDecodeAscii(port, payload);
 	var values = radarOtaDecodeBytes(payload);
 	if ((port === 132 || port === 133) && (values.length < 4 || values[1] !== 1 ||
 		radarOtaDecodeCrc8(values.slice(0, -1)) !== values[values.length - 1]))
 		return radarOtaDecodeLegacyConfig(port, values);
-	if ([100, 110, 111, 120, 130, 131, 132, 133].indexOf(port) < 0) throw new Error('Unsupported Radar OTA port: ' + port);
+	if ([100, 110, 111, 120, 130, 131, 132, 133, 134].indexOf(port) < 0) throw new Error('Unsupported Radar OTA port: ' + port);
 	var decoded = radarOtaDecodeFrame(values);
 	decoded.port = port;
 	var body = decoded.body;
@@ -301,6 +319,15 @@ function decodeRadarOta(port, payload) {
 	} else if (port === 133 && decoded.commandCode === 0x83) {
 		if (body.length !== 14) throw new Error('Invalid Presence capabilities length');
 		decoded.capabilities = { configVersion: body[0], maxPoints: body[1], coordinateEncoding: 'packed_10bit', areaPoints: { min: body[3], max: body[4] }, heartbeatMinutes: { min: body[5], max: body[6] }, activeIntervalSeconds: { min: radarOtaReadU16LE(body, 7), max: radarOtaReadU16LE(body, 9) }, transitionSeconds: { min: body[11], max: body[12] }, scheduleSupported: Boolean(body[13]) };
+	} else if (port === 134 && (decoded.commandCode === 0x02 || decoded.commandCode === 0x81)) {
+		radarOtaDecodeSpeedConfig(decoded, body);
+	} else if (port === 134 && decoded.commandCode === 0x82) {
+		if (body.length !== 1) throw new Error('Invalid Speed acknowledgement length');
+		decoded.statusCode = body[0];
+		decoded.status = RADAR_OTA_STATUS_NAMES[body[0]] || 'unknown';
+	} else if (port === 134 && decoded.commandCode === 0x83) {
+		if (body.length !== 9) throw new Error('Invalid Speed capabilities length');
+		decoded.capabilities = { configVersion: body[0], maxPoints: body[1], coordinateEncoding: 'packed_10bit', areaPoints: { min: body[3], max: body[4] }, intervalMinutes: { min: body[5], max: body[6] }, speedLimit: { min: body[7], max: body[8] } };
 	} else if (port === 111 && (decoded.commandCode === 0x02 || decoded.commandCode === 0x81)) {
 		decoded.config = { fieldMask: body[0] | (body[1] << 8), detectionSensitivity: ({ 1: 'low', 2: 'medium', 3: 'high' })[body[2]] || 'unknown' };
 	} else if (port === 111 && decoded.commandCode === 0x83) {
@@ -348,5 +375,5 @@ function decodeRadarOta(port, payload) {
 
 if (typeof module !== 'undefined') module.exports = {
 	RADAR_OTA_GROUPS: RADAR_OTA_GROUPS,
-	decodeRadarOta: decodeRadarOta
+	Decode: Decode
 };

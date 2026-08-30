@@ -25,8 +25,8 @@
  * byte[47]  crc8 over bytes[0..46]
  *
  * Public API
- * - Encode_Config(config, command) : JSON -> HEX payload
- * - Decode_config(input)           : HEX/bytes -> JSON
+ * - Encode(config, command) : JSON -> HEX payload
+ * - Decode(input)           : HEX -> JSON
  */
 
 var AI_B100_ALERT_OTA_PORT = 133;
@@ -132,15 +132,15 @@ function aiParseConfigBody(body) {
   };
 }
 
-function Encode_Config(config, command) {
+function Encode(config, command) {
   var cmd = aiByte(command);
   if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);
   if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');
   return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));
 }
 
-function Decode_config(input) {
-  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);
+function Decode(input) {
+  var bytes = aiHexToBytes(input);
   if (!bytes.length) throw new Error('Empty payload');
   var command = aiByte(bytes[0]);
   var names = { 0x01: 'GET_CONFIG', 0x02: 'SET_CONFIG', 0x03: 'GET_CAPS', 0x81: 'GET_CONFIG_RESP', 0x82: 'SET_CONFIG_ACK', 0x83: 'GET_CAPS_RESP' };
@@ -212,5 +212,5 @@ function Decode_config(input) {
   throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());
 }
 
-var aiB100AlertOtaJsonToHex = Encode_Config;
-var aiB100AlertOtaBufferToJson = Decode_config;
+var aiB100AlertOtaJsonToHex = Encode;
+var aiB100AlertOtaBufferToJson = Decode;

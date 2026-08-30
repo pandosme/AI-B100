@@ -20,8 +20,8 @@
  * byte[7]   crc8 over bytes[0..6]
  *
  * Public API
- * - Encode_Config(config, command) : JSON -> HEX payload
- * - Decode_config(input)           : HEX/bytes -> JSON
+ * - Encode(config, command) : JSON -> HEX payload
+ * - Decode(input)           : HEX -> JSON
  */
 
 var AI_B100_RADAR_OTA_PORT = 130;
@@ -116,15 +116,15 @@ function aiParseConfigBody(body) {
   };
 }
 
-function Encode_Config(config, command) {
+function Encode(config, command) {
   var cmd = aiByte(command);
   if (cmd === 0x01 || cmd === 0x03) return aiBytesToHex([cmd]);
   if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');
   return aiBytesToHex([0x02].concat(aiBuildConfigBody(config || {})));
 }
 
-function Decode_config(input) {
-  var bytes = Array.isArray(input) ? input.slice() : aiHexToBytes(input);
+function Decode(input) {
+  var bytes = aiHexToBytes(input);
   if (!bytes.length) throw new Error('Empty payload');
   var command = aiByte(bytes[0]);
 
@@ -177,5 +177,5 @@ function Decode_config(input) {
   throw new Error('Unsupported command byte: 0x' + command.toString(16).toUpperCase());
 }
 
-var aiB100RadarOtaJsonToHex = Encode_Config;
-var aiB100RadarOtaBufferToJson = Decode_config;
+var aiB100RadarOtaJsonToHex = Encode;
+var aiB100RadarOtaBufferToJson = Decode;

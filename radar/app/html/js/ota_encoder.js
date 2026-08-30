@@ -1,7 +1,7 @@
 /** AI-B100 Radar OTA Encoder
  *
  * Usage:
- *   encodeRadarOta({ port: 111, command: 'set', transactionId: 1,
+ *   Encode({ port: 111, command: 'set', transactionId: 1,
  *     config: { detectionSensitivity: 'medium' } });
  * Returns: { port: 111, payload: '...' }
  */
@@ -15,7 +15,8 @@ var RADAR_OTA_GROUPS = {
 	transmission: 130,
 	counting: 131,
 	occupancy: 132,
-	presenceAlert: 133
+	presenceAlert: 133,
+	speed: 134
 };
 
 function radarOtaByte(value) {
@@ -139,6 +140,23 @@ function radarOtaServiceConfig(message, presence) {
 	return body;
 }
 
+function radarOtaSpeedConfig(message) {
+	var config = message.config || {};
+	var area = config.aoi || {};
+	var points = area.points || config.points || [];
+	if (points.length > 8 || (area.enabled && points.length < 3))
+		throw new Error('Enabled AOI requires 3 through 8 points');
+	var flags = (config.enabled ? 1 : 0) |
+		(String(config.unit || 'kmh').toLowerCase() === 'mph' ? 2 : 0) |
+		(area.enabled ? 4 : 0);
+	var body = [2, flags];
+	body.push(radarOtaInteger(config.intervalMinutes, 1, 60, 'intervalMinutes'));
+	body.push(radarOtaInteger(config.speedLimit, 1, 255, 'speedLimit'));
+	body.push(points.length);
+	points.forEach(function(point) { radarOtaWritePackedPoint(body, point); });
+	return body;
+}
+
 function radarOtaLegacyConfig(message, presence) {
 	var config = message.config || {};
 	var area = config.aoi || {};
@@ -172,7 +190,7 @@ function radarOtaLegacyConfig(message, presence) {
 	return radarOtaHex([0x02].concat(body));
 }
 
-function encodeRadarOta(message) {
+function Encode(message) {
 	message = message || {};
 	var port = Number(message.port);
 	var config = message.config || {};
@@ -181,7 +199,7 @@ function encodeRadarOta(message) {
 		if (port === 100) commandName = 'set';
 		else if (port === 110) commandName = config.dataRate != null || config.adrEnabled != null || config.adr != null ? 'set' : 'get';
 		else if (port === 120) commandName = 'get';
-		else if (port === 132 || port === 133) commandName = Object.keys(config).length ? 'set' : 'get';
+		else if (port === 132 || port === 133 || port === 134) commandName = Object.keys(config).length ? 'set' : 'get';
 	}
 	var command = radarOtaCommand(commandName);
 
@@ -264,10 +282,17 @@ function encodeRadarOta(message) {
 			throw new Error('Port ' + port + ' supports get, set, and caps');
 		return { port: port, payload: radarOtaFrame(command, message.transactionId, serviceBody) };
 	}
+	if (port === 134) {
+		var speedBody = [];
+		if (command === 0x02) speedBody = radarOtaSpeedConfig(message);
+		else if (command !== 0x01 && command !== 0x03)
+			throw new Error('Port 134 supports get, set, and caps');
+		return { port: port, payload: radarOtaFrame(command, message.transactionId, speedBody) };
+	}
 	throw new Error('Unsupported Radar OTA port: ' + port);
 }
 
 if (typeof module !== 'undefined') module.exports = {
 	RADAR_OTA_GROUPS: RADAR_OTA_GROUPS,
-	encodeRadarOta: encodeRadarOta
+	Encode: Encode
 };

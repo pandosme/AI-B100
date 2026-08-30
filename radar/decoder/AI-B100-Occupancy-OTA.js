@@ -6,8 +6,8 @@
  * - Occupancy OTA uses dedicated port 132 for both requests and responses.
  *
  * Public API
- * - Encode_Config(config, command) : JSON -> HEX payload
- * - Decode_config(input)           : HEX/bytes -> JSON
+ * - Encode(config, command) : JSON -> HEX payload
+ * - Decode(input)           : HEX -> JSON
  */
 
 var AI_B100_OCCUPANCY_OTA_PORT = 132;
@@ -131,15 +131,15 @@ function occupancyParseConfigBody(body) {
 	};
 }
 
-function Encode_Config(config, command) {
+function Encode(config, command) {
 	const cmd = occupancyOtaByte(command);
 	if (cmd === 0x01 || cmd === 0x03) return occupancyOtaBytesToHex([cmd]);
 	if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');
 	return occupancyOtaBytesToHex([0x02].concat(occupancyBuildConfigBody(config || {})));
 }
 
-function Decode_config(input) {
-	const bytes = Array.isArray(input) ? input.slice() : occupancyOtaHexToBytes(input);
+function Decode(input) {
+	const bytes = occupancyOtaHexToBytes(input);
 	if (!bytes.length) throw new Error('Empty payload');
 
 	const cmd = occupancyOtaByte(bytes[0]);
@@ -215,6 +215,6 @@ function Decode_config(input) {
 	throw new Error('Unsupported command byte: 0x' + cmd.toString(16).toUpperCase());
 }
 
-var aiB100OccupancyOtaJsonToHex = Encode_Config;
+var aiB100OccupancyOtaJsonToHex = Encode;
 
-var aiB100OccupancyOtaBufferToJson = Decode_config;
+var aiB100OccupancyOtaBufferToJson = Decode;

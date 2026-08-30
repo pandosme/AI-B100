@@ -341,15 +341,15 @@ function occupancyParseConfigBody(body) {
 	};
 }
 
-function Encode_Config(config, command) {
+function Encode(config, command) {
 	const cmd = occupancyOtaByte(command);
 	if (cmd === 0x01 || cmd === 0x03) return occupancyOtaBytesToHex([cmd]);
 	if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');
 	return occupancyOtaBytesToHex([0x02].concat(occupancyBuildConfigBody(config || {})));
 }
 
-function Decode_config(input) {
-	const bytes = Array.isArray(input) ? input.slice() : occupancyOtaHexToBytes(input);
+function Decode(input) {
+	const bytes = occupancyOtaHexToBytes(input);
 	if (!bytes.length) throw new Error('Empty payload');
 
 	const cmd = occupancyOtaByte(bytes[0]);
@@ -446,8 +446,8 @@ function buildOccupancyOtaTranslatorScript() {
 		' * - Occupancy OTA uses dedicated port 132 for both requests and responses.',
 		' *',
 		' * Public API',
-		' * - Encode_Config(config, command) : JSON -> HEX payload',
-		' * - Decode_config(input)           : HEX/bytes -> JSON',
+		' * - Encode(config, command) : JSON -> HEX payload',
+		' * - Decode(input)           : HEX -> JSON',
 		' */'
 	].join('\n');
 
@@ -466,10 +466,10 @@ function buildOccupancyOtaTranslatorScript() {
 		occupancyCodeToTypeName.toString(),
 		occupancyBuildConfigBody.toString(),
 		occupancyParseConfigBody.toString(),
-		Encode_Config.toString(),
-		Decode_config.toString(),
-		'var aiB100OccupancyOtaJsonToHex = Encode_Config;',
-		'var aiB100OccupancyOtaBufferToJson = Decode_config;'
+		Encode.toString(),
+		Decode.toString(),
+		'var aiB100OccupancyOtaJsonToHex = Encode;',
+		'var aiB100OccupancyOtaBufferToJson = Decode;'
 	];
 
 	return parts.join('\n\n') + '\n';
@@ -479,7 +479,7 @@ function downloadOccupancyOtaTranslator() {
 	try {
 		const text = buildOccupancyOtaTranslatorScript();
 		if (!text.trim().length) throw new Error('Generated translator is empty');
-		if (text.indexOf('function Encode_Config') === -1 || text.indexOf('function Decode_config') === -1) throw new Error('Generated translator is invalid');
+		if (text.indexOf('function Encode') === -1 || text.indexOf('function Decode') === -1) throw new Error('Generated translator is invalid');
 
 		const blob = new Blob([text], { type: 'application/javascript' });
 		const url = URL.createObjectURL(blob);
@@ -499,7 +499,7 @@ function downloadOccupancyOtaTranslator() {
 function buildOccupancySetFromJson() {
 	try {
 		const parsed = JSON.parse($('#occupancy-json-input').val() || '{}');
-		setOccupancyHexOutput(Encode_Config(parsed, 0x02));
+		setOccupancyHexOutput(Encode(parsed, 0x02));
 		showToast('Occupancy OTA Set Config built for port 132', 'success');
 	} catch (error) {
 		showToast('Failed to build Occupancy OTA Set Config: ' + error.message, 'danger');
@@ -508,7 +508,7 @@ function buildOccupancySetFromJson() {
 
 function decodeOccupancyHexInput() {
 	try {
-		const decoded = Decode_config($('#occupancy-hex-input').val() || '');
+		const decoded = Decode($('#occupancy-hex-input').val() || '');
 		$('#occupancy-json-output').val(JSON.stringify(decoded, null, 2));
 		showToast('Payload decoded', 'success');
 	} catch (error) {

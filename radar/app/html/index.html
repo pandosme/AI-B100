@@ -13,6 +13,7 @@
 	<script src="js/toast.js"></script>
 	<style>
 		.publish-log-table code { white-space: normal; word-break: break-all; user-select: text; }
+		#translatorContent { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.85rem; min-height: 360px; }
 		.payload-cell { display: flex; align-items: center; gap: 0.5rem; }
 		.payload-cell code { flex: 1; min-width: 0; }
 		.payload-copy { flex: 0 0 auto; }
@@ -47,8 +48,7 @@
 						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">1</div></div>
 						<div class="form-group mb-3"><label>Next Publish</label><div id="countingNext" class="text-muted">--</div></div>
 						<div class="mt-3 d-flex flex-wrap gap-2">
-							<button class="btn btn-primary save-publish-settings">Save Settings</button>
-							<button class="btn btn-success" id="publishCountingNow">Publish Now</button>
+							<button class="btn btn-success" id="publishCountingNow">Force Publish</button>
 						</div>
 							<div class="text-muted mt-2">Cumulative named line totals on fixed uplink port 1.</div>
 					</div>
@@ -70,8 +70,7 @@
 						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">2</div></div>
 						<div class="form-group mb-3"><label>Next Publish</label><div id="occupancyNext" class="text-muted">--</div></div>
 						<div class="mt-3 d-flex flex-wrap gap-2">
-							<button class="btn btn-primary save-publish-settings">Save Settings</button>
-							<button class="btn btn-success" id="publishOccupancyNow">Publish Now</button>
+							<button class="btn btn-success" id="publishOccupancyNow">Force Publish</button>
 						</div>
 						<div class="text-muted mt-2">Occupancy uses fixed uplink port 2.</div>
 					</div>
@@ -97,10 +96,31 @@
 						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">3</div></div>
 						<div class="form-group mb-3"><label>Next Publish</label><div id="alertNext" class="text-muted">--</div></div>
 						<div class="mt-3 d-flex flex-wrap gap-2">
-							<button class="btn btn-primary save-publish-settings">Save Settings</button>
-							<button class="btn btn-success" id="publishAlertNow">Publish Now</button>
+							<button class="btn btn-success" id="publishAlertNow">Force Publish</button>
 						</div>
 						<div class="text-muted mt-2">Presence Alert uses fixed uplink port 3.</div>
+					</div>
+				</div>
+			</div>
+
+			<div class="col-12 col-xl-4 mb-3 d-flex">
+				<div class="card publish-card w-100">
+					<div class="card-header"><h5 class="card-title mb-0"><a class="use-case-title" href="speed.html">Speed <span class="use-case-arrow" aria-hidden="true">&rsaquo;</span></a></h5></div>
+					<div class="card-body">
+						<div class="form-group mb-3">
+							<label for="speedInterval">Publish Interval: <strong id="speedIntervalValue">15</strong> m</label>
+							<input type="range" class="form-range" id="speedInterval" min="1" max="60" value="15">
+						</div>
+						<div class="form-check form-switch mb-3">
+							<input class="form-check-input" type="checkbox" role="switch" id="speedEnabled">
+							<label class="form-check-label" for="speedEnabled">Enable Publishing</label>
+						</div>
+						<div class="form-group mb-3"><label class="form-label">Fixed Uplink Port</label><div class="form-control bg-light">4</div></div>
+						<div class="form-group mb-3"><label>Next Publish</label><div id="speedNext" class="text-muted">--</div></div>
+						<div class="mt-3 d-flex flex-wrap gap-2">
+							<button class="btn btn-success" id="publishSpeedNow">Force Publish</button>
+						</div>
+						<div class="text-muted mt-2">Vehicle speed summary on fixed uplink port 4.</div>
 					</div>
 				</div>
 			</div>
@@ -111,7 +131,7 @@
 				<div class="card w-100">
 					<div class="card-header d-flex justify-content-between align-items-center">
 						<h5 class="card-title mb-0">Last 20 LoRaWAN Publishes</h5>
-						<button id="downloadTranslator" class="btn btn-secondary btn-sm">Download JavaScript Translator</button>
+						<button class="btn btn-secondary btn-sm open-translator" data-endpoint="translator?inline=1" data-title="Data Decoder">Data Decoder</button>
 					</div>
 					<div class="card-body">
 						<div class="table-responsive">
@@ -126,9 +146,30 @@
 		</div>
 	</div>
 
+	<div class="modal fade" id="translatorModal" tabindex="-1" aria-labelledby="translatorModalLabel" aria-hidden="true">
+		<div class="modal-dialog modal-xl modal-dialog-scrollable">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="translatorModalLabel">JavaScript Translator</h5>
+					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+				</div>
+				<div class="modal-body">
+					<textarea id="translatorContent" class="form-control" spellcheck="false" readonly></textarea>
+				</div>
+				<div class="modal-footer">
+					<a id="downloadTranslator" class="btn btn-outline-primary" href="#">Download</a>
+					<button type="button" id="copyTranslator" class="btn btn-primary">Copy</button>
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
 <script>
 let currentSettings = {};
 let lastPublishLogKey = '';
+let translatorModal = null;
+let settingsLoaded = false;
 
 $(document).ready(function() {
 	$.ajax({ type: 'GET', url: 'app', dataType: 'json', cache: false,
@@ -145,13 +186,19 @@ $(document).ready(function() {
 	$('#publishCountingNow').on('click', function() { publishNow('counting', this); });
 	$('#publishOccupancyNow').on('click', function() { publishNow('occupancy', this); });
 	$('#publishAlertNow').on('click', function() { publishNow('alert', this); });
+	$('#publishSpeedNow').on('click', function() { publishNow('speed', this); });
 	$('#countingInterval').on('input', function() { $('#countingIntervalValue').text($(this).val()); });
 	$('#occupancyInterval').on('input', function() { $('#occupancyIntervalValue').text($(this).val()); });
+	$('#speedInterval').on('input', function() { $('#speedIntervalValue').text($(this).val()); });
 	$('#activeIntervalSeconds').on('input', function() { $('#activeIntervalValue').text($(this).val()); });
 	$('#heartbeatMinutes').on('input', function() { $('#heartbeatValue').text($(this).val()); });
-	$('.save-publish-settings').on('click', savePublishSettings);
+	$('#countingInterval, #occupancyInterval, #speedInterval, #activeIntervalSeconds, #heartbeatMinutes').on('change', savePublishSettings);
+	$('#countingEnabled, #occupancyEnabled, #alertEnabled, #speedEnabled').on('change', savePublishSettings);
 	$('#publishLogBody').on('click', '.payload-copy', function() { copyPayload($(this).data('payload')); });
-	$('#downloadTranslator').on('click', function() { window.location.href = 'translator'; });
+	$('.open-translator').on('click', function() { openTranslatorDialog(this, $(this).data('endpoint'), $(this).data('title')); });
+	$('#copyTranslator').on('click', copyTranslatorToClipboard).prop('disabled', true);
+	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true');
+	translatorModal = new bootstrap.Modal(document.getElementById('translatorModal'));
 	setInterval(pollLoraStatus, 10000);
 	pollLoraStatus();
 });
@@ -164,18 +211,23 @@ function loadSettings() {
 			const counting = transmission.counting || {};
 			const occupancy = transmission.occupancy || {};
 			const presence = transmission.presence || transmission.alert || {};
+			const speed = transmission.speed || {};
 			$('#countingEnabled').prop('checked', !!counting.enabled);
 			$('#occupancyEnabled').prop('checked', !!occupancy.enabled);
 			$('#alertEnabled').prop('checked', !!presence.enabled);
+			$('#speedEnabled').prop('checked', !!speed.enabled);
 			$('#countingInterval').val(counting.intervalMinutes || 15); $('#countingIntervalValue').text(counting.intervalMinutes || 15);
 			$('#occupancyInterval').val(occupancy.intervalMinutes || 15); $('#occupancyIntervalValue').text(occupancy.intervalMinutes || 15);
 			$('#activeIntervalSeconds').val(Math.max(60, presence.activeIntervalSeconds || 60)); $('#activeIntervalValue').text(Math.max(60, presence.activeIntervalSeconds || 60));
 			$('#heartbeatMinutes').val(presence.heartbeatMinutes || 15); $('#heartbeatValue').text(presence.heartbeatMinutes || 15);
+			$('#speedInterval').val(speed.intervalMinutes || 15); $('#speedIntervalValue').text(speed.intervalMinutes || 15);
+			settingsLoaded = true;
 		}
 	});
 }
 
 function savePublishSettings() {
+	if (!settingsLoaded) return;
 	const transmission = currentSettings.transmission || {};
 	transmission.counting = Object.assign({ port: 1, scenes: [] }, transmission.counting || {}, {
 		enabled: $('#countingEnabled').is(':checked'), intervalMinutes: parseInt($('#countingInterval').val(), 10)
@@ -187,6 +239,9 @@ function savePublishSettings() {
 		enabled: $('#alertEnabled').is(':checked'),
 		activeIntervalSeconds: parseInt($('#activeIntervalSeconds').val(), 10),
 		heartbeatMinutes: parseInt($('#heartbeatMinutes').val(), 10)
+	});
+	transmission.speed = Object.assign({ port: 4, unit: 'kmh', speedLimit: 50 }, transmission.speed || {}, {
+		enabled: $('#speedEnabled').is(':checked'), intervalMinutes: parseInt($('#speedInterval').val(), 10)
 	});
 	delete transmission.alert;
 	$.ajax({ type: 'POST', url: 'settings', data: JSON.stringify({ transmission }), contentType: 'application/json',
@@ -212,6 +267,7 @@ function updateTimer() {
 			updateStreamCard('counting', publish.counting || {});
 			updateStreamCard('occupancy', publish.occupancy || {});
 			updateStreamCard('alert', publish.alert || {});
+			updateStreamCard('speed', publish.speed || {});
 			renderPublishLog(data.publishLog || []);
 		}
 	});
@@ -266,6 +322,58 @@ function fallbackCopyPayload(payload) {
 		showToast('Copy failed', 'danger');
 	}
 	input.remove();
+}
+
+async function openTranslatorDialog(source, endpoint, title) {
+	const button = $(source);
+	const originalText = button.text();
+	button.prop('disabled', true).text('Loading...');
+	$('#translatorModalLabel').text(title);
+	$('#translatorContent').val('Loading translator...');
+	$('#copyTranslator').prop('disabled', true);
+	$('#downloadTranslator').addClass('disabled').attr('aria-disabled', 'true').attr('href', '#');
+
+	try {
+		const response = await fetch(endpoint, { method: 'GET', cache: 'no-store' });
+		if (!response.ok) throw new Error('HTTP ' + response.status);
+		const text = await response.text();
+		if (!text || !text.trim()) {
+			$('#translatorContent').val('');
+			showToast('JavaScript translator response was empty', 'warning');
+			return;
+		}
+		$('#translatorContent').val(text);
+		$('#copyTranslator').prop('disabled', false);
+		$('#downloadTranslator').removeClass('disabled').removeAttr('aria-disabled').attr('href', endpoint.split('?')[0]);
+		translatorModal.show();
+	} catch (error) {
+		$('#translatorContent').val('');
+		showToast('Failed to load JavaScript translator: ' + (error && error.message ? error.message : 'request failed'), 'danger');
+	} finally {
+		button.prop('disabled', false).text(originalText);
+	}
+}
+
+function copyTranslatorToClipboard() {
+	const text = $('#translatorContent').val() || '';
+	if (!text) return showToast('Translator content is empty', 'warning');
+	if (navigator.clipboard && navigator.clipboard.writeText) {
+		navigator.clipboard.writeText(text)
+			.then(function() { showToast('JavaScript translator copied', 'success'); })
+			.catch(function() { fallbackCopyTranslatorText(text); });
+		return;
+	}
+	fallbackCopyTranslatorText(text);
+}
+
+function fallbackCopyTranslatorText(text) {
+	const area = document.getElementById('translatorContent');
+	area.focus();
+	area.select();
+	area.setSelectionRange(0, text.length);
+	let ok = false;
+	try { ok = document.execCommand('copy'); } catch (error) { ok = false; }
+	showToast(ok ? 'JavaScript translator copied' : 'Unable to copy automatically', ok ? 'success' : 'warning');
 }
 
 function splitDateTime(value) {

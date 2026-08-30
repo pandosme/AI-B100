@@ -38,8 +38,71 @@
 			font-size: 0.82rem;
 			white-space: pre;
 		}
-		.ota-help { font-size: 0.86rem; line-height: 1.45; }
-		.ota-help code { font-size: 0.8rem; }
+		.ota-help {
+			font-size: 0.86rem;
+			line-height: 1.45;
+		}
+		.ota-help code {
+			font-size: 0.8rem;
+		}
+		.ota-legend {
+			font-size: 0.8rem;
+		}
+		.ota-legend .badge,
+		.ota-port,
+		.ota-cmd .badge {
+			font-family: 'Courier New', monospace;
+		}
+		.ota-accordion .accordion-button {
+			padding: 0.5rem 0.75rem;
+			font-size: 0.88rem;
+			font-weight: 600;
+		}
+		.ota-accordion .accordion-button:not(.collapsed) {
+			background-color: #f1f5f9;
+			color: inherit;
+			box-shadow: none;
+		}
+		.ota-accordion .accordion-button:focus {
+			box-shadow: none;
+		}
+		.ota-accordion .accordion-body {
+			padding: 0.65rem 0.75rem 0.85rem;
+		}
+		.ota-port {
+			margin-right: 0.5rem;
+		}
+		.ota-purpose {
+			font-size: 0.84rem;
+			line-height: 1.45;
+			margin-bottom: 0.6rem;
+		}
+		.ota-cmd-list {
+			list-style: none;
+			margin: 0;
+			padding: 0;
+		}
+		.ota-cmd {
+			display: flex;
+			gap: 0.5rem;
+			padding: 0.4rem 0;
+			border-top: 1px solid #e9ecef;
+		}
+		.ota-cmd:first-child {
+			border-top: 0;
+		}
+		.ota-cmd .badge {
+			height: fit-content;
+		}
+		.ota-cmd-name {
+			font-size: 0.83rem;
+			font-weight: 600;
+		}
+		.ota-cmd-desc {
+			font-size: 0.78rem;
+			color: #6c757d;
+			line-height: 1.4;
+		}
 	</style>
 </head>
 <body>
@@ -65,9 +128,7 @@
 									<tr>
 										<th>Time</th>
 										<th>Port</th>
-										<th>Len</th>
 										<th>Payload (hex)</th>
-										<th>ASCII</th>
 										<th>RSSI</th>
 										<th>SNR</th>
 										<th>fcntDown</th>
@@ -84,7 +145,7 @@
 				</div>
 			</div>
 
-			<!-- OTA service reference -->
+			<!-- Downlink Command Table Card -->
 			<div class="col-12 col-lg-4">
 				<div class="card mb-3">
 					<div class="card-header d-flex justify-content-between align-items-center">
@@ -95,21 +156,32 @@
 						</div>
 					</div>
 					<div class="card-body">
-						<p class="ota-help">OTA downlinks can execute actions, read information or capabilities, and update supported service parameters. Download the JavaScript tools for Node-RED or custom integrations.</p>
-						<div class="alert alert-light border py-2 px-3 ota-help">
-							<strong>Framed services:</strong> all OTA ports return queued responses on the request port. Ports 132 and 133 also accept legacy requests for existing integrations.
+						<div class="ota-help mb-3">
+							OTA downlinks let you read and change this device's settings from your LoRaWAN network
+							server — no local network access needed. Each service listens on its own <strong>port</strong>,
+							and the first byte of the payload is the <strong>command</strong>.
+							The <em>OTA Encoder</em> and <em>OTA Decoder</em> buttons above give you JavaScript that builds
+							valid frames and decodes replies in Node-RED or your own tooling.
 						</div>
-						<table class="table table-sm table-hover mb-0" style="font-size:0.82rem;">
-							<thead class="table-light">
-								<tr>
-									<th style="width:46px">Byte</th>
-									<th>Command</th>
-									<th>Description</th>
-								</tr>
-							</thead>
-							<tbody id="command-table-body">
-							</tbody>
-						</table>
+
+						<div class="ota-legend mb-3">
+							<div class="fw-semibold mb-1">The same command bytes work on every service</div>
+							<div class="d-flex flex-wrap gap-2">
+								<span><span class="badge bg-secondary">0x01</span> Get</span>
+								<span><span class="badge bg-secondary">0x02</span> Set</span>
+								<span><span class="badge bg-secondary">0x03</span> Capabilities</span>
+							</div>
+						</div>
+
+						<div class="alert alert-light border mb-3 py-2 px-3 ota-help">
+							<div class="fw-semibold mb-1">Where to start</div>
+			Send <code>Capabilities (0x03)</code> first to learn what a service accepts. For Counting,
+			<code>List (0x04)</code> gives you the identities to work with. Occupancy, Detection Alert,
+			Speed, and Radar Configuration each hold a single configuration, so <code>Set (0x02)</code>
+			replaces the whole body — <code>Get (0x01)</code> first if you only want to change one field.
+
+						<div class="fw-semibold mb-2" style="font-size:0.86rem">Services</div>
+						<div class="accordion accordion-flush ota-accordion" id="ota-services"></div>
 					</div>
 				</div>
 		</div>
@@ -137,31 +209,119 @@
 <script>
 // OTA command reference grouped by destination service port
 const DEFAULT_COMMANDS = [
-	{ port: 100, byte: '0x02', message: 'Execute', action: 'Run bridge or application actions.' },
-	{ port: 100, byte: '0x03', message: 'Capabilities', action: 'Read supported action codes.' },
-	{ port: 110, byte: '0x01', message: 'Get Configuration', action: 'Read configured LoRa Data Rate and ADR.' },
-	{ port: 110, byte: '0x02', message: 'Set Configuration', action: 'Update configured LoRa Data Rate and ADR.' },
-	{ port: 110, byte: '0x03', message: 'Capabilities', action: 'Read supported LoRa configuration ranges.' },
+	{ port: 100, byte: '0x01', message: 'Restart Bridge', action: 'Restart the AI-B100 bridge.' },
+	{ port: 100, byte: '0x02', message: 'Join Network', action: 'Trigger an OTAA join on the bridge.' },
+	{ port: 100, byte: '0x03', message: 'Reset Radar State', action: 'Clear tracked radar objects and republish current use-case state.' },
+	{ port: 110, byte: '0x01', message: 'Set Publish Interval', action: 'Update the Occupancy publish interval in minutes.' },
+	{ port: 110, byte: '0x02', message: 'Set Data Rate', action: 'Set a fixed LoRaWAN data rate (DR0-DR5).' },
+	{ port: 110, byte: '0x03', message: 'Set ADR', action: 'Enable or disable Adaptive Data Rate.' },
 	{ port: 111, byte: '0x01', message: 'Get Radar Configuration', action: 'Read camera-wide Radar Detection Sensitivity.' },
 	{ port: 111, byte: '0x02', message: 'Set Radar Configuration', action: 'Set Detection Sensitivity to low, medium, or high.' },
 	{ port: 111, byte: '0x03', message: 'Radar Capabilities', action: 'Read supported Radar-wide configuration fields.' },
-	{ port: 120, byte: '0x01', message: 'Get Information', action: 'Read camera or bridge information.' },
-	{ port: 120, byte: '0x03', message: 'Capabilities', action: 'Read supported information item types.' },
-	{ port: 130, byte: '0x01', message: 'Get Transmission', action: 'Read publish state and interval by service index.' },
-	{ port: 130, byte: '0x02', message: 'Set Transmission', action: 'Update publish state and interval by service index.' },
-	{ port: 130, byte: '0x03', message: 'Capabilities', action: 'Read transmission support for all services.' },
-	{ port: 131, byte: '0x01-0x04', message: 'Counting scenes', action: 'Get, set, list, create, update, or delete named counting lines.' },
-	{ port: 132, byte: '0x01', message: 'Get Occupancy', action: 'Read Radar Occupancy configuration and AOI.' },
-	{ port: 132, byte: '0x02', message: 'Set Occupancy', action: 'Update Radar Occupancy configuration and AOI.' },
-	{ port: 132, byte: '0x03', message: 'Capabilities', action: 'Read Occupancy limits.' },
-	{ port: 133, byte: '0x01', message: 'Get Presence Alert', action: 'Read Presence Alert configuration and AOI.' },
-	{ port: 133, byte: '0x02', message: 'Set Presence Alert', action: 'Update Presence Alert configuration and AOI.' },
-	{ port: 133, byte: '0x03', message: 'Capabilities', action: 'Read Presence Alert limits.' }
+	{ port: 120, byte: '0x01', message: 'Get Camera Info', action: 'Read camera model, serial, firmware, uptime, and app version. Replies on port 121.' },
+	{ port: 120, byte: '0x02', message: 'Get Bridge Info', action: 'Read bridge hardware, firmware, power source, temperature, and devAddr. Replies on port 122.' },
+	{ port: 120, byte: '0x03', message: 'Signal Quality', action: 'Snapshot current data rate, RSSI, SNR, and frame counters into local status.' },
+	{ port: 130, byte: '0x01', message: 'Get Transmission', action: 'Read publish state and interval for Counting, Occupancy, or Presence by use-case index.' },
+	{ port: 130, byte: '0x02', message: 'Set Transmission', action: 'Update publish state and interval for Counting, Occupancy, or Presence by use-case index.' },
+	{ port: 130, byte: '0x03', message: 'Capabilities', action: 'Read transmission support and limits for all use cases.' },
+	{ port: 131, byte: '0x01', message: 'Get Counting Scene', action: 'Read one page of a named counting line by scene index.' },
+	{ port: 131, byte: '0x02', message: 'Set Counting Scene', action: 'Update a named counting line using its current fingerprint.' },
+	{ port: 131, byte: '0x03', message: 'Counting Capabilities', action: 'Read Counting OTA limits such as max scenes and bytes per page.' },
+	{ port: 131, byte: '0x04', message: 'List Counting', action: 'Read stable scene identities before get/set operations.' },
+	{ port: 132, byte: '0x01', message: 'Get Occupancy', action: 'Read Occupancy label, interval, and area of interest.' },
+	{ port: 132, byte: '0x02', message: 'Set Occupancy', action: 'Update Occupancy label, interval, and area of interest.' },
+	{ port: 132, byte: '0x03', message: 'Occupancy Capabilities', action: 'Read Occupancy OTA limits such as max area points.' },
+	{ port: 133, byte: '0x01', message: 'Get Detection Alert', action: 'Read Detection Alert label, heartbeat, active interval, hold time, and area of interest.' },
+	{ port: 133, byte: '0x02', message: 'Set Detection Alert', action: 'Update Detection Alert label, heartbeat, active interval, hold time, and area of interest.' },
+	{ port: 133, byte: '0x03', message: 'Detection Alert Capabilities', action: 'Read Detection Alert OTA limits such as max area points.' },
+	{ port: 134, byte: '0x01', message: 'Get Speed', action: 'Read Speed enable state, interval, unit, speed limit, and area of interest.' },
+	{ port: 134, byte: '0x02', message: 'Set Speed', action: 'Update Speed enable state, interval, unit, speed limit, and area of interest.' },
+	{ port: 134, byte: '0x03', message: 'Speed Capabilities', action: 'Read Speed OTA limits such as max area points, interval range, and speed limit range.' }
+];
+
+// Integrator-facing overview of each OTA service port
+const OTA_SERVICES = [
+	{
+		port: 100,
+		name: 'Actions',
+		access: 'Action',
+		accessClass: 'bg-warning text-dark',
+		purpose: 'One-off operations on the bridge or radar state: restart the bridge, trigger an OTAA join, ' +
+		         'or clear tracked radar objects and republish. Nothing is stored — the device acts and the ' +
+		         'result is reflected in local status.'
+	},
+	{
+		port: 110,
+		name: 'AI-B100 Configuration',
+		access: 'Write-only',
+		accessClass: 'bg-success',
+		purpose: 'The LoRaWAN radio settings the bridge transmits with: publish interval, a fixed data rate, ' +
+		         'or ADR enable/disable. Each command takes a single value byte alongside the command byte.'
+	},
+	{
+		port: 111,
+		name: 'Radar Configuration',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'Radar-wide Detection Sensitivity (low, medium, or high), applied directly through the camera\'s ' +
+		         'own Radar Detection Sensitivity API rather than app settings. Capabilities lists which fields ' +
+		         'this firmware supports.'
+	},
+	{
+		port: 120,
+		name: 'Information',
+		access: 'Read-only',
+		accessClass: 'bg-info text-dark',
+		purpose: 'Identity and health values from the camera and bridge. Camera Info replies on port 121, ' +
+		         'Bridge Info replies on port 122. Signal Quality only updates local status, it does not reply.'
+	},
+	{
+		port: 130,
+		name: 'Use-Case Transmission',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'Which use cases publish over LoRa, and how often each one transmits. Publish state and interval ' +
+		         'are addressed by use-case index: 1 Counting, 2 Occupancy, 3 Presence Alert.'
+	},
+	{
+		port: 131,
+		name: 'Counting',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The geometry of named counting lines already configured on the camera. List for stable ' +
+		         'scene identities, Get a page, then Set it back with the fingerprint you received.'
+	},
+	{
+		port: 132,
+		name: 'Occupancy',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The single Occupancy configuration on this camera: selected label, interval, and optional ' +
+		         'area of interest. Get before Set so fields you are not changing keep their current value.'
+	},
+	{
+		port: 133,
+		name: 'Detection Alert',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The single Detection Alert configuration on this camera: selected label, heartbeat, active ' +
+		         'interval, hold time, and optional area of interest. Get before Set for the same reason as Occupancy.'
+	},
+	{
+		port: 134,
+		name: 'Speed',
+		access: 'Read & write',
+		accessClass: 'bg-success',
+		purpose: 'The single Speed configuration on this camera: enable state, publish interval, output unit ' +
+		         '(km/h or mph), speed limit, and optional area of interest. Get before Set for the same reason ' +
+		         'as Occupancy. Speed publishes its summary uplink on port 4.'
+	}
 ];
 
 $(document).ready(function() {
-	let lastRenderedFcnt = -1;
-	let clearedAtFcnt = -2;
+	let lastRenderedKey = '';
+	let lastEntries = [];
+	let clearedKeys = [];
 	const commands = JSON.parse(JSON.stringify(DEFAULT_COMMANDS));
 	const translatorModal = new bootstrap.Modal(document.getElementById('translatorModal'));
 
@@ -180,7 +340,7 @@ $(document).ready(function() {
 		}
 	});
 
-	renderCommandTable();
+	renderOtaServices();
 	const RSSI_LEVELS = [
 		{ min: -70,  label: 'Excellent', cls: 'sig-good' },
 		{ min: -85,  label: 'Good',      cls: 'sig-ok'   },
@@ -210,47 +370,43 @@ $(document).ready(function() {
 		return str; // pass through non-hex as-is
 	}
 
-	// Try to render an ASCII view from a HEX payload string
-	function hexToAsciiSafe(hexStr) {
-		const clean = hexStr.replace(/\s/g, '');
-		if (!/^[0-9A-Fa-f]+$/.test(clean) || clean.length % 2 !== 0) return '';
-		let out = '';
-		for (let i = 0; i < clean.length; i += 2) {
-			const code = parseInt(clean.substr(i, 2), 16);
-			out += (code >= 32 && code < 127) ? String.fromCharCode(code) : '.';
-		}
-		return out;
+	function renderOtaServices() {
+		const container = $('#ota-services');
+		container.empty();
+		OTA_SERVICES.forEach(function(svc) {
+			const cmds = commands.filter(function(c) { return c.port === svc.port; });
+			const items = cmds.map(function(c) {
+				return `<li class="ota-cmd">
+						<span class="badge bg-secondary">${c.byte}</span>
+						<div>
+							<div class="ota-cmd-name">${c.message}</div>
+							<div class="ota-cmd-desc">${c.action}</div>
+						</div>
+					</li>`;
+			}).join('');
+			const id = 'ota-svc-' + svc.port;
+			container.append(`
+				<div class="accordion-item">
+					<h2 class="accordion-header">
+						<button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+								data-bs-target="#${id}" aria-expanded="false" aria-controls="${id}">
+							<span class="badge bg-primary ota-port">${svc.port}</span>
+							<span>${svc.name}</span>
+						</button>
+					</h2>
+					<div id="${id}" class="accordion-collapse collapse" data-bs-parent="#ota-services">
+						<div class="accordion-body">
+							<div class="mb-2"><span class="badge ${svc.accessClass}">${svc.access}</span></div>
+							<p class="ota-purpose">${svc.purpose}</p>
+							<ul class="ota-cmd-list">${items}</ul>
+						</div>
+					</div>
+				</div>`);
+		});
 	}
 
-	const PORT_GROUPS = {
-		100: 'Port 100 - Actions',
-		110: 'Port 110 - LoRa Configuration',
-		111: 'Port 111 - Radar Configuration',
-		120: 'Port 120 - Information',
-		130: 'Port 130 - Service Transmission',
-		131: 'Port 131 - Counting (To Be Defined)',
-		132: 'Port 132 - Occupancy',
-		133: 'Port 133 - Presence Alert'
-	};
-
-	function renderCommandTable() {
-		const tbody = $('#command-table-body');
-		tbody.empty();
-		let lastPort = null;
-		commands.forEach(function(cmd) {
-			if (cmd.port !== lastPort) {
-				lastPort = cmd.port;
-				const label = PORT_GROUPS[cmd.port] || ('Port ' + cmd.port);
-				tbody.append(`<tr class="table-secondary"><td colspan="3"><strong>${label}</strong></td></tr>`);
-			}
-			tbody.append(`
-				<tr>
-					<td><span class="badge bg-secondary">${cmd.byte}</span></td>
-					<td><strong>${cmd.message}</strong></td>
-					<td><small>${cmd.action}</small></td>
-				</tr>
-			`);
-		});
+	function entryKey(entry) {
+		return [entry.time, entry.port, entry.length, entry.payload, entry.fcntDown].join('|');
 	}
 
 	function pollDownlinks() {
@@ -263,12 +419,12 @@ $(document).ready(function() {
 				updateNavDot(data);
 				const lw = data.lorawan;
 				if (!lw) return;
-				const entries = lw.downlinks;
-				if (!Array.isArray(entries) || entries.length === 0) return;
-				const newestFcnt = entries[entries.length - 1].fcntDown;
-				if (newestFcnt === lastRenderedFcnt) return;
-				lastRenderedFcnt = newestFcnt;
-				const display = entries.filter(function(e) { return e.fcntDown > clearedAtFcnt; });
+				const entries = Array.isArray(lw.downlinks) ? lw.downlinks : [];
+				const key = JSON.stringify(entries);
+				if (key === lastRenderedKey) return;
+				lastRenderedKey = key;
+				lastEntries = entries;
+				const display = entries.filter(function(entry) { return clearedKeys.indexOf(entryKey(entry)) === -1; });
 				renderDownlinkTable(display);
 			}
 		});
@@ -280,21 +436,18 @@ $(document).ready(function() {
 			? parts[1] + '<br><small class="text-muted">' + parts[0] + '</small>'
 			: (msg.time || '—');
 		const port      = msg.port != null ? msg.port : '—';
-		const len       = msg.length != null ? msg.length : '—';
 		const ptype     = (msg.payload_type || 'HEX').toUpperCase();
 		const rawPayload= msg.payload || '';
 
-		let hexCell, asciiCell;
+		let hexCell;
 		if (ptype === 'HEX') {
-			hexCell   = `<code>${formatHex(rawPayload)}</code>`;
-			asciiCell = `<small class="text-muted">${hexToAsciiSafe(rawPayload)}</small>`;
+			hexCell = `<code>${formatHex(rawPayload)}</code>`;
 		} else {
 			// ASCII payload — convert chars to hex for the hex column
 			let hexStr = '';
 			for (let i = 0; i < rawPayload.length; i++)
 				hexStr += ('0' + rawPayload.charCodeAt(i).toString(16)).slice(-2);
-			hexCell   = `<code>${formatHex(hexStr)}</code>`;
-			asciiCell = `<small class="text-muted">${$('<div>').text(rawPayload).html()}</small>`;
+			hexCell = `<code>${formatHex(hexStr)}</code>`;
 		}
 
 		const rssi = msg.rssi != null ? msg.rssi : null;
@@ -305,9 +458,7 @@ $(document).ready(function() {
 		return `<tr>
 			<td style="white-space:nowrap">${timeStr}</td>
 			<td><span class="badge bg-secondary">${port}</span></td>
-			<td>${len}</td>
 			<td class="payload-cell">${hexCell}</td>
-			<td class="payload-cell">${asciiCell}</td>
 			<td>${rssiCell}</td>
 			<td>${snrCell}</td>
 			<td>${msg.fcntDown != null ? msg.fcntDown : '—'}</td>
@@ -333,7 +484,7 @@ $(document).ready(function() {
 
 	$('#clear-log').on('click', function() {
 		if (confirm('Clear all downlink messages?')) {
-			clearedAtFcnt = lastRenderedFcnt;
+			clearedKeys = lastEntries.map(entryKey);
 			$('#downlink-tbody').empty();
 			$('#no-messages').show();
 			$('#message-count').text('0');

@@ -246,14 +246,14 @@ function radarOtaParseConfigBody(body) {
 		crc8: radarOtaByte(body[7])
 	};
 }
-function Encode_Config(config, command) {
+function Encode(config, command) {
 	const cmd = radarOtaByte(command);
 	if (cmd === 0x01 || cmd === 0x03) return radarOtaBytesToHex([cmd]);
 	if (cmd !== 0x02) throw new Error('Unsupported command for JSON encode');
 	return radarOtaBytesToHex([0x02].concat(radarOtaBuildConfigBody(config || {})));
 }
-function Decode_config(input) {
-	const bytes = Array.isArray(input) ? input.slice() : radarOtaHexToBytes(input);
+function Decode(input) {
+	const bytes = radarOtaHexToBytes(input);
 	if (!bytes.length) throw new Error('Empty payload');
 	const command = radarOtaByte(bytes[0]);
 	if (command === 0x01 || command === 0x03) return { port: AI_B100_RADAR_OTA_PORT, command, type: command === 0x01 ? 'get_config_request' : 'get_caps_request' };
@@ -287,13 +287,13 @@ function setRadarOtaHexOutput(hex) {
 }
 function buildRadarOtaSetFromJson() {
 	try {
-		setRadarOtaHexOutput(Encode_Config(JSON.parse($('#radar-ota-json-input').val()), 0x02));
+		setRadarOtaHexOutput(Encode(JSON.parse($('#radar-ota-json-input').val()), 0x02));
 		showToast('Radar OTA Set Config built for port 130', 'success');
 	} catch (error) { showToast('Failed to build Radar OTA payload: ' + error.message, 'danger'); }
 }
 function decodeRadarOtaHexInput() {
 	try {
-		$('#radar-ota-json-output').val(JSON.stringify(Decode_config($('#radar-ota-hex-input').val()), null, 2));
+		$('#radar-ota-json-output').val(JSON.stringify(Decode($('#radar-ota-hex-input').val()), null, 2));
 	} catch (error) { showToast('Failed to decode Radar OTA payload: ' + error.message, 'danger'); }
 }
 function downloadRadarOtaTranslator() {

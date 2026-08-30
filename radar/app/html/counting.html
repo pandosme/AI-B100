@@ -37,20 +37,21 @@
 			<div class="card-body">
 				<div class="counting-layout">
 					<div><div id="sceneList" class="scene-list"></div></div>
-					<div id="sceneEditor" hidden>
-						<div class="row g-3 align-items-end mb-3">
-							<div class="col-12 col-lg-5"><label class="form-label" for="sceneName">Name</label><input id="sceneName" class="form-control" maxlength="31"></div>
-							<div class="col-6 col-lg-3"><label class="form-label" for="sceneDirection">Direction</label><select id="sceneDirection" class="form-select"><option value="leftToRight">Left to right</option><option value="rightToLeft">Right to left</option></select></div>
-							<div class="col-6 col-lg-2"><div class="form-check form-switch mb-2"><input id="sceneEnabled" class="form-check-input" type="checkbox"><label class="form-check-label" for="sceneEnabled">Enabled</label></div></div>
-							<div class="col-12 col-lg-2 text-lg-end"><button id="deleteScene" class="btn btn-outline-danger">Delete</button></div>
-						</div>
-						<div class="row g-3 mb-3">
-							<div class="col-auto"><div class="form-check"><input id="classHuman" class="form-check-input" type="checkbox"><label class="form-check-label" for="classHuman">Human</label></div></div>
-							<div class="col-auto"><div class="form-check"><input id="classVehicle" class="form-check-input" type="checkbox"><label class="form-check-label" for="classVehicle">Vehicle</label></div></div>
-							<div class="col"><span class="me-3">Human: <strong id="humanTotal">0</strong></span><span>Vehicle: <strong id="vehicleTotal">0</strong></span></div>
+					<div>
+						<div id="sceneEditor" hidden>
+							<div class="row g-3 align-items-end mb-3">
+								<div class="col-12 col-lg-5"><label class="form-label" for="sceneName">Name</label><input id="sceneName" class="form-control" maxlength="31"></div>
+								<div class="col-6 col-lg-4"><label class="form-label d-block">Direction</label><button id="flipDirection" type="button" class="btn btn-outline-secondary w-100">Change direction</button></div>
+								<div class="col-6 col-lg-3 text-lg-end"><button id="deleteScene" class="btn btn-outline-danger">Delete</button></div>
+							</div>
+							<div class="row g-3 mb-3">
+								<div class="col-auto"><div class="form-check"><input id="classHuman" class="form-check-input" type="checkbox"><label class="form-check-label" for="classHuman">Human</label></div></div>
+								<div class="col-auto"><div class="form-check"><input id="classVehicle" class="form-check-input" type="checkbox"><label class="form-check-label" for="classVehicle">Vehicle</label></div></div>
+								<div class="col"><span class="me-3">Human: <strong id="humanTotal">0</strong></span><span>Vehicle: <strong id="vehicleTotal">0</strong></span></div>
+							</div>
 						</div>
 						<div id="video-view"><div id="video"></div><canvas id="line-canvas" width="1000" height="562"></canvas></div>
-						<div class="mt-3"><button id="saveCounting" class="btn btn-primary">Save scenes</button></div>
+						<div class="mt-3" id="sceneActions" hidden><button id="saveCounting" class="btn btn-primary">Save scenes</button></div>
 					</div>
 				</div>
 			</div>
@@ -75,7 +76,8 @@ $(document).ready(function() {
 	$('#addScene').on('click', addScene);
 	$('#deleteScene').on('click', deleteScene);
 	$('#saveCounting').on('click', saveScenes);
-	$('#sceneName,#sceneDirection,#sceneEnabled,#classHuman,#classVehicle').on('input change', updateSelectedFromForm);
+	$('#flipDirection').on('click', flipDirection);
+	$('#sceneName,#classHuman,#classVehicle').on('input change', updateSelectedFromForm);
 	canvas.addEventListener('pointerdown', beginDrag);
 	canvas.addEventListener('pointermove', moveDrag);
 	canvas.addEventListener('pointerup', endDrag);
@@ -92,22 +94,25 @@ function playVideo(aspect) {
 	else if (aspect === '16:10') { size = '800x500'; ratio = '16 / 10'; }
 	$('#video-view').css('aspect-ratio', ratio);
 	const secure = location.protocol === 'https:' ? ' secure=true' : '';
-	$('#video').html('<media-stream-player hostname="' + location.hostname + '"' + secure + ' format="RTP_H264" compression="40" audio="0" resolution="' + size + '" variant="basic" autoplay></media-stream-player>');
+	$('#video').empty().append('<media-stream-player hostname="' + location.hostname + '"' + secure + ' format="RTP_H264" compression="40" audio="0" resolution="' + size + '" variant="basic" autoplay></media-stream-player>');
 	requestAnimationFrame(resizeCanvas);
 }
 
 function resizeCanvas() {
 	const box = canvas.getBoundingClientRect();
+	if (!box.width || !box.height) return;
 	canvas.width = Math.max(1, Math.round(box.width * devicePixelRatio));
 	canvas.height = Math.max(1, Math.round(box.height * devicePixelRatio));
 	drawLine();
 }
 window.addEventListener('resize', resizeCanvas);
+if (window.ResizeObserver) new ResizeObserver(resizeCanvas).observe(document.getElementById('video-view'));
 
 function loadSettings() {
 	$.getJSON('settings').done(function(settings) {
 		currentSettings = settings || {};
 		scenes = JSON.parse(JSON.stringify((((currentSettings.transmission || {}).counting || {}).scenes || [])));
+		scenes.forEach(function(scene) { scene.enabled = true; });
 		selectedId = scenes.some(function(scene) { return scene.id === selectedId; }) ? selectedId : (scenes[0] || {}).id;
 		renderScenes(); loadTotals();
 	});
@@ -127,9 +132,10 @@ function renderScenes() {
 	});
 	const scene = selectedScene();
 	$('#sceneEditor').prop('hidden', !scene);
+	$('#sceneActions').prop('hidden', !scene);
 	if (scene) {
-		$('#sceneName').val(scene.name); $('#sceneDirection').val(scene.direction);
-		$('#sceneEnabled').prop('checked', !!scene.enabled);
+		$('#sceneName').val(scene.name);
+		$('#flipDirection').attr('title', scene.direction === 'rightToLeft' ? 'Right to left' : 'Left to right');
 		$('#classHuman').prop('checked', !!scene.classes.human); $('#classVehicle').prop('checked', !!scene.classes.vehicle);
 		const count = totals[scene.id] || { human: 0, vehicle: 0 };
 		$('#humanTotal').text(count.human); $('#vehicleTotal').text(count.vehicle);
@@ -142,7 +148,7 @@ function addScene() {
 	let id = 1; while (scenes.some(function(scene) { return scene.id === id; })) id++;
 	let suffix = scenes.length + 1, name = 'Scene ' + suffix;
 	while (scenes.some(function(scene) { return scene.name.toLowerCase() === name.toLowerCase(); })) name = 'Scene ' + (++suffix);
-	scenes.push({ id: id, name: name, enabled: false, direction: 'leftToRight', classes: { human: true, vehicle: false }, line: [{ x: 500, y: 200 }, { x: 500, y: 800 }] });
+	scenes.push({ id: id, name: name, enabled: true, direction: 'leftToRight', classes: { human: true, vehicle: false }, line: [{ x: 500, y: 200 }, { x: 500, y: 800 }] });
 	selectedId = id; renderScenes();
 }
 
@@ -153,10 +159,16 @@ function deleteScene() {
 	selectedId = (scenes[0] || {}).id; renderScenes();
 }
 
+function flipDirection() {
+	const scene = selectedScene(); if (!scene) return;
+	scene.direction = scene.direction === 'rightToLeft' ? 'leftToRight' : 'rightToLeft';
+	renderScenes();
+}
+
 function updateSelectedFromForm() {
 	const scene = selectedScene(); if (!scene) return;
-	scene.name = $('#sceneName').val(); scene.direction = $('#sceneDirection').val();
-	scene.enabled = $('#sceneEnabled').is(':checked');
+	scene.name = $('#sceneName').val();
+	scene.enabled = true;
 	scene.classes = { human: $('#classHuman').is(':checked'), vehicle: $('#classVehicle').is(':checked') };
 	renderScenes();
 }
@@ -167,7 +179,7 @@ function validateScenes() {
 		const name = String(scene.name || '').trim();
 		if (!name || name.length > 31) return 'Every scene needs a name of at most 31 characters';
 		if (names[name.toLowerCase()]) return 'Scene names must be unique'; names[name.toLowerCase()] = true; scene.name = name;
-		if (scene.enabled && !scene.classes.human && !scene.classes.vehicle) return 'Enabled scenes must select Human or Vehicle';
+		if (!scene.classes.human && !scene.classes.vehicle) return 'Every scene must select Human or Vehicle';
 		if (!scene.line || scene.line.length !== 2 || (scene.line[0].x === scene.line[1].x && scene.line[0].y === scene.line[1].y)) return 'Each scene line needs two distinct points';
 	}
 	return '';
@@ -203,9 +215,13 @@ function drawLine() {
 	[first, second].forEach(function(point) { context.beginPath(); context.arc(point.x, point.y, 9 * devicePixelRatio, 0, Math.PI * 2); context.fill(); context.stroke(); });
 	const middle = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
 	let nx = second.y - first.y, ny = -(second.x - first.x); if (scene.direction === 'rightToLeft') { nx = -nx; ny = -ny; }
-	const length = Math.hypot(nx, ny) || 1; nx = nx / length * 45 * devicePixelRatio; ny = ny / length * 45 * devicePixelRatio;
-	const end = { x: middle.x + nx, y: middle.y + ny }; context.beginPath(); context.moveTo(middle.x, middle.y); context.lineTo(end.x, end.y); context.stroke();
-	const angle = Math.atan2(ny, nx); context.beginPath(); context.moveTo(end.x, end.y); context.lineTo(end.x - 13 * devicePixelRatio * Math.cos(angle - .55), end.y - 13 * devicePixelRatio * Math.sin(angle - .55)); context.lineTo(end.x - 13 * devicePixelRatio * Math.cos(angle + .55), end.y - 13 * devicePixelRatio * Math.sin(angle + .55)); context.closePath(); context.fillStyle = '#20d4b2'; context.fill();
+	const length = Math.hypot(nx, ny) || 1; nx /= length; ny /= length;
+	const tx = -ny, ty = nx, size = 18 * devicePixelRatio;
+	context.beginPath();
+	context.moveTo(middle.x + nx * size, middle.y + ny * size);
+	context.lineTo(middle.x - nx * size * 0.5 + tx * size * 0.8, middle.y - ny * size * 0.5 + ty * size * 0.8);
+	context.lineTo(middle.x - nx * size * 0.5 - tx * size * 0.8, middle.y - ny * size * 0.5 - ty * size * 0.8);
+	context.closePath(); context.fillStyle = '#20d4b2'; context.fill(); context.stroke();
 }
 
 function loadTotals() {

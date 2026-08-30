@@ -1,5 +1,5 @@
 PROG1	= aib100
-OBJS1	= main.c counting.c occupancy.c alert.c ota_protocol.c ota_counting.c ACAP.c cJSON.c B100.c RadarDetection.c radarscene.pb-c.c protobuf-c.c
+OBJS1	= main.c counting.c occupancy.c alert.c speed.c ota_protocol.c ota_counting.c ACAP.c cJSON.c B100.c RadarDetection.c radarscene.pb-c.c protobuf-c.c
 PROGS	= $(PROG1)
 
 PKGS = glib-2.0 gio-2.0 axevent axparameter fcgi libcurl 
