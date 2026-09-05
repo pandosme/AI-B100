@@ -40,7 +40,9 @@ build_arch() {
 	rm -rf build
 }
 
-build_arch aarch64
-build_arch armv7hf
+ARCHES=${ARCHES:-"aarch64 armv7hf"}
+for ARCH in $ARCHES; do
+	build_arch "$ARCH"
+done
 
 rm -rf "$STAGE"

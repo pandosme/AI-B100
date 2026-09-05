@@ -14,8 +14,9 @@ Current ACAP variants:
 | --- | --- | --- | --- |
 | `aoa/` | AI-B100 AOA | Axis Object Analytics `CrosslineCounting` and `OccupancyInArea` | Counting on port 1, Occupancy on port 2, Presence on port 3 |
 | `radar/` | AI-B100 Radar | Axis radar scene provider | Occupancy on port 2, Detection Alert on port 3, Speed on port 4; Counting is reserved on port 1 but hidden |
+| `detectx/` | AI-B100 DetectX | Local validated YOLOv5 TFLite inference | 1-5 ordered label occupancy bytes on port 2 |
 
-Both variants intentionally use ACAP `appName` `aib100`. This keeps the camera URL path, settings store, and AI-B100 callback paths stable when switching between AOA and Radar variants. The variants are alternatives: install and run the one that matches the target camera and use case.
+All variants intentionally use ACAP `appName` `aib100`. This keeps the camera URL path, settings store, and AI-B100 callback paths stable when switching variants. The variants are alternatives: install and run the one that matches the target camera and use case.
 
 The top-level [README.md](README.md) is the repository overview. App-specific operation is documented in [aoa/README.md](aoa/README.md) and [radar/README.md](radar/README.md). Complete staging and field setup is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
@@ -55,6 +56,16 @@ ai-b100/
 |       |-- RadarDetection.*, radarscene.pb-c.*, protobuf-c.*
 |       |-- manifest.json, Makefile
 |       |-- html/           # Publish, Occupancy, Detection Alert, Radar, Bridge, Downlink, GPS, About
+|       |-- settings/
+|       `-- localdata/
+|-- detectx/
+|   |-- build.sh / install.sh / Dockerfile / README.md
+|   |-- decoder/            # reference port 2 decoder
+|   |-- tools/              # strict TFLite model validator/metadata generator
+|   `-- app/
+|       |-- main.c, Model.c/h, Video.c/h, imgprovider.c/h, labelparse.c/h, occupancy.c/h
+|       |-- manifest.json, Makefile, model/
+|       |-- html/           # Publish, Model, Detection, Downlink, About
 |       |-- settings/
 |       `-- localdata/
 `-- images/
@@ -167,7 +178,7 @@ Important firmware observations from live testing:
 - `payload_type` must be preserved. Display `HEX` payloads as byte pairs and `ASCII` payloads as text.
 - `length` is payload byte count, not string length.
 
-Recent B100 clients in both ACAPs are callback-driven. Bridge status, receive/downlink, and GPS data are delivered through the callback endpoints above and reflected into the ACAP status store/UI.
+Recent B100 clients in all ACAPs are callback-driven. Bridge status, receive/downlink, and GPS data are delivered through the callback endpoints above and reflected into the ACAP status store/UI.
 
 ---
 
@@ -396,7 +407,36 @@ Radar use-case timers must remain independent.
 
 ---
 
-## 8. Build and Install
+## 8. DetectX ACAP Current State
+
+Path: `detectx/`
+
+Friendly name: **AI-B100 DetectX**
+
+Package output: `AI-B100_DetectX_2_0_0_aarch64.eap` (ARTPEC-8/9 only)
+
+- Runs one validated YOLOv5 TFLite model locally and feeds every post-filter frame, including empty frames, into the occupancy module.
+- Selects 1-5 unique active-model labels in model order.
+- Publishes one saturating uint8 interval maximum per selected label on fixed port `2`.
+- Resets interval maxima when a publish begins, records frames arriving while the send is in flight into the new interval, and merges detached maxima back if the bridge send fails.
+- Shows a live next-publish countdown and current per-label interval maxima on Publish; the maxima reset at the publish boundary.
+- Generates a copyable/downloadable uplink decoder plus DetectX-specific OTA encoder and decoder JavaScript. All three read the persisted `transmission.occupancy.selectedLabels` order and embed an explicit `[{ byte, label }]` mapping; decoded port 2 JSON returns that mapping under `configuration.occupancy.labels`. Current OTA services are actions on port 100, configuration on port 110, information requests on port 120, and information replies on ports 121/122; keep their service registries extensible for future DetectX use cases.
+- Uses one model, label file, and metadata sidecar fixed at build time; operators cannot upload or replace the model.
+- Validates the bundled model with `detectx/tools/validate_model.py` and generates its metadata before packaging.
+- Supports only uint8 NHWC `[1,H,W,3]` input and one YOLOv5 `[1,N,5+C]` float32/int8/uint8 output with valid per-tensor output quantization when quantized.
+- NMS is class-aware and confidence-ordered through explicit `classIndex` values.
+- Uses settings schema version `3`; `detection.captureMode` selects `balanced`, `crop`, or `letterbox`.
+- Balanced captures a 4:3 frame and stretches it to the square model input, Center-cropping uses VDO `image.fit=crop`, and Letterbox uses VDO `image.fit=scale`.
+- Excludes MQTT, crops, SD capture, certificates, events, and remote model OTA.
+- Uses exactly four navigation items: Publish, Occupancy, LoRA Bridge, and About. GPS and LoRA Downlink remain backend capabilities but are hidden from DetectX navigation.
+- Configures live detections, capture mode, the draggable area of interest, label selection, confidence, and overlap handling together on the Occupancy page.
+- Uses settings `variant: "detectx"`; switching from another `aib100` variant preserves shared bridge settings but replaces incompatible transmission settings.
+
+Keep DetectX aarch64-only and keep its decoder synchronized with selected label order and exact payload length.
+
+---
+
+## 9. Build and Install
 
 Docker is required for cross-building.
 
@@ -414,6 +454,13 @@ cd /home/fred/development/ai-b100/radar
 ./build.sh
 ```
 
+Build DetectX:
+
+```bash
+cd /home/fred/development/ai-b100/detectx
+./build.sh
+```
+
 Architecture selection:
 
 - Use `aarch64` packages for ARTPEC-8 and ARTPEC-9 cameras.
@@ -423,9 +470,9 @@ Install through the Axis camera Apps page or the app-specific `install.sh` helpe
 
 ---
 
-## 9. Documentation Rules
+## 10. Documentation Rules
 
-- Root [README.md](README.md) should remain a repository overview and point to [aoa/README.md](aoa/README.md), [radar/README.md](radar/README.md), and [DEPLOYMENT.md](DEPLOYMENT.md).
+- Root [README.md](README.md) should remain a repository overview and point to [aoa/README.md](aoa/README.md), [radar/README.md](radar/README.md), [detectx/README.md](detectx/README.md), and [DEPLOYMENT.md](DEPLOYMENT.md).
 - [DEPLOYMENT.md](DEPLOYMENT.md) is the complete staging and field setup guide.
 - Keep recommended IP addresses on the `192.168.1.x` scheme.
 - Keep AOA and Radar READMEs app-specific and operational.
@@ -433,7 +480,7 @@ Install through the Axis camera Apps page or the app-specific `install.sh` helpe
 
 ---
 
-## 10. Editing Rules For Agents
+## 11. Editing Rules For Agents
 
 1. Do not change the shared ACAP `appName` from `aib100` unless the user explicitly requests a package identity change.
 2. Preserve the AI-B100 callback paths under `/local/aib100/`.
@@ -447,3 +494,4 @@ Install through the Axis camera Apps page or the app-specific `install.sh` helpe
 10. Rebuild the affected app with `./build.sh` after backend, packaged UI, manifest, settings, or decoder-generation changes.
 11. Edit shared files in `common/app` only, and never create an app-local copy of one. A change to `ACAP.*`, `B100.*`, `cJSON.*`, or a shared web asset affects every app, so rebuild and check all of them, not just the one being worked on.
 12. Do not commit changes unless the user explicitly asks.
+13. Keep the DetectX model fixed at build time, validate it against the documented YOLOv5 tensor contract, and generate matching per-model metadata; do not add runtime uploads or claim arbitrary TFLite compatibility.

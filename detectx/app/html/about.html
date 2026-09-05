@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>About AI-B100 DetectX</title>
+<link rel="stylesheet" href="css/bootstrap.min.css"><link rel="stylesheet" href="css/app.css">
+<script src="js/jquery-3.7.1.min.js"></script><script src="js/pages.js"></script><script src="js/chrome.js"></script><script src="js/bootstrap.bundle.min.js"></script><script src="js/toast.js"></script></head>
+<body><header class="app-header"><div class="app-name" id="app-name">AI-B100 DetectX</div><nav class="nav-bar" id="nav-bar"></nav></header>
+<main class="page-content">
+	<div class="row g-3">
+		<div class="col-12 col-lg-6"><div class="card h-100"><div class="card-header"><h5 class="card-title mb-0">Application</h5></div><div class="card-body"><dl class="row mb-0"><dt class="col-5">Name</dt><dd class="col-7" id="name">-</dd><dt class="col-5">Package</dt><dd class="col-7" id="package">-</dd><dt class="col-5">Version</dt><dd class="col-7" id="version">-</dd><dt class="col-5">Architecture</dt><dd class="col-7">aarch64 / ARTPEC-8/9</dd><dt class="col-5">Uplink</dt><dd class="col-7">Occupancy, port 2</dd></dl></div></div></div>
+		<div class="col-12 col-lg-6"><div class="card h-100"><div class="card-header"><h5 class="card-title mb-0">Device</h5></div><div class="card-body"><dl class="row mb-0"><dt class="col-5">Model</dt><dd class="col-7" id="device-model">-</dd><dt class="col-5">Firmware</dt><dd class="col-7" id="firmware">-</dd><dt class="col-5">Serial</dt><dd class="col-7" id="serial">-</dd><dt class="col-5">Platform</dt><dd class="col-7" id="platform">-</dd></dl></div></div></div>
+		<div class="col-12 col-lg-6"><div class="card h-100"><div class="card-header"><h5 class="card-title mb-0">Model</h5></div><div class="card-body"><dl class="row mb-0"><dt class="col-5">Description</dt><dd class="col-7" id="model-description">-</dd><dt class="col-5">Input resolution</dt><dd class="col-7" id="model-resolution">-</dd><dt class="col-5">Input type</dt><dd class="col-7" id="model-input">-</dd><dt class="col-5">Output type</dt><dd class="col-7" id="model-output">-</dd><dt class="col-5">Labels</dt><dd class="col-7" id="model-labels">-</dd><dt class="col-5">Latest inference</dt><dd class="col-7" id="model-inference">-</dd></dl></div></div></div>
+		<div class="col-12 col-lg-6"><div class="card h-100"><div class="card-header"><h5 class="card-title mb-0">Payload Contract</h5></div><div class="card-body"><p class="mb-0">Port 2 carries one unsigned byte for each selected model label in configured model order. Values are the maximum post-filter simultaneous count observed during the interval and saturate at 255.</p></div></div></div>
+	</div>
+</main>
+<script>
+function updateModelStatus(status){const value=status.model?.inferenceMs;$('#model-inference').text(Number.isFinite(value)?value.toFixed(1)+' ms':'-');}
+$(function(){
+	$.getJSON('app',function(app){const setup=app.manifest.acapPackageConf.setup;$('#name').text(setup.friendlyName);$('#package').text(setup.appName);$('#version').text(setup.version);$('#device-model').text(app.device.model||'-');$('#firmware').text(app.device.firmware||'-');$('#serial').text(app.device.serial||'-');$('#platform').text(app.device.platform||app.device.chip||'-');});
+	$.getJSON('model',function(model){$('#model-description').text(model.description||'-');$('#model-resolution').text(model.modelWidth&&model.modelHeight?model.modelWidth+' x '+model.modelHeight:'-');$('#model-input').text(model.inputType||'-');$('#model-output').text(model.outputType||'-');$('#model-labels').text(Array.isArray(model.labels)?model.labels.length:'-');});
+	function refreshStatus(){$.getJSON('status',updateModelStatus);}refreshStatus();setInterval(refreshStatus,2000);
+});
+</script>
+</body>
+</html>

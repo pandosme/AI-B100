@@ -8,7 +8,7 @@ Complete field deployment guide for AI-B100 Axis ACAP installations using an Axi
 
 | Component | Description | Example |
 |-----------|-------------|---------|
-| **Axis camera or radar camera** | Any model supporting the selected ACAP variant | AOA camera, radar-equipped Axis camera |
+| **Axis camera or radar camera** | Any model supporting the selected ACAP variant | AOA camera, radar-equipped camera, or ARTPEC-8/9 camera for DetectX |
 | **AI-B100 LoRaWAN bridge** | PoE-powered Ethernet-to-LoRaWAN bridge | [AI-B100-POE](https://www.ai-embedded.se) |
 | **PoE switch** | Unmanaged or managed; provides PoE to camera and bridge | Netgear GS305EPP |
 | **Ethernet cables** | Cat5e or better | Short runs for cabinet/pole mounting |
@@ -81,7 +81,15 @@ A common staging setup with a laptop, camera, LoRA Bridge and PoE switch:
 
 It is easier to configure static IP addresses while the camera and LoRA Bridge are connected to a LAN with DHCP. Perform the following pre-staging configuration before connecting everything to the isolated PoE switch.
 
-These deployments normally use a small protected network containing only the PoE switch, camera or radar, bridge, and a commissioning laptop. Using the same credentials at every managed site simplifies maintenance, so this guide recommends the values below. Different credentials are supported; when changing them, keep the camera callback and bridge configuration synchronized and record the site values securely.
+These deployments normally use a small protected network containing only the PoE switch, camera or radar, bridge, and a commissioning laptop. Use the same service username and password for the bridge HTTP API and the camera callback account. This simplifies commissioning because the camera and bridge each use `lorabridge` / `lorabridge` when authenticating to the other device.
+
+| Purpose | Device | Port | Username | Password |
+| --- | --- | --- | --- | --- |
+| Bridge web administration | AI-B100 | `80` | `admin` (fixed) | `lorabridge` |
+| ACAP calls to bridge HTTP API | AI-B100 | `81` | `lorabridge` | `lorabridge` |
+| Bridge callbacks to ACAP | Axis camera | `80` | `lorabridge` (Viewer) | `lorabridge` |
+
+The bridge web account is separate because its username is fixed to `admin`. Different service credentials are supported; if you change them, use the same replacement values for the bridge API account, camera Viewer account, and corresponding ACAP fields, then record the site values securely.
 
 ---
 
@@ -93,22 +101,22 @@ These deployments normally use a small protected network containing only the PoE
    - `aoa/AI-B100_AOA_2_0_0_armv7hf.eap` for AOA on ARTPEC-7 cameras
    - `radar/AI-B100_Radar_2_0_0_aarch64.eap` for Radar on ARTPEC-8 and ARTPEC-9 cameras
    - `radar/AI-B100_Radar_2_0_0_armv7hf.eap` for Radar on ARTPEC-7 cameras
+   - `detectx/AI-B100_DetectX_2_0_0_aarch64.eap` for DetectX on ARTPEC-8 and ARTPEC-9 cameras
 3. For AOA deployments, start **AXIS Object Analytics**. For Radar deployments, verify that radar analytics are available on the camera.
 4. Go to **System → Accounts → Add Account**. The AI-B100 needs credentials to make HTTP callbacks to the camera.
    - Set username and password with **Viewer** privileges. If this password is compromised, the user can only view video.
-   - Recommended: user = `lorabridge`, password = `lorabridge`
+   - Use the same service credentials that will be configured for the bridge HTTP API.
+   - Recommended: user = `lorabridge`, password = `lorabridge`.
 
 > **Important:** Document and save this username/password.
 
-![Camera Account](images/camera-account.png)
+![Camera callback Viewer account](images/camera-account.png)
 
 5. Set a static fallback IP address. Go to **System → Network**:
    - **Enable** "Fallback to static IP address"
    - **IP Address:** 192.168.1.200
    - **Subnet mask:** 255.255.255.0
    - **Router:** 192.168.1.1
-
-![Fallback address](images/fallback-address.png)
 
 > The camera can now be disconnected from LAN and connected to the PoE switch.
 
@@ -126,24 +134,26 @@ These deployments normally use a small protected network containing only the PoE
    - **Gateway:** 192.168.1.1
    - **DNS:** 192.168.1.1
    - **Subnet Mask:** 255.255.255.0
+   - **API Username:** `lorabridge`
+   - **API Password:** `lorabridge`
+   - **API Port:** `81`
 
 ![Bridge network](images/bridge-lan.png)
 
-4. Configure the HTTP API for firmware 2.0.0 and later:
-   - **API User:** `lorabridge`
-   - **API Password:** `lorabridge`
-   - **HTTP API Enabled:** enabled
-   - **API Port:** `81`
-   - Save and reboot after changing the API port.
-5. Enable HTTP callbacks. Note that the ACAP will update some of these settings; you need to set:
-   - **Check "HTTP API Enabled"**
+4. Save the LAN settings and reboot after changing the API port. Continue using the web interface on port `80`; port `81` is for authenticated API calls from the ACAP.
+5. Open the bridge HTTP API settings and configure callbacks. The ACAP will maintain these values after it connects:
+   - **HTTP API Enable:** checked
    - **Callback IP:** 192.168.1.200 (the camera's IP address)
+   - **Callback Port:** `80`
+   - **Callback Status URI:** `/local/aib100/b100_status`
+   - **Callback Receive URI:** `/local/aib100/b100_receive`
+   - **Callback GPS URI:** `/local/aib100/b100_gps`
    - **Digest User:** `lorabridge` (the viewer account defined on the camera)
    - **Digest Password:** `lorabridge` (the account password defined on the camera)
 
-![HTTP API](images/bridge-http.png)
-
 6. Click **Save**.
+
+> **Important:** The callback IP is the camera address, `192.168.1.200`, not the bridge address. The bridge uses these callback credentials when posting status, downlink, and GPS data to the camera.
 
 > **Legacy bridge firmware:** AI-B100 firmware earlier than 2.0.0 uses the HTTP API on port 80 without API Digest authentication. Keep the ACAP Bridge API Port at `80` for those units. The ACAP preserves an existing saved port during upgrade and does not silently fall back from port 81.
 
@@ -171,27 +181,25 @@ These deployments normally use a small protected network containing only the PoE
 
 1. Use a browser to access the camera at `http://192.168.1.200` using your admin credentials.
 2. Go to **Apps** and verify that the installed AI-B100 ACAP is running. For AOA deployments, also verify that **AXIS Object Analytics** is running.
-3. Open the user interface for **AI-B100 AOA** or **AI-B100 Radar**.
+3. Open the user interface for **AI-B100 AOA**, **AI-B100 Radar**, or **AI-B100 DetectX**.
 4. Go to the **LoRA Bridge** tab:
    - **Bridge IP Address:** 192.168.1.250
    - **Bridge API Port:** 81
    - **Bridge API User:** `lorabridge`
    - **Bridge API Password:** `lorabridge`
-   - **Callback IP Address:** 192.168.1.200
-   - **HTTP Callback:** Auto-configure
+   - **HTTP Callback Address:** 192.168.1.200
    - **HTTP Callback Port:** 80
-   - Click **Save**.
-5. If the bridge is connected, the status will be shown on the page.
-
-![LoRA Bridge](images/acap-bridge.png)
+   - **Callback User:** `lorabridge`
+   - **Callback Password:** `lorabridge`
+   - Click **Save Settings**. The ACAP then configures the bridge callbacks and requests bridge status.
+5. Verify that the page shows **Bridge HTTP: Connected**, **Callbacks: Active**, and **HTTP API: Enabled**.
 
 6. Configure the selected analytics use case:
-   - For AOA, use **Counting** and **Occupancy** to select AOA scenarios, object classes, occupancy areas, and value types.
-   - For Radar, use **Radar**, **Occupancy**, and **Detection Alert** to set sensitivity, labels, publish behavior, and optional areas of interest.
+   - For AOA, use **Counting**, **Occupancy**, and **Presence Alert** to select scenarios, classes, occupancy values, alert thresholds, and areas.
+   - For Radar, use **Occupancy**, **Detection Alert**, **Speed**, and **Radar** to configure labels, publish behavior, speed measurement, areas of interest, and sensitivity. Counting remains reserved and is not an active deployment use case.
+   - For DetectX, use **Occupancy** to draw the area of interest, select 1-5 labels in model order, and choose descriptive confidence and overlap-handling levels. The model is fixed when the ACAP is built and cannot be uploaded by an operator.
 
-![AOA Counters](images/aoa-counters.png)
-
-> The ACAP saves counters periodically and resumes the values after reboot. Note that the values published over LoRaWAN are 16-bit unsigned and will wrap around at 65535.
+> AOA Counting totals persist across restarts. Their LoRaWAN values are 16-bit unsigned and wrap modulo 65536; other use cases have their own payload contracts.
 
 7. Go to the **Publish** tab:
    - Enable the streams that should publish.
@@ -199,14 +207,16 @@ These deployments normally use a small protected network containing only the PoE
    - Confirm the fixed LoRaWAN ports shown by the UI.
    - Click **Publish Now** to test an uplink.
 
-![Counter page](images/acap-counters.png)
+For DetectX, port 2 contains exactly one occupancy byte per selected label. Download a new decoder after changing the selection because its byte-to-label mapping is part of the payload contract.
+
+![AI-B100 AOA Publish page](images/aoa-publish.png)
 
 ---
 
 ### Step 5: Set Up the LoRaWAN Subscriber
 
 1. Connect to your LoRaWAN provider's MQTT broker. You will need the address, username, password, and topic where data is published.
-2. On the ACAP **About** page, click **Download JavaScript Translator** to get the JavaScript code for parsing the binary payload published over LoRaWAN.
+2. On the ACAP **Publish** or **About** page, open or download the **Data Decoder** JavaScript for parsing binary uplinks. The **LoRA Downlink** page provides the OTA Encoder and OTA Decoder where supported.
 
 ---
 
@@ -220,7 +230,9 @@ These deployments normally use a small protected network containing only the PoE
 
 ---
 
-## Configuration Reference
+## Shared Bridge Configuration Reference
+
+The following settings are common to fresh AOA, Radar, and DetectX 2.0.0 installations. LoRaWAN use-case ports and transmission objects differ by variant and are documented in each app's README.
 
 ```json
 {
@@ -235,24 +247,6 @@ These deployments normally use a small protected network containing only the PoE
       "callbackDigestUser": "lorabridge",
       "callbackDigestPassword": "lorabridge"
    },
-   "lorawan": {
-      "port": 1,
-      "confirmed": false,
-      "dataRate": 4,
-      "autoJoin": true
-   },
-   "transmission": {
-      "counting": {
-         "enabled": true,
-         "intervalMinutes": 15,
-         "port": 1
-      },
-      "occupancy": {
-         "enabled": false,
-         "intervalMinutes": 15,
-         "port": 2
-      }
-   },
    "polling": {
       "healthCheckIntervalSeconds": 60
    }
@@ -264,7 +258,11 @@ These deployments normally use a small protected network containing only the PoE
 | Setting | Description | Recommendation |
 |---------|-------------|----------------|
 | `b100.ip` | AI-B100 bridge IP address | `192.168.1.250` (same subnet as camera) |
+| `b100.port` | Authenticated bridge HTTP API port | `81` for bridge firmware 2.0.0 and later; `80` for legacy firmware |
+| `b100.apiDigestUser` / `apiDigestPassword` | Credentials used by the ACAP when calling the bridge API | Same `lorabridge` / `lorabridge` service credentials used for callbacks |
 | `b100.callbackIP` | Camera callback address used by the bridge | `192.168.1.200` |
+| `b100.callbackPort` | Camera HTTP port used for bridge callbacks | `80` |
+| `b100.callbackDigestUser` / `callbackDigestPassword` | Axis Viewer credentials used by the bridge when calling the ACAP | Same `lorabridge` / `lorabridge` service credentials used for the bridge API |
 | `b100.timeout` | HTTP timeout in seconds | 30s (device can be slow) |
 | `lorawan.port` | Legacy/default LoRaWAN uplink port metadata | Fixed app ports are shown by the UI |
 | `lorawan.confirmed` | Request downlink ACK for uplinks | `false` (saves airtime) |
@@ -320,7 +318,9 @@ The AI-B100 operates in **Class C** (continuous receive). This means:
 
 | Symptom | Check |
 |---------|-------|
-| "Not Connected" on Bridge page | Verify AI-B100 IP is `192.168.1.250` and reachable (connect laptop and ping) |
+| "Not Connected" on Bridge page | Verify AI-B100 IP `192.168.1.250`, API port `81`, and Bridge API User/Password |
+| HTTP 401 or authentication failure | Ensure the bridge API account and ACAP Bridge API credentials are identical |
+| Callbacks are not active | Ensure Callback User/Password match the camera Viewer account and callback address is `192.168.1.200:80` |
 | Connection timeout | Ensure camera and AI-B100 are on the same subnet (`192.168.1.x/24`) |
 | Intermittent disconnects | Check PoE switch — ensure it delivers sufficient PoE wattage to both devices |
 
@@ -355,13 +355,11 @@ The AI-B100 operates in **Class C** (continuous receive). This means:
 
 ### Remote Management via Downlink
 
-Once deployed, the system can be managed entirely via LoRaWAN downlinks:
-- Restart the bridge (port 100, command `0x01`)
-- Initiate a new LoRaWAN join (port 100, command `0x02`)
-- Reset app state or counters (port 100, command `0x03`)
-- Change supported transmission interval settings (port 110, command `0x01`)
-- Change data rate or ADR (port 110, commands `0x02` and `0x03`)
-- Request camera, bridge, or signal-quality information (port 120, commands `0x01` to `0x03`)
+Once deployed, supported settings and actions can be managed through LoRaWAN downlinks. The available actions and configuration services differ by ACAP variant, so use the generated **OTA Encoder** and **OTA Decoder** from the LoRA Downlink page instead of constructing raw command bytes by hand.
+
+- [AOA encoder and decoder guide](aoa/decoder/README.md)
+- [Radar encoder and decoder guide](radar/decoder/README.md)
+- DetectX embeds its current label mapping in the generated OTA JavaScript available from its backend endpoints.
 
 ### Firmware Updates
 
@@ -385,6 +383,8 @@ State is reset only by:
 ## Security Considerations
 
 - The camera and AI-B100 communicate over an isolated LAN — no internet exposure
+- Bridge API and callback requests use HTTP Digest authentication in firmware/application 2.0.0; HTTP itself is not encrypted, so keep this network isolated and trusted
+- The recommended shared `lorabridge` service credentials simplify managed installations; use unique strong site credentials where the local network is not physically protected
 - LoRaWAN payloads are encrypted (AES-128) between the device and network server
 - Only numeric counters are transmitted — no images or video leave the site
 - The ACAP web UI is protected by the camera's existing authentication

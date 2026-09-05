@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>AI-B100 DetectX</title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/pages.js"></script>
+	<script src="js/chrome.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		.publish-log { font-family: monospace; font-size: .82rem; }
+		.countdown, .occupancy-maximum { font-variant-numeric: tabular-nums; }
+		#translator-content { font-family: monospace; font-size: .82rem; min-height: 60vh; }
+		.use-case-title { align-items: center; color: #1a2a6c; display: inline-flex; gap: .4rem; text-decoration: none; }
+		.use-case-title:hover, .use-case-title:focus-visible { color: #2d4a9e; text-decoration: underline; }
+		.use-case-title .use-case-arrow { font-size: 1.35rem; line-height: 1; }
+	</style>
+</head>
+<body>
+	<header class="app-header"><div class="app-name" id="app-name">AI-B100 DetectX</div><nav class="nav-bar" id="nav-bar"></nav></header>
+	<main class="page-content">
+		<div class="row g-3">
+			<div class="col-12 col-lg-5">
+				<div class="card h-100">
+					<div class="card-header"><h5 class="card-title mb-0"><a class="use-case-title" href="occupancy.html">Occupancy Publishing <span class="use-case-arrow" aria-hidden="true">&rsaquo;</span></a></h5></div>
+					<div class="card-body">
+						<div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="enabled"><label class="form-check-label" for="enabled">Scheduled publishing</label></div>
+						<label class="form-label" for="interval">Publish Interval: <strong id="interval-value">15</strong> m</label>
+						<input class="form-range mb-3" type="range" min="1" max="60" value="15" id="interval">
+						<div class="d-flex justify-content-between"><span>LoRaWAN port</span><strong>2</strong></div>
+						<div class="d-flex justify-content-between"><span>Next publish</span><strong class="countdown" id="next">-</strong></div>
+						<hr>
+						<div class="d-flex justify-content-between align-items-center mb-2"><span>Current maximum occupancy</span><span class="small text-muted" id="maximum-state"></span></div>
+						<div class="table-responsive"><table class="table table-sm mb-0"><thead><tr><th>Label</th><th class="text-end">Maximum</th></tr></thead><tbody id="occupancy-maxima"><tr><td colspan="2" class="text-muted">No labels selected</td></tr></tbody></table></div>
+					</div>
+					<div class="card-footer d-flex flex-wrap gap-2"><button class="btn btn-primary" id="save">Save</button><button class="btn btn-outline-primary" id="publish">Publish Now</button></div>
+				</div>
+			</div>
+			<div class="col-12 col-lg-7">
+				<div class="card h-100"><div class="card-header d-flex justify-content-between align-items-center gap-2"><h5 class="card-title mb-0">Recent Uplinks</h5><button class="btn btn-sm btn-outline-secondary" id="open-translator" type="button">Download Translator</button></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-sm mb-0 publish-log"><thead><tr><th>Time</th><th>Payload</th><th>Result</th></tr></thead><tbody id="publishes"></tbody></table></div></div></div>
+			</div>
+		</div>
+	</main>
+	<div class="modal fade" id="translator-modal" tabindex="-1" aria-labelledby="translator-title" aria-hidden="true">
+		<div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+			<div class="modal-header"><h5 class="modal-title" id="translator-title">Data Decoder</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+			<div class="modal-body"><textarea class="form-control" id="translator-content" spellcheck="false" readonly></textarea></div>
+			<div class="modal-footer"><a class="btn btn-outline-primary" id="download-translator" href="translator">Download</a><button class="btn btn-primary" id="copy-translator" type="button">Copy</button><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Close</button></div>
+		</div></div>
+	</div>
+<script>
+let settings={};
+let nextPublish=0;
+let translatorModal;
+function escapeText(value){return $('<div>').text(value==null?'':value).html();}
+function countdownText(target){
+	if(!target)return '-';
+	const seconds=Math.max(0,Math.ceil(target-Date.now()/1000));
+	const hours=Math.floor(seconds/3600),minutes=Math.floor((seconds%3600)/60),remaining=seconds%60;
+	return (hours?hours+':':'')+String(minutes).padStart(hours?2:1,'0')+':'+String(remaining).padStart(2,'0');
+}
+function updateCountdown(){$('#next').text(countdownText(nextPublish));}
+function updateStatus(status){
+	const occupancy=status.occupancy||{};
+	nextPublish=occupancy.enabled&&occupancy.selectionValid?Number(occupancy.nextPublish)||0:0;
+	updateCountdown();
+	const labels=occupancy.labels||[];
+	$('#maximum-state').text(!occupancy.selectionValid?'Select labels':occupancy.publishInFlight?'Publishing...':'');
+	$('#occupancy-maxima').html(labels.map(function(item){return '<tr><td>'+escapeText(item.label)+'</td><td class="text-end occupancy-maximum">'+escapeText(item.intervalMaximum)+'</td></tr>';}).join('')||'<tr><td colspan="2" class="text-muted">No labels selected</td></tr>');
+	const log=status.lorawan?.publishes||[];
+	$('#publishes').html(log.slice().reverse().map(function(item){return '<tr><td>'+escapeText(item.time)+'</td><td>'+escapeText(item.payload)+'</td><td class="'+(item.success?'text-success':'text-danger')+'">'+(item.success?'Sent':'Failed')+'</td></tr>';}).join('')||'<tr><td colspan="3" class="text-muted">No uplinks yet</td></tr>');
+	const dot=$('#lora-nav-dot').removeClass('lora-joined lora-connected lora-disconnected');
+	dot.addClass(status.lorawan?.joined?'lora-joined':status.lorawan?.connected?'lora-connected':'lora-disconnected');
+}
+function refresh(){$.getJSON('status',updateStatus);}
+async function openTranslator(){
+	const button=$('#open-translator').prop('disabled',true).text('Loading...');
+	try{
+		const response=await fetch('translator',{cache:'no-store'});
+		if(!response.ok)throw new Error('HTTP '+response.status);
+		const source=await response.text();
+		if(!source.trim())throw new Error('Empty response');
+		$('#translator-content').val(source);
+		translatorModal.show();
+	}catch(error){showToast('Failed to load translator: '+error.message,'danger');}
+	finally{button.prop('disabled',false).text('Download Translator');}
+}
+function copyTranslator(){
+	const area=document.getElementById('translator-content'),text=area.value;
+	if(!text)return;
+	if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){showToast('Translator copied','success');}).catch(function(){area.select();document.execCommand('copy');});}
+	else{area.select();document.execCommand('copy');showToast('Translator copied','success');}
+}
+$(function(){
+	translatorModal=new bootstrap.Modal(document.getElementById('translator-modal'));
+	$('#open-translator').on('click',openTranslator);
+	$('#copy-translator').on('click',copyTranslator);
+	$('#interval').on('input',function(){$('#interval-value').text(this.value);});
+	$.getJSON('settings',function(value){settings=value;const occupancy=settings.transmission?.occupancy||{};const interval=occupancy.intervalMinutes||15;$('#enabled').prop('checked',!!occupancy.enabled);$('#interval').val(interval);$('#interval-value').text(interval);});
+	$('#save').on('click',function(){
+		const interval=Number($('#interval').val());
+		if(!Number.isInteger(interval)||interval<1||interval>60){showToast('Interval must be 1-60 minutes','danger');return;}
+		const existing=settings.transmission?.occupancy||{};
+		const occupancy=Object.assign({},existing,{enabled:$('#enabled').prop('checked'),port:2,intervalMinutes:interval});
+		$.ajax({type:'POST',url:'settings',contentType:'application/json',data:JSON.stringify({transmission:{occupancy}}),success:function(){settings.transmission={occupancy};showToast('Publishing settings saved','success');refresh();},error:function(xhr){showToast(xhr.responseText||'Save failed','danger');}});
+	});
+	$('#publish').on('click',function(){$.post('publish?stream=occupancy').done(function(){showToast('Publish accepted','success');refresh();}).fail(function(xhr){showToast(xhr.responseText||'Publish failed','danger');});});
+	refresh();setInterval(refresh,1000);setInterval(updateCountdown,250);
+});
+</script>
+</body>
+</html>

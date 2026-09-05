@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>DetectX Downlinks</title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/pages.js"></script>
+	<script src="js/chrome.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		#translator-content { font-family: monospace; font-size: .82rem; min-height: 60vh; }
+		.command-table code { white-space: nowrap; }
+	</style>
+</head>
+<body>
+	<header class="app-header"><div class="app-name" id="app-name">AI-B100 DetectX</div><nav class="nav-bar" id="nav-bar"></nav></header>
+	<main class="page-content">
+		<div class="row g-3">
+			<div class="col-12 col-lg-8">
+				<div class="card">
+					<div class="card-header"><h5 class="card-title mb-0">Recent Downlinks</h5></div>
+					<div class="card-body p-0"><div class="table-responsive"><table class="table table-sm mb-0"><thead><tr><th>Time</th><th>Port</th><th>Type</th><th>Payload</th><th>RSSI</th><th>SNR</th></tr></thead><tbody id="messages"></tbody></table></div></div>
+				</div>
+			</div>
+			<div class="col-12 col-lg-4">
+				<div class="card">
+					<div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+						<h5 class="card-title mb-0">OTA Services</h5>
+						<div class="d-flex gap-2"><button class="btn btn-sm btn-secondary open-translator" data-endpoint="ota_encoder" data-title="OTA Encoder" type="button">OTA Encoder</button><button class="btn btn-sm btn-secondary open-translator" data-endpoint="ota_decoder" data-title="OTA Decoder" type="button">OTA Decoder</button></div>
+					</div>
+					<div class="card-body p-0"><div class="table-responsive"><table class="table table-sm mb-0 command-table"><thead><tr><th>Port</th><th>Payload</th><th>Action</th></tr></thead><tbody>
+						<tr><td>100</td><td><code>01</code></td><td>Restart bridge</td></tr>
+						<tr><td>100</td><td><code>02</code></td><td>Join network</td></tr>
+						<tr><td>100</td><td><code>03</code></td><td>Publish occupancy</td></tr>
+						<tr><td>110</td><td><code>01 nn</code></td><td>Set interval, 1-60 min</td></tr>
+						<tr><td>110</td><td><code>02 nn</code></td><td>Set DR0-DR5</td></tr>
+						<tr><td>110</td><td><code>03 nn</code></td><td>Set ADR</td></tr>
+						<tr><td>120</td><td><code>01</code></td><td>Camera info to 121</td></tr>
+						<tr><td>120</td><td><code>02</code></td><td>Bridge info to 122</td></tr>
+						<tr><td>120</td><td><code>03</code></td><td>Refresh link status</td></tr>
+					</tbody></table></div></div>
+				</div>
+			</div>
+		</div>
+	</main>
+	<div class="modal fade" id="translator-modal" tabindex="-1" aria-labelledby="translator-title" aria-hidden="true">
+		<div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+			<div class="modal-header"><h5 class="modal-title" id="translator-title">OTA JavaScript</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+			<div class="modal-body"><textarea class="form-control" id="translator-content" spellcheck="false" readonly></textarea></div>
+			<div class="modal-footer"><a class="btn btn-outline-primary" id="download-translator" href="#">Download</a><button class="btn btn-primary" id="copy-translator" type="button">Copy</button><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Close</button></div>
+		</div></div>
+	</div>
+<script>
+let translatorModal;
+function escapeText(value){return $('<div>').text(value==null?'':value).html();}
+function refresh(){
+	$.getJSON('status',function(status){
+		const rows=status.lorawan?.downlinks||[];
+		$('#messages').html(rows.slice().reverse().map(function(item){return '<tr><td>'+escapeText(item.time)+'</td><td>'+item.port+'</td><td>'+escapeText(item.payload_type)+'</td><td><code>'+escapeText(item.payload)+'</code></td><td>'+item.rssi+'</td><td>'+item.snr+'</td></tr>';}).join('')||'<tr><td colspan="6" class="text-muted p-3">No downlinks received</td></tr>');
+	});
+}
+async function openTranslator(button){
+	const endpoint=$(button).data('endpoint'),title=$(button).data('title'),original=$(button).text();
+	$(button).prop('disabled',true).text('Loading...');
+	try{
+		const response=await fetch(endpoint,{cache:'no-store'});
+		if(!response.ok)throw new Error('HTTP '+response.status);
+		const source=await response.text();
+		if(!source.trim())throw new Error('Empty response');
+		$('#translator-title').text(title);
+		$('#translator-content').val(source);
+		$('#download-translator').attr('href',endpoint);
+		translatorModal.show();
+	}catch(error){showToast('Failed to load '+title+': '+error.message,'danger');}
+	finally{$(button).prop('disabled',false).text(original);}
+}
+function copyTranslator(){
+	const area=document.getElementById('translator-content'),text=area.value;
+	if(!text)return;
+	if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){showToast('JavaScript copied','success');}).catch(function(){area.select();document.execCommand('copy');});}
+	else{area.select();document.execCommand('copy');showToast('JavaScript copied','success');}
+}
+$(function(){
+	translatorModal=new bootstrap.Modal(document.getElementById('translator-modal'));
+	$('.open-translator').on('click',function(){openTranslator(this);});
+	$('#copy-translator').on('click',copyTranslator);
+	refresh();
+	setInterval(refresh,5000);
+});
+</script>
+</body>
+</html>

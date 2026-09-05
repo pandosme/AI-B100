@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>DetectX Occupancy</title>
+	<link rel="stylesheet" href="css/bootstrap.min.css">
+	<link rel="stylesheet" href="css/app.css">
+	<script src="js/jquery-3.7.1.min.js"></script>
+	<script src="js/pages.js"></script>
+	<script src="js/chrome.js"></script>
+	<script src="js/bootstrap.bundle.min.js"></script>
+	<script src="js/toast.js"></script>
+	<style>
+		.video-stage { position: relative; width: 100%; max-width: 960px; background: #000; overflow: hidden; touch-action: none; }
+		.video-stage img, .video-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+		.video-stage img { object-fit: fill; }
+		.video-stage svg { z-index: 2; }
+		.detection-box { fill: none; stroke: #ffc107; vector-effect: non-scaling-stroke; stroke-width: 2; pointer-events: none; }
+		.detection-label { fill: #111; font-weight: 600; pointer-events: none; }
+		.detection-label-bg { fill: #ffc107; opacity: .9; pointer-events: none; }
+		#aoi-polygon { fill: rgba(13,110,253,.12); stroke: #0d6efd; vector-effect: non-scaling-stroke; stroke-width: 3; }
+		.aoi-handle { fill: #fff; stroke: #0d6efd; vector-effect: non-scaling-stroke; stroke-width: 3; cursor: move; }
+		.label-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: .4rem 1rem; }
+		.info-tip { display: inline-grid; place-items: center; width: 1.15rem; height: 1.15rem; margin-left: .3rem; padding: 0; border: 1px solid #6c757d; border-radius: 50%; background: transparent; color: #495057; font-size: .72rem; font-weight: 700; line-height: 1; vertical-align: text-top; }
+		.capture-mode-tooltip .tooltip-inner { max-width: 320px; text-align: left; }
+		.status-line { font-variant-numeric: tabular-nums; }
+	</style>
+</head>
+<body>
+	<header class="app-header"><div class="app-name" id="app-name">AI-B100 DetectX</div><nav class="nav-bar" id="nav-bar"></nav></header>
+	<main class="page-content">
+		<div class="row g-3">
+			<div class="col-12 col-xl-8">
+				<div class="card">
+					<div class="card-header d-flex justify-content-between align-items-center"><h5 class="card-title mb-0">Live Detection</h5><span class="small text-muted status-line"><span id="detection-count">0</span> objects</span></div>
+					<div class="card-body p-0"><div class="video-stage" id="video-stage"><img id="video" alt="Live camera video"><svg id="overlay" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none"><g id="detection-layer"></g><polygon id="aoi-polygon"></polygon><g id="aoi-handles"></g></svg></div></div>
+					<div class="card-footer d-flex justify-content-between align-items-center"><span class="small text-muted" id="last-frame">Waiting for detections</span><button class="btn btn-sm btn-outline-secondary" id="reset-area" type="button">Reset area</button></div>
+				</div>
+			</div>
+			<div class="col-12 col-xl-4">
+				<div class="card mb-3">
+					<div class="card-header"><h5 class="card-title mb-0">Detection Settings</h5></div>
+					<div class="card-body">
+						<div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="area-enabled"><label class="form-check-label" for="area-enabled">Use area of interest</label><button class="info-tip" type="button" data-bs-toggle="tooltip" title="Only detections whose center point is inside the blue polygon are counted.">i</button></div>
+						<label class="form-label" for="capture-mode">Capture mode<button class="info-tip" type="button" data-bs-toggle="tooltip" data-bs-placement="left" data-bs-custom-class="capture-mode-tooltip" title="Center-cropping fills the model input without distortion and gives the most detail, but removes image edges. Balanced captures 4:3 and scales it to 1:1, retaining more area and using every model pixel, with some distortion. Letterbox preserves the full 16:9 view and proportions, but black bars reduce useful detection pixels.">i</button></label>
+						<select class="form-select mb-3" id="capture-mode"><option value="crop">Center-cropping</option><option value="balanced">Balanced</option><option value="letterbox">Letterbox</option></select>
+						<label class="form-label" for="confidence">Detection confidence<button class="info-tip" type="button" data-bs-toggle="tooltip" title="Higher confidence reduces uncertain detections. Lower confidence finds more objects but may add false detections.">i</button></label>
+						<select class="form-select mb-3" id="confidence"><option value="0.70">Very selective</option><option value="0.55">Selective</option><option value="0.40">Balanced</option><option value="0.25">Sensitive</option><option value="0.15">Very sensitive</option></select>
+						<label class="form-label" for="overlap">Overlapping detections<button class="info-tip" type="button" data-bs-toggle="tooltip" title="Controls when overlapping boxes for the same label are treated as one object. Choose Keep separate when nearby objects are often merged.">i</button></label>
+						<select class="form-select" id="overlap"><option value="0.30">Merge overlapping boxes</option><option value="0.45">Balanced</option><option value="0.65">Keep nearby objects separate</option></select>
+					</div>
+				</div>
+				<div class="card">
+					<div class="card-header d-flex flex-column flex-sm-row justify-content-between align-items-stretch align-items-sm-center gap-2"><h5 class="card-title mb-0">Detected Labels<button class="info-tip" type="button" data-bs-toggle="tooltip" title="Select 1-5 labels. Their interval maximum values are sent as bytes in model order on LoRaWAN port 2.">i</button></h5><button class="btn btn-primary text-nowrap" id="save" type="button">Save Occupancy</button></div>
+					<div class="card-body"><div class="label-grid" id="labels"></div></div>
+				</div>
+			</div>
+		</div>
+	</main>
+<script>
+const SVG_NS='http://www.w3.org/2000/svg';
+let settings={},model={},areaPoints=[],dragIndex=-1,lastDetections=[];
+function nearestOption(select,value){let best=select.options[0],distance=Infinity;Array.from(select.options).forEach(function(option){const next=Math.abs(Number(option.value)-Number(value));if(next<distance){best=option;distance=next;}});select.value=best.value;}
+function defaultArea(){const width=model.modelWidth||640,height=model.modelHeight||640;return [{x:width*.1,y:height*.1},{x:width*.9,y:height*.1},{x:width*.9,y:height*.9},{x:width*.1,y:height*.9}];}
+function svgElement(name,attributes){const node=document.createElementNS(SVG_NS,name);Object.keys(attributes||{}).forEach(function(key){node.setAttribute(key,attributes[key]);});return node;}
+function renderLabels(){const selected=settings.transmission?.occupancy?.selectedLabels||[];const container=$('#labels').empty();(model.labels||[]).forEach(function(label,index){const id='label-'+index;const input=$('<input>',{class:'form-check-input model-label',type:'checkbox',value:label,id:id}).prop('checked',selected.includes(label));container.append($('<div>',{class:'form-check'}).append(input,$('<label>',{class:'form-check-label',for:id,text:label})));});}
+function renderOverlay(){
+	const width=model.modelWidth||640,height=model.modelHeight||640;
+	const detectionLayer=document.getElementById('detection-layer');detectionLayer.replaceChildren();
+	lastDetections.forEach(function(object){const x=object.x*width,y=object.y*height,w=object.w*width,h=object.h*height;detectionLayer.appendChild(svgElement('rect',{class:'detection-box',x:x,y:y,width:w,height:h}));const text=(object.label||'')+' '+Math.round((object.c||0)*100)+'%';const labelWidth=Math.max(52,text.length*7.2);detectionLayer.appendChild(svgElement('rect',{class:'detection-label-bg',x:x,y:Math.max(0,y-20),width:labelWidth,height:20}));const label=svgElement('text',{class:'detection-label',x:x+4,y:Math.max(15,y-5),'font-size':14});label.textContent=text;detectionLayer.appendChild(label);});
+	const enabled=$('#area-enabled').prop('checked');const polygon=document.getElementById('aoi-polygon');polygon.setAttribute('points',areaPoints.map(function(point){return point.x+','+point.y;}).join(' '));polygon.style.display=enabled?'':'none';
+	const handles=document.getElementById('aoi-handles');handles.replaceChildren();if(enabled)areaPoints.forEach(function(point,index){const handle=svgElement('circle',{class:'aoi-handle',cx:point.x,cy:point.y,r:Math.max(width,height)*.014,'data-index':index});handle.addEventListener('pointerdown',beginDrag);handles.appendChild(handle);});
+}
+function pointerPosition(event){const svg=document.getElementById('overlay'),box=svg.getBoundingClientRect(),width=model.modelWidth||640,height=model.modelHeight||640;return{x:Math.max(0,Math.min(width,(event.clientX-box.left)*width/box.width)),y:Math.max(0,Math.min(height,(event.clientY-box.top)*height/box.height))};}
+function beginDrag(event){dragIndex=Number(event.currentTarget.dataset.index);document.getElementById('overlay').setPointerCapture(event.pointerId);event.preventDefault();}
+function moveDrag(event){if(dragIndex<0)return;areaPoints[dragIndex]=pointerPosition(event);renderOverlay();}
+function endDrag(event){if(dragIndex<0)return;const svg=document.getElementById('overlay');if(svg.hasPointerCapture(event.pointerId))svg.releasePointerCapture(event.pointerId);dragIndex=-1;}
+function updateStatus(status){const detections=status.detections||{};lastDetections=detections.objects||[];$('#detection-count').text(detections.count||0);$('#last-frame').text(detections.lastFrame?'Updated '+detections.lastFrame:'Waiting for detections');renderOverlay();const dot=$('#lora-nav-dot').removeClass('lora-joined lora-connected lora-disconnected');dot.addClass(status.lorawan?.joined?'lora-joined':status.lorawan?.connected?'lora-connected':'lora-disconnected');}
+function pollForRestart(attempt){if(attempt>=30){showToast('Application restart timed out','warning');return;}$.ajax({url:'status',dataType:'json',cache:false,timeout:3000,success:function(){location.reload();},error:function(){setTimeout(function(){pollForRestart(attempt+1);},2000);}});}
+function restartForCaptureMode(){$.ajax({url:'/axis-cgi/applications/control.cgi?action=restart&package=aib100',cache:false,success:function(){showToast('Capture mode saved. Application is restarting','info');setTimeout(function(){pollForRestart(0);},3000);},error:function(xhr){showToast(xhr.responseText||'Capture mode saved, but application restart failed','warning');}});}
+function save(){const selected=$('.model-label:checked').map(function(){return this.value;}).get();if(selected.length<1||selected.length>5){showToast('Select 1-5 labels','danger');return;}const existing=settings.transmission?.occupancy||{};const occupancy=Object.assign({},existing,{port:2,selectedLabels:selected});const current=settings.detection||{};const captureMode=$('#capture-mode').val();const captureModeChanged=captureMode!==(model.captureMode||'balanced');const detection=Object.assign({},current,{captureMode:captureMode,confidence:Number($('#confidence').val()),nms:Number($('#overlap').val()),includeArea:$('#area-enabled').prop('checked')?areaPoints.map(function(point){return{x:Math.round(point.x),y:Math.round(point.y)};}):[],selectedLabels:selected});delete detection.excludeAreas;$.ajax({type:'POST',url:'settings',contentType:'application/json',data:JSON.stringify({transmission:{occupancy},detection}),success:function(){settings.transmission={occupancy};settings.detection=detection;if(captureModeChanged)restartForCaptureMode();else showToast('Occupancy settings saved','success');},error:function(xhr){showToast(xhr.responseText||'Save failed','danger');}});}
+$(function(){
+	Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]')).forEach(function(element){new bootstrap.Tooltip(element);});
+	$.when($.getJSON('settings'),$.getJSON('model')).done(function(settingsResult,modelResult){settings=settingsResult[0];model=modelResult[0];const width=model.modelWidth||640,height=model.modelHeight||640;const captureMode=model.captureMode||settings.detection?.captureMode||'balanced';let previewWidth=model.videoWidth||width,previewHeight=model.videoHeight||height,stageWidth=width,stageHeight=height,previewFit='fill';if(captureMode==='balanced'){stageWidth=previewWidth;stageHeight=previewHeight;}else if(captureMode==='letterbox'){previewWidth=Math.round((height*16/9)/8)*8;previewHeight=height;previewFit='contain';}$('#video-stage').css('aspect-ratio',stageWidth+' / '+stageHeight);$('#overlay').attr('viewBox','0 0 '+width+' '+height);$('#video').css('object-fit',previewFit).attr('src','/axis-cgi/mjpg/video.cgi?resolution='+previewWidth+'x'+previewHeight+'&compression=30');const detection=settings.detection||{};$('#capture-mode').val(detection.captureMode||'balanced');areaPoints=Array.isArray(detection.includeArea)&&detection.includeArea.length>=3?detection.includeArea:defaultArea();$('#area-enabled').prop('checked',Array.isArray(detection.includeArea)&&detection.includeArea.length>=3);nearestOption(document.getElementById('confidence'),detection.confidence??.40);nearestOption(document.getElementById('overlap'),detection.nms??.45);renderLabels();renderOverlay();}).fail(function(xhr){showToast(xhr.responseText||'Unable to load Occupancy settings','danger');});
+	$('#area-enabled').on('change',renderOverlay);$('#reset-area').on('click',function(){areaPoints=defaultArea();$('#area-enabled').prop('checked',true);renderOverlay();});$('#save').on('click',save);
+	const overlay=document.getElementById('overlay');overlay.addEventListener('pointermove',moveDrag);overlay.addEventListener('pointerup',endDrag);overlay.addEventListener('pointercancel',endDrag);
+	function refresh(){$.getJSON('status',updateStatus);}refresh();setInterval(refresh,1000);
+});
+</script>
+</body>
+</html>

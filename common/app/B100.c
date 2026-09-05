@@ -39,9 +39,9 @@ static char g_api_password[65] = {0};
 
 // Status
 static B100_Status g_status = {0};
+static pthread_mutex_t g_status_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char g_last_error[256] = {0};
 static time_t g_next_upload_timestamp = 0;
-static pthread_mutex_t g_duty_cycle_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Callbacks
 static B100_Downlink_Callback g_downlink_callback = NULL;
@@ -58,6 +58,13 @@ static pthread_mutex_t g_http_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_downlink_dedup_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int    g_downlink_dedup_init = 0;
 static unsigned int g_last_dispatched_fcntDown = 0;
+
+static void B100_Reset_Downlink_Dedup(void) {
+    pthread_mutex_lock(&g_downlink_dedup_mutex);
+    g_downlink_dedup_init = 0;
+    g_last_dispatched_fcntDown = 0;
+    pthread_mutex_unlock(&g_downlink_dedup_mutex);
+}
 
 // HTTP Response Buffer
 typedef struct {
@@ -306,8 +313,12 @@ int B100_Init(const char* ip, int port, int timeout_seconds) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
+    pthread_mutex_lock(&g_status_mutex);
     memset(&g_status, 0, sizeof(g_status));
     g_status.connected = B100_NOT_CONNECTED;
+    g_next_upload_timestamp = 0;
+    pthread_mutex_unlock(&g_status_mutex);
+    B100_Reset_Downlink_Dedup();
 
     LOG("Initialized: %s:%d (timeout: %ds)\n", g_ip, g_port, g_timeout);
     return 1;
@@ -415,6 +426,7 @@ int B100_Fetch_Device_Info(void) {
     cJSON* info = B100_Get_Info();
     if (!info) return 0;
 
+    pthread_mutex_lock(&g_status_mutex);
     parse_info_json(info);
     g_status.connected = B100_CONNECTED;
 
@@ -425,6 +437,7 @@ int B100_Fetch_Device_Info(void) {
         g_status.hardware, g_status.hardwareVersion,
         g_status.firmwareVersion, g_status.powerSource,
         g_status.devEUI, g_status.devAddrStr);
+    pthread_mutex_unlock(&g_status_mutex);
 
     cJSON_Delete(info);
     return 1;
@@ -538,6 +551,7 @@ cJSON* B100_Get_Params(const char* param) {
     if (json) {
         cJSON* data_rate = cJSON_GetObjectItem(json, "data_rate");
         cJSON* adr_enable = cJSON_GetObjectItem(json, "adr_enable");
+        pthread_mutex_lock(&g_status_mutex);
         if (data_rate && cJSON_IsNumber(data_rate)) {
             g_status.configuredDataRate = data_rate->valueint;
             g_status.hasConfiguredDataRate = 1;
@@ -546,6 +560,7 @@ cJSON* B100_Get_Params(const char* param) {
             g_status.configuredAdr = adr_enable->valueint ? 1 : 0;
             g_status.hasConfiguredAdr = 1;
         }
+        pthread_mutex_unlock(&g_status_mutex);
     }
     return json;
 }
@@ -563,6 +578,7 @@ int B100_Set_Params(cJSON* params) {
     if (http_code == 200) {
         cJSON* data_rate = cJSON_GetObjectItem(params, "data_rate");
         cJSON* adr_enable = cJSON_GetObjectItem(params, "adr_enable");
+        pthread_mutex_lock(&g_status_mutex);
         if (data_rate && cJSON_IsNumber(data_rate)) {
             g_status.configuredDataRate = data_rate->valueint;
             g_status.hasConfiguredDataRate = 1;
@@ -571,6 +587,7 @@ int B100_Set_Params(cJSON* params) {
             g_status.configuredAdr = adr_enable->valueint ? 1 : 0;
             g_status.hasConfiguredAdr = 1;
         }
+        pthread_mutex_unlock(&g_status_mutex);
         if (response) {
             cJSON* json = cJSON_Parse(response);
             if (json) {
@@ -603,15 +620,19 @@ int B100_Set_Params(cJSON* params) {
 
 int B100_Test_Connection(void) {
     if (B100_Fetch_Device_Info()) {
-        g_status.connected = B100_CONNECTED;
         return 1;
     }
+    pthread_mutex_lock(&g_status_mutex);
     g_status.connected = B100_NOT_CONNECTED;
+    pthread_mutex_unlock(&g_status_mutex);
     return 0;
 }
 
 int B100_Is_Connected(void) {
-    return g_status.connected == B100_CONNECTED;
+    pthread_mutex_lock(&g_status_mutex);
+    int connected = g_status.connected == B100_CONNECTED;
+    pthread_mutex_unlock(&g_status_mutex);
+    return connected;
 }
 
 // ==================================================================
@@ -645,7 +666,11 @@ const char* B100_Status_Text(int statusCode) {
 }
 
 B100_Status* B100_Get_Status(void) {
-    return &g_status;
+    static _Thread_local B100_Status snapshot;
+    pthread_mutex_lock(&g_status_mutex);
+    snapshot = g_status;
+    pthread_mutex_unlock(&g_status_mutex);
+    return &snapshot;
 }
 
 // Trigger a status request via GET /status.
@@ -657,16 +682,22 @@ int B100_Request_Status(void) {
     if (response) free(response);
 
     if (http_code == 202) {
+        pthread_mutex_lock(&g_status_mutex);
         g_status.connected = B100_CONNECTED;
+        pthread_mutex_unlock(&g_status_mutex);
         return 1;
     }
     if (http_code == 412) {
         snprintf(g_last_error, sizeof(g_last_error), "Callbacks not configured");
         LOG_WARN("Status request failed: callbacks not configured (412)\n");
+        pthread_mutex_lock(&g_status_mutex);
         g_status.connected = B100_CONNECTED;  // device is reachable
+        pthread_mutex_unlock(&g_status_mutex);
         return 0;
     }
+    pthread_mutex_lock(&g_status_mutex);
     g_status.connected = B100_NOT_CONNECTED;
+    pthread_mutex_unlock(&g_status_mutex);
     return 0;
 }
 
@@ -707,7 +738,7 @@ static int B100_String_Is_Hex(const char* value) {
     return hex_chars > 0 && (hex_chars % 2) == 0;
 }
 
-static int B100_Dispatch_Downlink_From_JSON(cJSON* json) {
+static int B100_Dispatch_Downlink_From_JSON(cJSON* json, const B100_Status* status) {
     if (!json || !g_downlink_callback)
         return 0;
 
@@ -730,7 +761,7 @@ static int B100_Dispatch_Downlink_From_JSON(cJSON* json) {
         payload_length = B100_Infer_Payload_Length(payload_item);
 
     if (payload_length <= 0) {
-        LOG("Callback payload present but length resolved to 0, fcntDown=%u\n", g_status.fcntDown);
+        LOG("Callback payload present but length resolved to 0, fcntDown=%u\n", status->fcntDown);
         return 0;
     }
 
@@ -741,9 +772,9 @@ static int B100_Dispatch_Downlink_From_JSON(cJSON* json) {
     // Deduplication by fcntDown when available
     int already_done = 0;
     pthread_mutex_lock(&g_downlink_dedup_mutex);
-    if (has_this_fcnt && g_downlink_dedup_init && this_fcnt > 0 && g_last_dispatched_fcntDown == this_fcnt)
+    if (has_this_fcnt && g_downlink_dedup_init && g_last_dispatched_fcntDown == this_fcnt)
         already_done = 1;
-    if (!already_done && has_this_fcnt && this_fcnt > 0) {
+    if (!already_done && has_this_fcnt) {
         g_last_dispatched_fcntDown = this_fcnt;
         g_downlink_dedup_init = 1;
     }
@@ -796,10 +827,10 @@ static int B100_Dispatch_Downlink_From_JSON(cJSON* json) {
     dl->length = payload_length;
     cJSON* port_item = cJSON_GetObjectItem(json, "port");
     if (port_item) dl->port = port_item->valueint;
-    dl->rssi = g_status.rssi;
-    dl->snr = g_status.snr;
+    dl->rssi = status->rssi;
+    dl->snr = status->snr;
     dl->fcntDown = has_this_fcnt ? (int)this_fcnt : 0;
-    dl->confirming = g_status.confirmed;
+    dl->confirming = status->confirmed;
 
     LOG("Downlink callback: port=%d, %d bytes, fcntDown=%u%s\n",
         dl->port, dl->length, this_fcnt, has_this_fcnt ? "" : " (not supplied)");
@@ -814,7 +845,10 @@ int B100_Process_Status_Callback(cJSON* json) {
     if (!json) return 0;
 
     cJSON* item;
+    B100_Status snapshot;
+    int reset_downlink_dedup = 0;
 
+    pthread_mutex_lock(&g_status_mutex);
     g_status.connected = B100_CONNECTED;
 
     if ((item = cJSON_GetObjectItem(json, "status"))) {
@@ -835,12 +869,16 @@ int B100_Process_Status_Callback(cJSON* json) {
                    g_status.statusCode == B100_STATUS_LOST_CONNECTION ||
                    g_status.statusCode == B100_STATUS_NOT_JOINED) {
             g_status.joined = 0;
+            reset_downlink_dedup = 1;
         }
         LOG_TRACE("Status callback: code=%d (%s) joined=%d\n",
                   g_status.statusCode, g_status.statusText, g_status.joined);
     }
 
-    if ((item = cJSON_GetObjectItem(json, "dev_addr"))) {
+    int retain_joined_metrics = g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
+                                g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
+                                g_status.statusCode == B100_STATUS_DUTY_CYCLE;
+    if (!retain_joined_metrics && (item = cJSON_GetObjectItem(json, "dev_addr"))) {
         if (cJSON_IsString(item)) {
             strncpy(g_status.devAddrStr, item->valuestring, sizeof(g_status.devAddrStr) - 1);
             if (strcmp(item->valuestring, "0") != 0)
@@ -864,9 +902,6 @@ int B100_Process_Status_Callback(cJSON* json) {
         g_status.snr = (float)item->valuedouble;
         g_status.hasSnr = 1;
     }
-    int retain_joined_metrics = g_status.statusCode == B100_STATUS_PAYLOAD_RECEIVED ||
-                                g_status.statusCode == B100_STATUS_PAYLOAD_SENT ||
-                                g_status.statusCode == B100_STATUS_DUTY_CYCLE;
     if (!retain_joined_metrics && (item = cJSON_GetObjectItem(json, "fcntUp"))) {
         g_status.fcntUp = (unsigned int)item->valueint;
         g_status.hasFcntUp = 1;
@@ -882,20 +917,21 @@ int B100_Process_Status_Callback(cJSON* json) {
     if ((item = cJSON_GetObjectItem(json, "tUnix")))
         g_status.tUnix = (unsigned long)item->valuedouble;
     if ((item = cJSON_GetObjectItem(json, "next_upload_ms"))) {
-        pthread_mutex_lock(&g_duty_cycle_mutex);
         g_status.nextUploadMs = (unsigned long)item->valuedouble;
         g_status.hasNextUploadMs = 1;
         g_next_upload_timestamp = time(NULL);
-        pthread_mutex_unlock(&g_duty_cycle_mutex);
     }
 
     g_status.timestamp = time(NULL);
+    snapshot = g_status;
+    pthread_mutex_unlock(&g_status_mutex);
+    if (reset_downlink_dedup) B100_Reset_Downlink_Dedup();
 
     // Some firmware/callback paths include downlink payloads on status callbacks.
-    B100_Dispatch_Downlink_From_JSON(json);
+    B100_Dispatch_Downlink_From_JSON(json, &snapshot);
 
     if (g_status_callback)
-        g_status_callback(&g_status);
+        g_status_callback(&snapshot);
 
     return 1;
 }
@@ -907,7 +943,9 @@ int B100_Process_Receive_Callback(cJSON* json) {
     if (!json) return 0;
 
     cJSON* item;
+    B100_Status snapshot;
 
+    pthread_mutex_lock(&g_status_mutex);
     g_status.connected = B100_CONNECTED;
 
     // Update signal quality and timing
@@ -928,11 +966,9 @@ int B100_Process_Receive_Callback(cJSON* json) {
     if ((item = cJSON_GetObjectItem(json, "tUnix")))
         g_status.tUnix = (unsigned long)item->valuedouble;
     if ((item = cJSON_GetObjectItem(json, "next_upload_ms"))) {
-        pthread_mutex_lock(&g_duty_cycle_mutex);
         g_status.nextUploadMs = (unsigned long)item->valuedouble;
         g_status.hasNextUploadMs = 1;
         g_next_upload_timestamp = time(NULL);
-        pthread_mutex_unlock(&g_duty_cycle_mutex);
     }
 
     // Linkcheck fields (only present in linkcheck responses)
@@ -949,17 +985,18 @@ int B100_Process_Receive_Callback(cJSON* json) {
         g_status.fcntDown, g_status.rssi, g_status.snr);
 
     g_status.timestamp = time(NULL);
+    g_status.receiveTUnix = (unsigned long)time(NULL);
+    snapshot = g_status;
+    pthread_mutex_unlock(&g_status_mutex);
 
-    if (!B100_Dispatch_Downlink_From_JSON(json)) {
+    if (!B100_Dispatch_Downlink_From_JSON(json, &snapshot)) {
         cJSON* payload_item = cJSON_GetObjectItem(json, "payload");
         if (!payload_item)
-            LOG("Receive callback: no payload (ACK or linkcheck), fcntDown=%u\n", g_status.fcntDown);
+            LOG("Receive callback: no payload (ACK or linkcheck), fcntDown=%u\n", snapshot.fcntDown);
     }
 
-    g_status.receiveTUnix = (unsigned long)time(NULL);
-
     if (g_status_callback)
-        g_status_callback(&g_status);
+        g_status_callback(&snapshot);
 
     return 1;
 }
@@ -984,6 +1021,7 @@ int B100_Join(int drJoin, int adr, int drUp) {
     if (response) free(response);
 
     if (http_code == 202) {
+        B100_Reset_Downlink_Dedup();
         LOG("Join request accepted (DR join=%d, ADR=%d, DR=%d)\n", drJoin, adr, drUp);
         return 1;
     }
@@ -1013,9 +1051,12 @@ int B100_Restart(void) {
     if (response) free(response);
 
     if (http_code == 202) {
+        pthread_mutex_lock(&g_status_mutex);
         g_status.joined = 0;
         g_status.statusCode = B100_STATUS_RESTARTED;
         strncpy(g_status.statusText, "Restarted", sizeof(g_status.statusText) - 1);
+        pthread_mutex_unlock(&g_status_mutex);
+        B100_Reset_Downlink_Dedup();
         LOG("Device restart initiated\n");
         return 1;
     }
@@ -1029,9 +1070,9 @@ int B100_Restart(void) {
 // ==================================================================
 
 static int B100_Check_Uplink_Ready(void) {
-    pthread_mutex_lock(&g_duty_cycle_mutex);
+    pthread_mutex_lock(&g_status_mutex);
     if (!g_status.hasNextUploadMs || g_status.nextUploadMs == 0 || g_next_upload_timestamp == 0) {
-        pthread_mutex_unlock(&g_duty_cycle_mutex);
+        pthread_mutex_unlock(&g_status_mutex);
         return 1;
     }
 
@@ -1039,14 +1080,14 @@ static int B100_Check_Uplink_Ready(void) {
     if (elapsed_ms < 0)
         elapsed_ms = 0;
     if (elapsed_ms >= (double)g_status.nextUploadMs) {
-        pthread_mutex_unlock(&g_duty_cycle_mutex);
+        pthread_mutex_unlock(&g_status_mutex);
         return 1;
     }
 
     unsigned long remaining_ms = g_status.nextUploadMs - (unsigned long)elapsed_ms;
     snprintf(g_last_error, sizeof(g_last_error),
              "Bridge duty cycle active; retry in %.1f seconds", remaining_ms / 1000.0);
-    pthread_mutex_unlock(&g_duty_cycle_mutex);
+    pthread_mutex_unlock(&g_status_mutex);
     return 0;
 }
 

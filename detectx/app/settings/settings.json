@@ -1,0 +1,42 @@
+{
+  "variant": "detectx",
+  "settingsVersion": 3,
+  "b100": {
+    "ip": "192.168.1.250",
+    "port": 81,
+    "timeout": 30,
+    "apiDigestUser": "lorabridge",
+    "apiDigestPassword": "lorabridge",
+    "callbackIP": "192.168.1.200",
+    "callbackPort": 80,
+    "callbackDigestUser": "lorabridge",
+    "callbackDigestPassword": "lorabridge"
+  },
+  "lorawan": {
+    "port": 2,
+    "confirmed": false,
+    "dataRate": 4,
+    "autoJoin": true
+  },
+  "transmission": {
+    "occupancy": {
+      "enabled": false,
+      "port": 2,
+      "intervalMinutes": 15,
+      "selectedLabels": ["person"]
+    }
+  },
+  "detection": {
+    "captureMode": "balanced",
+    "objectness": 0.25,
+    "confidence": 0.30,
+    "nms": 0.45,
+    "minimumWidth": 0,
+    "minimumHeight": 0,
+    "includeArea": [],
+    "selectedLabels": ["person"]
+  },
+  "polling": {
+    "healthCheckIntervalSeconds": 60
+  }
+}

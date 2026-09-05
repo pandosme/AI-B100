@@ -59,7 +59,7 @@ Counting reads AOA `CrosslineCounting` scenario totals. The app keeps the scenar
 
 Occupancy manages AOA `OccupancyInArea` scenarios and reads the selected area values. It encodes one compact block per selected area on LoRaWAN port `2`, using the configured value type: maximum, minimum, or average.
 
-Presence Alert creates and manages independent AOA `occupancyInArea` scenarios with threshold events enabled. Each area configures a minimum number of objects and an AOA trigger delay. The ACAP maps `Device1Scenario<ID>Threshold` events back to the configured scenario ID because threshold events contain only `active`, not scenario name or type. AOA controls the high delay. When AOA goes low, the ACAP retains the internal high state for twice the configured trigger delay; another high event cancels that pending clear. State changes are sent on port `3`.
+Presence Alert creates and manages independent AOA scenes with threshold events enabled. Each alert configures a minimum number of objects, an AOA trigger delay, and a schedule. The ACAP maps `Device1Scenario<ID>Threshold` events back to the configured scenario ID because threshold events contain only `active`, not scenario name or type. AOA controls the high delay. When AOA goes low, the ACAP retains the internal high state for twice the configured trigger delay; another high event cancels that pending clear. State changes are sent on port `3`.
 
 The AI-B100 bridge handles all LoRaWAN radio work. The ACAP talks to the bridge over HTTP and receives bridge status, downlink, and GPS data by callback on the camera.
 
@@ -181,7 +181,7 @@ Example bytes for two uint16 values:
 
 ### Occupancy Payload
 
-Occupancy payloads are sent on port `2` and repeat one block per configured OccupancyInArea scenario.
+Occupancy payloads are sent on port `2` and repeat one block per sampled runtime OccupancyInArea scenario. Runtime order follows first AOA sample arrival, and unsampled areas are omitted. After every app or camera restart, wait for all configured areas to receive a sample and download a fresh decoder before consuming Occupancy payloads.
 
 ```text
 byte 0: labelCount, number of following label values for this area
@@ -231,6 +231,8 @@ three areas with only area 2 alert: [0x00, 0x01, 0x00]
 ## Decoder / Translator
 
 The app generates one JavaScript decoder for Counting, Occupancy, and Presence Alert. Download it from the Publish page or from the About page.
+
+See [decoder/README.md](decoder/README.md) for the complete Data Decoder and OTA Encoder/Decoder structures, JSON examples, and Node-RED integration patterns.
 
 The decoder includes:
 
@@ -319,7 +321,7 @@ GET takes `[sceneIndex, page]`. The GET response body is byte-for-byte the same 
  totalPoints, useCaseFields..., packedPoint:u24, ...]
 ```
 
-Scene config version 2 exposes integer coordinates from 0 through 1000 with the origin at the top-left. `(0,0)` maps to AOA `(-1,-1)`, the center is `(500,500)`, and `(1000,1000)` maps to AOA `(1,1)`. Each point is packed little-endian into three bytes as `x | (y << 10)`; the upper four bits are reserved and must be zero. This reduces coordinate data from four to three bytes per point, allowing every supported ten-point scene to fit in one 51-byte frame.
+Scene config version 2 exposes integer coordinates from 0 through 1000 with the origin at the top-left. `(0,0)` maps to AOA `(-1,-1)`, the center is `(500,500)`, and `(1000,1000)` maps to AOA `(1,1)`. Each point is packed little-endian into three bytes as `x | (y << 10)`; the upper four bits are reserved and must be zero. This reduces coordinate data from four to three bytes per point. Counting and Occupancy fit ten points in one 51-byte frame; Presence Alert has more configuration fields and fits eight points per frame, so larger areas are paged.
 
 SET continues to accept legacy config version 1 coordinates as two signed Q15 integers for compatibility. GET and the generated encoder use version 2. The generated decoder always returns version 2-style integer coordinates and includes `coordinateSystem: {origin: "topLeft", minimum: 0, maximum: 1000}`. Scene and map CRC16 fingerprints reject messages created from a stale scene map.
 
@@ -503,7 +505,7 @@ The AOA and Radar variants both use `appName: "aib100"`. Install the AOA variant
 
 ## License
 
-MIT - see [app/LICENSE](app/LICENSE).
+MIT - see [../common/app/LICENSE](../common/app/LICENSE).
 
 ---
 

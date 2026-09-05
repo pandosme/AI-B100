@@ -170,6 +170,7 @@ cJSON* B100_Get_Params(const char* param);
 int B100_Set_Params(cJSON* params);
 
 // Status
+// The returned pointer is a per-thread snapshot, valid until the next call from that thread.
 B100_Status* B100_Get_Status(void);
 int B100_Request_Status(void);
 const char* B100_Status_Text(int statusCode);

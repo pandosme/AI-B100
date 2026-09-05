@@ -1,0 +1,36 @@
+[
+    {
+        "id": "002de1c3964a3711",
+        "type": "change",
+        "z": "94d49944e4af4e2e",
+        "name": "Extract hexstring message and port",
+        "rules": [
+            {
+                "t": "set",
+                "p": "topic",
+                "pt": "msg",
+                "to": "payload.event.encodedData.port",
+                "tot": "msg"
+            },
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "payload.event.encodedData.hexEncoded",
+                "tot": "msg"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 420,
+        "y": 80,
+        "wires": [
+            [
+                "3b408da012746a13"
+            ]
+        ]
+    }
+]

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "2.2.0",
+  "acapPackageConf": {
+    "setup": {
+      "friendlyName": "AI-B100 DetectX",
+      "appName": "aib100",
+      "vendor": "fred@juhlin.me",
+      "vendorId": "6d8351dbbe",
+      "vendorUrl": "https://pandosme.github.io",
+      "runMode": "respawn",
+      "version": "2.0.0",
+      "compatibleOsVersions": [
+        {
+          "min": "12",
+          "max": "13"
+        }
+      ]
+    },
+    "configuration": {
+      "settingPage": "index.html",
+      "httpConfig": [
+        {"name": "app", "access": "admin", "type": "fastCgi"},
+        {"name": "settings", "access": "admin", "type": "fastCgi"},
+        {"name": "status", "access": "viewer", "type": "fastCgi"},
+        {"name": "model", "access": "viewer", "type": "fastCgi"},
+        {"name": "counters", "access": "viewer", "type": "fastCgi"},
+        {"name": "publish", "access": "admin", "type": "fastCgi"},
+        {"name": "translator", "access": "viewer", "type": "fastCgi"},
+        {"name": "ota_encoder", "access": "viewer", "type": "fastCgi"},
+        {"name": "ota_decoder", "access": "viewer", "type": "fastCgi"},
+        {"name": "join", "access": "admin", "type": "fastCgi"},
+        {"name": "test", "access": "admin", "type": "fastCgi"},
+        {"name": "restart", "access": "admin", "type": "fastCgi"},
+        {"name": "send", "access": "admin", "type": "fastCgi"},
+        {"name": "b100_status", "access": "viewer", "type": "fastCgi"},
+        {"name": "b100_receive", "access": "viewer", "type": "fastCgi"},
+        {"name": "b100_gps", "access": "viewer", "type": "fastCgi"},
+        {"name": "b100_info", "access": "admin", "type": "fastCgi"},
+        {"name": "b100_params", "access": "admin", "type": "fastCgi"},
+        {"name": "b100_request_status", "access": "admin", "type": "fastCgi"},
+        {"name": "linkcheck", "access": "admin", "type": "fastCgi"},
+        {"name": "gps", "access": "viewer", "type": "fastCgi"}
+      ]
+    }
+  },
+  "resources": {
+    "dbus": {
+      "requiredMethods": [
+        "com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials"
+      ]
+    },
+    "deepLearningProcessor": {
+      "enabled": true,
+      "required": true
+    }
+  }
+}

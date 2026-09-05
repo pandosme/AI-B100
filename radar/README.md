@@ -21,6 +21,7 @@ Only numeric occupancy data is transmitted. No images or video leave the camera.
 For hardware setup, IP addressing, camera account setup, bridge LAN configuration, LoRaWAN registration, and field verification, use the shared guide:
 
 - [../DEPLOYMENT.md](../DEPLOYMENT.md)
+- [decoder/README.md](decoder/README.md) for Data Decoder, OTA Encoder/Decoder, JSON, and Node-RED integration examples
 
 The recommended field setup is:
 
@@ -127,12 +128,9 @@ Each use case has a fixed LoRaWAN port, so compact payloads do not include a mod
 | `3` | Detection Alert active | 1 byte: `[selected_label_active_max]` |
 | `4` | Speed | 5 bytes: `[vehicles, speeding, maximum, average, minimum]`, speeds in the configured unit |
 
-The decoder is available in two places:
+Open the Data Decoder from **Publish** or **About**, and open the unified OTA Encoder and OTA Decoder from **LoRA Downlink**. See [decoder/README.md](decoder/README.md) for the complete JavaScript API, payload structures, JSON examples, and Node-RED integration patterns.
 
-- [decoder/](decoder/), which holds a generated uplink decoder sample plus the OTA translators for the Radar (`130`), Occupancy (`132`), and Detection Alert (`133`) configuration ports
-- **Publish** or **About** page in the ACAP UI, using **Download JavaScript Translator**
-
-Download a fresh translator after changing Counting scene order/classes or another use-case mode.
+Download a fresh Data Decoder after changing Counting scene order/classes or the Speed unit or limit. The unified OTA scripts cover ports `100`, `110`, `111`, `120`, and `130` through `134` and are independent of the current settings.
 
 ## Downlink Commands
 
@@ -302,4 +300,4 @@ If an older `radaroccupancy` package is still installed, remove it before using 
 
 ## License
 
-MIT - see [app/LICENSE](app/LICENSE).
+MIT - see [../common/app/LICENSE](../common/app/LICENSE).
